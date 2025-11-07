@@ -27,6 +27,8 @@ final class AnalyzerMetadata
 
     /**
      * Create from array.
+     *
+     * @param array{id: string, name: string, description: string, category: string, severity: string, tags?: array<string>, docs_url?: string} $data
      */
     public static function fromArray(array $data): self
     {
@@ -43,6 +45,8 @@ final class AnalyzerMetadata
 
     /**
      * Convert to array.
+     *
+     * @return array<string, mixed>
      */
     public function toArray(): array
     {
@@ -54,6 +58,6 @@ final class AnalyzerMetadata
             'severity' => $this->severity->value,
             'tags' => $this->tags ?: null,
             'docs_url' => $this->docsUrl,
-        ], fn ($value) => $value !== null && $value !== []);
+        ], fn ($value) => $value !== null);
     }
 }

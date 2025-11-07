@@ -20,6 +20,8 @@ final class Location implements Stringable
 
     /**
      * Create from array.
+     *
+     * @param array{file: string, line: int, column?: int} $data
      */
     public static function fromArray(array $data): self
     {
@@ -32,6 +34,8 @@ final class Location implements Stringable
 
     /**
      * Convert to array.
+     *
+     * @return array<string, int|string>
      */
     public function toArray(): array
     {

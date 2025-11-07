@@ -43,6 +43,7 @@ class JsonFormatter implements ReporterInterface
      * Generate summary statistics.
      *
      * @param array<ResultInterface> $results
+     * @return array<string, int|float>
      */
     private function generateSummary(array $results): array
     {
@@ -61,7 +62,6 @@ class JsonFormatter implements ReporterInterface
                 'warning' => $warnings++,
                 'skipped' => $skipped++,
                 'error' => $errors++,
-                default => null,
             };
 
             $totalIssues += count($result->getIssues());

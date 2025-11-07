@@ -176,7 +176,7 @@ class CodeHelper
      */
     public static function countTodoComments(string $code): int
     {
-        return preg_match_all('/@?(TODO|FIXME|HACK|XXX|NOTE)/i', $code);
+        return (int) preg_match_all('/@?(TODO|FIXME|HACK|XXX|NOTE)/i', $code);
     }
 
     /**
@@ -188,7 +188,7 @@ class CodeHelper
     {
         preg_match_all('/\/\*\*(.*?)\*\//s', $code, $matches);
 
-        return $matches[0] ?? [];
+        return $matches[0];
     }
 
     /**

@@ -88,8 +88,10 @@ class IssueTest extends TestCase
         $array = $issue->toArray();
 
         $this->assertEquals('Test message', $array['message']);
-        $this->assertEquals('/path/to/file.php', $array['location']['file']);
-        $this->assertEquals(42, $array['location']['line']);
+        /** @var array<string, mixed> $location */
+        $location = $array['location'];
+        $this->assertEquals('/path/to/file.php', $location['file']);
+        $this->assertEquals(42, $location['line']);
         $this->assertEquals('high', $array['severity']);
         $this->assertEquals('Fix it', $array['recommendation']);
         $this->assertEquals('some code', $array['code']);
@@ -123,6 +125,7 @@ class IssueTest extends TestCase
         );
 
         $this->expectException(\Error::class);
+        // @phpstan-ignore-next-line - Testing that readonly property throws error
         $issue->message = 'New message';
     }
 }
