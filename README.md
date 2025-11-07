@@ -4,7 +4,7 @@ Shared foundation for building static analysis tools. Includes abstract analyzer
 
 ## Features
 
-- **Framework Agnostic**: Works with any PHP 8.0.2+ project
+- **Framework Agnostic**: Works with any PHP 8.1+ project
 - **Type Safe**: Full type hints and strict typing
 - **Extensible**: Easy to create custom analyzers
 - **Well Tested**: Comprehensive test suite (95%+ coverage)
@@ -13,7 +13,7 @@ Shared foundation for building static analysis tools. Includes abstract analyzer
 
 ## Requirements
 
-- PHP 8.0.2 or higher
+- PHP 8.1 or higher
 - Composer
 
 ## Installation
