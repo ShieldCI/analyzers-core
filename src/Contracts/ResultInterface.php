@@ -41,6 +41,8 @@ interface ResultInterface
 
     /**
      * Get metadata.
+     *
+     * @return array<string, mixed>
      */
     public function getMetadata(): array;
 
@@ -51,6 +53,8 @@ interface ResultInterface
 
     /**
      * Convert to array.
+     *
+     * @return array<string, mixed>
      */
     public function toArray(): array;
 }

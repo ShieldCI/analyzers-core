@@ -9,7 +9,7 @@ use ShieldCI\AnalyzersCore\Support\FileParser;
 
 class FileParserTest extends TestCase
 {
-    private string $testDir;
+    private string $testDir = '';
 
     protected function setUp(): void
     {
@@ -22,7 +22,7 @@ class FileParserTest extends TestCase
     {
         parent::tearDown();
         if (is_dir($this->testDir)) {
-            $files = array_diff(scandir($this->testDir), ['.', '..']);
+            $files = array_diff(scandir($this->testDir) ?: [], ['.', '..']);
             foreach ($files as $file) {
                 unlink($this->testDir . '/' . $file);
             }
@@ -252,6 +252,7 @@ class FileParserTest extends TestCase
 
         $line = FileParser::getLine($file, 2);
 
+        $this->assertNotNull($line);
         $this->assertStringContainsString('line 2', $line);
     }
 

@@ -98,6 +98,7 @@ class LocationTest extends TestCase
         $location = new Location('/path/to/file.php', 42);
 
         $this->expectException(\Error::class);
+        // @phpstan-ignore-next-line - Testing that readonly property throws error
         $location->file = '/new/path.php';
     }
 }

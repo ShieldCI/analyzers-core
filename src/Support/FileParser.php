@@ -76,7 +76,7 @@ class FileParser
 
         preg_match_all('/use\s+([^;]+);/', $content, $matches);
 
-        return array_map('trim', $matches[1] ?? []);
+        return array_map('trim', $matches[1]);
     }
 
     /**

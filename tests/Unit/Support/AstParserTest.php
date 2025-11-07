@@ -11,7 +11,7 @@ use ShieldCI\AnalyzersCore\Support\AstParser;
 class AstParserTest extends TestCase
 {
     private AstParser $parser;
-    private string $testDir;
+    private string $testDir = '';
 
     protected function setUp(): void
     {
@@ -25,7 +25,7 @@ class AstParserTest extends TestCase
     {
         parent::tearDown();
         if (is_dir($this->testDir)) {
-            $files = array_diff(scandir($this->testDir), ['.', '..']);
+            $files = array_diff(scandir($this->testDir) ?: [], ['.', '..']);
             foreach ($files as $file) {
                 unlink($this->testDir . '/' . $file);
             }

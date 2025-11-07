@@ -78,7 +78,11 @@ class JsonFormatterTest extends TestCase
         ];
 
         $output = $formatter->format($results);
+        /** @var array<string, mixed> $data */
         $data = json_decode($output, true);
+        $this->assertIsArray($data);
+        $this->assertIsArray($data['summary']);
+        /** @var array<string, mixed> $summary */
         $summary = $data['summary'];
 
         $this->assertEquals(2, $summary['total']);

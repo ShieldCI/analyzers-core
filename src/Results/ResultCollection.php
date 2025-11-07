@@ -163,13 +163,15 @@ final class ResultCollection implements Countable, IteratorAggregate
 
     /**
      * Convert to array.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function toArray(): array
     {
-        return array_map(
+        return array_values(array_map(
             fn (ResultInterface $result) => $result->toArray(),
             $this->results
-        );
+        ));
     }
 
     public function count(): int
@@ -177,8 +179,11 @@ final class ResultCollection implements Countable, IteratorAggregate
         return count($this->results);
     }
 
+    /**
+     * @return ArrayIterator<int, ResultInterface>
+     */
     public function getIterator(): Traversable
     {
-        return new ArrayIterator($this->results);
+        return new ArrayIterator(array_values($this->results));
     }
 }
