@@ -112,6 +112,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
                 RecursiveIteratorIterator::LEAVES_ONLY
             );
 
+            /** @var SplFileInfo $file */
             foreach ($iterator as $file) {
                 if ($file->isFile()) {
                     yield $file;

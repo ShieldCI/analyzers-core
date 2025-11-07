@@ -11,6 +11,9 @@ use ShieldCI\AnalyzersCore\Enums\Severity;
  */
 final class Issue
 {
+    /**
+     * @param array<string, mixed> $metadata
+     */
     public function __construct(
         public readonly string $message,
         public readonly Location $location,
@@ -23,6 +26,8 @@ final class Issue
 
     /**
      * Create from array.
+     *
+     * @param array{message: string, location: array{file: string, line: int, column?: int}, severity: string, recommendation: string, code?: string, metadata?: array<string, mixed>} $data
      */
     public static function fromArray(array $data): self
     {
@@ -38,6 +43,8 @@ final class Issue
 
     /**
      * Convert to array.
+     *
+     * @return array<string, mixed>
      */
     public function toArray(): array
     {

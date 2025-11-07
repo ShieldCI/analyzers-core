@@ -12,7 +12,7 @@ use ShieldCI\AnalyzersCore\ValueObjects\AnalyzerMetadata;
 
 class AbstractFileAnalyzerTest extends TestCase
 {
-    private string $testDir;
+    private string $testDir = '';
 
     protected function setUp(): void
     {
@@ -45,7 +45,7 @@ class AbstractFileAnalyzerTest extends TestCase
 
     private function recursiveDelete(string $dir): void
     {
-        $files = array_diff(scandir($dir), ['.', '..']);
+        $files = array_diff(scandir($dir) ?: [], ['.', '..']);
         foreach ($files as $file) {
             $path = $dir . '/' . $file;
             is_dir($path) ? $this->recursiveDelete($path) : unlink($path);
@@ -373,6 +373,9 @@ class ConcreteFileAnalyzer extends AbstractFileAnalyzer
     }
 
     // Public wrappers for testing protected methods
+    /**
+     * @return array<string>
+     */
     public function getPhpFilesPublic(): array
     {
         return $this->getPhpFiles();
@@ -403,6 +406,9 @@ class ConcreteFileAnalyzer extends AbstractFileAnalyzer
         return $this->getRelativePath($file);
     }
 
+    /**
+     * @return iterable<\SplFileInfo>
+     */
     public function getFilesToAnalyzePublic(): iterable
     {
         return $this->getFilesToAnalyze();

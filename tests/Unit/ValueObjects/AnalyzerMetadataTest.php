@@ -139,6 +139,7 @@ class AnalyzerMetadataTest extends TestCase
         );
 
         $this->expectException(\Error::class);
+        // @phpstan-ignore-next-line - Testing that readonly property throws error
         $metadata->id = 'new-id';
     }
 }
