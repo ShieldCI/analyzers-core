@@ -210,22 +210,14 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * Get the current environment using runtime config (Laravel).
      * Falls back to reading .env file if config is not available.
      *
-     * This method uses Laravel's config() helper when available (more accurate),
-     * and falls back to reading .env file directly if config is not available.
+     * This method prioritizes .env file when basePath is set (test scenarios),
+     * otherwise uses Laravel's config() helper (more accurate in production).
      *
      * @return string The environment name (e.g., 'local', 'production', 'staging')
      */
     protected function getEnvironment(): string
     {
-        // Use runtime config (standard way, more accurate) - Laravel context
-        if (function_exists('config')) {
-            $env = config('app.env');
-            if (is_string($env) && $env !== '') {
-                return $env;
-            }
-        }
-
-        // Fallback: Read from .env file if config not available
+        // Priority 1: Read from .env file if basePath is set (test scenarios or explicit path)
         if (! empty($this->basePath)) {
             $envFile = $this->basePath.'/.env';
             if (file_exists($envFile)) {
@@ -236,6 +228,15 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
             }
         }
 
+        // Priority 2: Use runtime config (standard way, more accurate) - Laravel context
+        if (function_exists('config')) {
+            $env = config('app.env');
+            if (is_string($env) && $env !== '') {
+                return $env;
+            }
+        }
+
+        // Fallback: Default to production
         return 'production';
     }
 }
