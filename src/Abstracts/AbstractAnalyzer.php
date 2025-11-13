@@ -16,6 +16,16 @@ use Throwable;
  */
 abstract class AbstractAnalyzer implements AnalyzerInterface
 {
+    /**
+     * Determine whether the analyzer should be run in CI mode.
+     *
+     * Analyzers that check runtime state (caching, database connections, etc.)
+     * should set this to false since they're not applicable in CI environments.
+     *
+     * @var bool
+     */
+    public static bool $runInCI = true;
+
     private float $startTime = 0.0;
 
     /**
