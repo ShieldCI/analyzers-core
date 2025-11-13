@@ -239,4 +239,31 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         // Fallback: Default to production
         return 'production';
     }
+
+    /**
+     * Determine whether the analyzer should skip if the environment is local.
+     *
+     * This method checks both the environment and user configuration,
+     * allowing users to control whether to skip environment-specific checks.
+     *
+     * Returns true (skip analyzer) when BOTH conditions are met:
+     * 1. Environment is 'local'
+     * 2. User has enabled skipping via config('shieldci.skip_env_specific', false)
+     *
+     * @return bool True if analyzer should be skipped in local environment
+     */
+    protected function isLocalAndShouldSkip(): bool
+    {
+        // Check if environment is local
+        $isLocal = $this->getEnvironment() === 'local';
+
+        // Check if user has enabled skipping (default: false = don't skip)
+        $skipEnabled = false;
+        if (function_exists('config')) {
+            $skipEnabled = config('shieldci.skip_env_specific', false);
+            $skipEnabled = is_bool($skipEnabled) ? $skipEnabled : false;
+        }
+
+        return $isLocal && $skipEnabled;
+    }
 }
