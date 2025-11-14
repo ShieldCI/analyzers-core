@@ -27,6 +27,12 @@ interface AnalyzerInterface
     public function shouldRun(): bool;
 
     /**
+     * Get the reason why this analyzer should be skipped (if shouldRun() returns false).
+     * This provides more specific feedback to users than the generic skip message.
+     */
+    public function getSkipReason(): string;
+
+    /**
      * Get the unique identifier for this analyzer.
      */
     public function getId(): string;

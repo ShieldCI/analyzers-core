@@ -85,6 +85,11 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
         return true;
     }
 
+    public function getSkipReason(): string
+    {
+        return 'Not applicable in current environment or configuration';
+    }
+
     /**
      * Create a passed result.
      *
