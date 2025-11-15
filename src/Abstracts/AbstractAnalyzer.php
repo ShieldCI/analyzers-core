@@ -211,4 +211,65 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
 
         return round(microtime(true) - $this->startTime, 4);
     }
+
+    /**
+     * Get the current environment using runtime config (Laravel).
+     * Falls back to reading .env file if config is not available.
+     *
+     * This method prioritizes .env file when basePath is set (test scenarios),
+     * otherwise uses Laravel's config() helper (more accurate in production).
+     *
+     * @return string The environment name (e.g., 'local', 'production', 'staging')
+     */
+    protected function getEnvironment(): string
+    {
+        // Priority 1: Read from .env file if basePath is set (test scenarios or explicit path)
+        if (! empty($this->basePath)) {
+            $envFile = $this->basePath.'/.env';
+            if (file_exists($envFile)) {
+                $content = file_get_contents($envFile);
+                if ($content !== false && preg_match('/^APP_ENV\s*=\s*(\w+)/m', $content, $matches)) {
+                    return $matches[1];
+                }
+            }
+        }
+
+        // Priority 2: Use runtime config (standard way, more accurate) - Laravel context
+        if (function_exists('config')) {
+            $env = config('app.env');
+            if (is_string($env) && $env !== '') {
+                return $env;
+            }
+        }
+
+        // Fallback: Default to production
+        return 'production';
+    }
+
+    /**
+     * Determine whether the analyzer should skip if the environment is local.
+     *
+     * This method checks both the environment and user configuration,
+     * allowing users to control whether to skip environment-specific checks.
+     *
+     * Returns true (skip analyzer) when BOTH conditions are met:
+     * 1. Environment is 'local'
+     * 2. User has enabled skipping via config('shieldci.skip_env_specific', false)
+     *
+     * @return bool True if analyzer should be skipped in local environment
+     */
+    protected function isLocalAndShouldSkip(): bool
+    {
+        // Check if environment is local
+        $isLocal = $this->getEnvironment() === 'local';
+
+        // Check if user has enabled skipping (default: false = don't skip)
+        $skipEnabled = false;
+        if (function_exists('config')) {
+            $skipEnabled = config('shieldci.skip_env_specific', false);
+            $skipEnabled = is_bool($skipEnabled) ? $skipEnabled : false;
+        }
+
+        return $isLocal && $skipEnabled;
+    }
 }
