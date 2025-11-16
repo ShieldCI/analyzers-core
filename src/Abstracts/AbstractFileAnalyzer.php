@@ -205,4 +205,30 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
 
         return $file;
     }
+
+    /**
+     * Override getEnvironment to prioritize .env file reading.
+     *
+     * File analyzers often need to read from .env files in test scenarios
+     * where basePath is explicitly set. This method prioritizes .env file
+     * reading over the config() helper for more accurate test scenarios.
+     *
+     * @return string The environment name (e.g., 'local', 'production', 'staging')
+     */
+    protected function getEnvironment(): string
+    {
+        // Priority 1: Read from .env file if basePath is set (test scenarios)
+        if (! empty($this->basePath)) {
+            $envFile = $this->basePath.'/.env';
+            if (file_exists($envFile)) {
+                $content = file_get_contents($envFile);
+                if ($content !== false && preg_match('/^APP_ENV\s*=\s*(\w+)/m', $content, $matches)) {
+                    return $matches[1];
+                }
+            }
+        }
+
+        // Priority 2: Fall back to parent's implementation (config helper)
+        return parent::getEnvironment();
+    }
 }

@@ -213,28 +213,19 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
     }
 
     /**
-     * Get the current environment using runtime config (Laravel).
-     * Falls back to reading .env file if config is not available.
+     * Get the current environment using Laravel's config helper.
      *
-     * This method prioritizes .env file when basePath is set (test scenarios),
-     * otherwise uses Laravel's config() helper (more accurate in production).
+     * This method uses the config() helper function to get the environment,
+     * which works for both runtime (production) and testing scenarios.
+     *
+     * Subclasses can override this method to provide environment detection
+     * through other means (e.g., reading .env files directly).
      *
      * @return string The environment name (e.g., 'local', 'production', 'staging')
      */
     protected function getEnvironment(): string
     {
-        // Priority 1: Read from .env file if basePath is set (test scenarios or explicit path)
-        if (! empty($this->basePath)) {
-            $envFile = $this->basePath.'/.env';
-            if (file_exists($envFile)) {
-                $content = file_get_contents($envFile);
-                if ($content !== false && preg_match('/^APP_ENV\s*=\s*(\w+)/m', $content, $matches)) {
-                    return $matches[1];
-                }
-            }
-        }
-
-        // Priority 2: Use runtime config (standard way, more accurate) - Laravel context
+        // Use Laravel's config helper (works in both production and tests)
         if (function_exists('config')) {
             $env = config('app.env');
             if (is_string($env) && $env !== '') {
