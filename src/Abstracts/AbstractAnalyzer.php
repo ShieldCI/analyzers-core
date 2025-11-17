@@ -26,6 +26,39 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      */
     public static bool $runInCI = true;
 
+    /**
+     * Environments where this analyzer is relevant.
+     *
+     * Override in child classes to specify which environments this analyzer should run in.
+     * Default is all environments (null = no environment filtering).
+     *
+     * Use standard environment names only:
+     * - 'local': Local development (developer machines)
+     * - 'development': Development server environment
+     * - 'staging': Pre-production/staging environment
+     * - 'production': Live production environment
+     * - 'testing': Automated testing environment (PHPUnit, CI/CD tests)
+     *
+     * Custom environment names are automatically mapped via config/shieldci.php:
+     * - APP_ENV=production-us → Maps to 'production'
+     * - APP_ENV=staging-preview → Maps to 'staging'
+     *
+     * Examples:
+     * - ['production', 'staging'] - Production and staging environments only
+     * - ['production'] - Production environments only
+     * - ['local', 'development', 'testing'] - Development environments only
+     * - null - Run in all environments (default)
+     *
+     * How environment mapping works:
+     * 1. Analyzer declares: protected ?array $relevantEnvironments = ['production', 'staging'];
+     * 2. User configures mapping: 'production-us' => 'production'
+     * 3. When APP_ENV=production-us, it maps to 'production' and analyzer runs
+     * 4. When APP_ENV=local, no mapping, analyzer skips
+     *
+     * @var array<string>|null
+     */
+    protected ?array $relevantEnvironments = null;
+
     private float $startTime = 0.0;
 
     /**
@@ -46,7 +79,11 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
     final public function analyze(): ResultInterface
     {
         if (! $this->shouldRun()) {
-            return $this->skipped('Analyzer is not enabled or not applicable in current context');
+            $reason = method_exists($this, 'getSkipReason')
+                ? $this->getSkipReason()
+                : 'Analyzer is not enabled or not applicable in current context';
+
+            return $this->skipped($reason);
         }
 
         $this->startTimer();
@@ -218,49 +255,76 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      * This method uses the config() helper function to get the environment,
      * which works for both runtime (production) and testing scenarios.
      *
+     * The environment is automatically mapped to standard environment types
+     * using the 'shieldci.environment_mapping' configuration.
+     *
+     * Standard environments: local, development, staging, production, testing
+     *
+     * Custom environments are mapped via config. For example:
+     * - 'production-us' maps to 'production'
+     * - 'staging-preview' maps to 'staging'
+     *
      * Subclasses can override this method to provide environment detection
      * through other means (e.g., reading .env files directly).
      *
-     * @return string The environment name (e.g., 'local', 'production', 'staging')
+     * @return string The mapped environment name (e.g., 'local', 'production', 'staging')
      */
     protected function getEnvironment(): string
     {
-        // Use Laravel's config helper (works in both production and tests)
+        // Get raw environment from Laravel config
+        $rawEnv = 'production'; // Default fallback
+
         if (function_exists('config')) {
             $env = config('app.env');
             if (is_string($env) && $env !== '') {
-                return $env;
+                $rawEnv = $env;
             }
         }
 
-        // Fallback: Default to production
-        return 'production';
+        // Apply environment mapping if configured
+        if (function_exists('config')) {
+            $mapping = config('shieldci.environment_mapping', []);
+            if (is_array($mapping) && isset($mapping[$rawEnv])) {
+                return $mapping[$rawEnv];
+            }
+        }
+
+        // Return raw environment (no mapping configured or not in mapping)
+        return $rawEnv;
     }
 
     /**
-     * Determine whether the analyzer should skip if the environment is local.
+     * Check if analyzer is relevant for the current environment.
      *
-     * This method checks both the environment and user configuration,
-     * allowing users to control whether to skip environment-specific checks.
+     * This method checks the $relevantEnvironments property to determine
+     * if the analyzer should run in the current environment.
      *
-     * Returns true (skip analyzer) when BOTH conditions are met:
-     * 1. Environment is 'local'
-     * 2. User has enabled skipping via config('shieldci.skip_env_specific', false)
+     * The environment is automatically resolved using environment mapping,
+     * so analyzers only need to specify standard environment names.
      *
-     * @return bool True if analyzer should be skipped in local environment
+     * Example:
+     * - Analyzer declares: ['production', 'staging']
+     * - APP_ENV=production-us → Maps to 'production' → Matches
+     * - APP_ENV=local → No mapping → Doesn't match
+     *
+     * @return bool True if analyzer should run in current environment
      */
-    protected function isLocalAndShouldSkip(): bool
+    protected function isRelevantForCurrentEnvironment(): bool
     {
-        // Check if environment is local
-        $isLocal = $this->getEnvironment() === 'local';
-
-        // Check if user has enabled skipping (default: false = don't skip)
-        $skipEnabled = false;
-        if (function_exists('config')) {
-            $skipEnabled = config('shieldci.skip_env_specific', false);
-            $skipEnabled = is_bool($skipEnabled) ? $skipEnabled : false;
+        // If no environment filtering is specified, run in all environments
+        if ($this->relevantEnvironments === null) {
+            return true;
         }
 
-        return $isLocal && $skipEnabled;
+        $currentEnv = $this->getEnvironment();
+
+        // Check for exact match (case-insensitive)
+        foreach ($this->relevantEnvironments as $relevantEnv) {
+            if (strcasecmp($currentEnv, $relevantEnv) === 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
