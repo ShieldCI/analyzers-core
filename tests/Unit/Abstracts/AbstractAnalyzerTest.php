@@ -27,7 +27,7 @@ class AbstractAnalyzerTest extends TestCase
         $result = $analyzer->analyze();
 
         $this->assertEquals(Status::Skipped, $result->getStatus());
-        $this->assertStringContainsString('not enabled', $result->getMessage());
+        $this->assertStringContainsString('Not applicable', $result->getMessage());
     }
 
     public function testAnalyzeCatchesExceptionsAndReturnsError(): void
