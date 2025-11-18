@@ -208,4 +208,47 @@ class FileParser
 
         return substr_count($content, $needle);
     }
+
+    /**
+     * Strip single-line comments from a line of code.
+     * Removes // and # style comments.
+     *
+     * @param  string  $line
+     * @return string
+     */
+    public static function stripComments(string $line): string
+    {
+        $lineWithoutComments = preg_replace('/\/\/.*$|#.*$/', '', $line);
+
+        return is_string($lineWithoutComments) ? $lineWithoutComments : $line;
+    }
+
+    /**
+     * Get code snippet from file with context lines.
+     *
+     * @param  string  $filePath  Path to the file
+     * @param  int  $line  Target line number (1-indexed)
+     * @param  int  $contextLines  Number of context lines before and after
+     * @return string|null  Code snippet as string, or null if file cannot be read
+     */
+    public static function getCodeSnippet(string $filePath, int $line, int $contextLines = 2): ?string
+    {
+        $lines = self::getLines($filePath);
+
+        if (empty($lines)) {
+            return null;
+        }
+
+        $start = max(0, $line - $contextLines - 1);
+        $end = min(count($lines), $line + $contextLines);
+
+        $snippet = [];
+        for ($i = $start; $i < $end; $i++) {
+            if (isset($lines[$i])) {
+                $snippet[] = $lines[$i];
+            }
+        }
+
+        return implode('', $snippet);
+    }
 }

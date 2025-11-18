@@ -8,6 +8,7 @@ use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Abstracts\AbstractFileAnalyzer;
 use ShieldCI\AnalyzersCore\Contracts\ResultInterface;
 use ShieldCI\AnalyzersCore\Enums\{Category, Severity};
+use ShieldCI\AnalyzersCore\Support\FileParser;
 use ShieldCI\AnalyzersCore\ValueObjects\AnalyzerMetadata;
 
 class AbstractFileAnalyzerTest extends TestCase
@@ -219,8 +220,7 @@ class AbstractFileAnalyzerTest extends TestCase
         $file = $this->testDir . '/multi-line.php';
         file_put_contents($file, "<?php\n// Line 2\n// Line 3\n// Line 4\n// Line 5\n// Line 6\n");
 
-        $analyzer = new ConcreteFileAnalyzer();
-        $snippet = $analyzer->getCodeSnippetPublic($file, 4, 2);
+        $snippet = FileParser::getCodeSnippet($file, 4, 2);
 
         $this->assertNotNull($snippet);
         $this->assertStringContainsString('// Line 2', $snippet);
@@ -232,8 +232,7 @@ class AbstractFileAnalyzerTest extends TestCase
 
     public function testGetCodeSnippetReturnsNullForNonExistentFile(): void
     {
-        $analyzer = new ConcreteFileAnalyzer();
-        $snippet = $analyzer->getCodeSnippetPublic('/non/existent/file.php', 1);
+        $snippet = FileParser::getCodeSnippet('/non/existent/file.php', 1);
 
         $this->assertNull($snippet);
     }
@@ -243,8 +242,7 @@ class AbstractFileAnalyzerTest extends TestCase
         $file = $this->testDir . '/start.php';
         file_put_contents($file, "<?php\n// Line 2\n// Line 3\n");
 
-        $analyzer = new ConcreteFileAnalyzer();
-        $snippet = $analyzer->getCodeSnippetPublic($file, 1, 2);
+        $snippet = FileParser::getCodeSnippet($file, 1, 2);
 
         $this->assertNotNull($snippet);
         $this->assertStringContainsString('<?php', $snippet);
@@ -255,8 +253,7 @@ class AbstractFileAnalyzerTest extends TestCase
         $file = $this->testDir . '/end.php';
         file_put_contents($file, "<?php\n// Line 2\n// Line 3\n");
 
-        $analyzer = new ConcreteFileAnalyzer();
-        $snippet = $analyzer->getCodeSnippetPublic($file, 3, 2);
+        $snippet = FileParser::getCodeSnippet($file, 3, 2);
 
         $this->assertNotNull($snippet);
         $this->assertStringContainsString('// Line 3', $snippet);
@@ -268,16 +265,14 @@ class AbstractFileAnalyzerTest extends TestCase
         $content = "<?php\nclass Test {}";
         file_put_contents($file, $content);
 
-        $analyzer = new ConcreteFileAnalyzer();
-        $result = $analyzer->readFilePublic($file);
+        $result = FileParser::readFile($file);
 
         $this->assertEquals($content, $result);
     }
 
     public function testReadFileReturnsNullForNonExistentFile(): void
     {
-        $analyzer = new ConcreteFileAnalyzer();
-        $result = $analyzer->readFilePublic('/non/existent/file.php');
+        $result = FileParser::readFile('/non/existent/file.php');
 
         $this->assertNull($result);
     }
@@ -288,8 +283,7 @@ class AbstractFileAnalyzerTest extends TestCase
         file_put_contents($file, "<?php");
         chmod($file, 0000);
 
-        $analyzer = new ConcreteFileAnalyzer();
-        $result = $analyzer->readFilePublic($file);
+        $result = FileParser::readFile($file);
 
         $this->assertNull($result);
 
@@ -391,15 +385,6 @@ class ConcreteFileAnalyzer extends AbstractFileAnalyzer
         return $this->matchesPattern($path, $pattern);
     }
 
-    public function getCodeSnippetPublic(string $file, int $line, int $contextLines = 2): ?string
-    {
-        return $this->getCodeSnippet($file, $line, $contextLines);
-    }
-
-    public function readFilePublic(string $file): ?string
-    {
-        return $this->readFile($file);
-    }
 
     public function getRelativePathPublic(string $file): string
     {

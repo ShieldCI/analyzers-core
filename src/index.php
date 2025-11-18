@@ -31,6 +31,7 @@ require_once __DIR__ . '/Abstracts/AbstractFileAnalyzer.php';
 // Support
 require_once __DIR__ . '/Support/AstParser.php';
 require_once __DIR__ . '/Support/FileParser.php';
+require_once __DIR__ . '/Support/ConfigFileHelper.php';
 require_once __DIR__ . '/Support/CodeHelper.php';
 
 // Formatters

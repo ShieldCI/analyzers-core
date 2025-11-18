@@ -156,40 +156,6 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     }
 
     /**
-     * Get code snippet from file.
-     */
-    protected function getCodeSnippet(string $file, int $line, int $contextLines = 2): ?string
-    {
-        if (! is_file($file)) {
-            return null;
-        }
-
-        $lines = file($file);
-        if ($lines === false) {
-            return null;
-        }
-
-        $start = max(0, $line - $contextLines - 1);
-        $end = min(count($lines), $line + $contextLines);
-
-        return implode('', array_slice($lines, $start, $end - $start));
-    }
-
-    /**
-     * Read file contents safely.
-     */
-    protected function readFile(string $file): ?string
-    {
-        if (! is_file($file) || ! is_readable($file)) {
-            return null;
-        }
-
-        $contents = file_get_contents($file);
-
-        return $contents !== false ? $contents : null;
-    }
-
-    /**
      * Get relative path from base path.
      */
     protected function getRelativePath(string $file): string
