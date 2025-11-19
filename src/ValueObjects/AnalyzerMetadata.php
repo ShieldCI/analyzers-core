@@ -22,13 +22,14 @@ final class AnalyzerMetadata
         public readonly Severity $severity,
         public readonly array $tags = [],
         public readonly ?string $docsUrl = null,
+        public readonly ?int $timeToFix = null,
     ) {
     }
 
     /**
      * Create from array.
      *
-     * @param array{id: string, name: string, description: string, category: string, severity: string, tags?: array<string>, docs_url?: string} $data
+     * @param array{id: string, name: string, description: string, category: string, severity: string, tags?: array<string>, docs_url?: string, time_to_fix?: int|null} $data
      */
     public static function fromArray(array $data): self
     {
@@ -40,6 +41,7 @@ final class AnalyzerMetadata
             severity: Severity::from($data['severity']),
             tags: $data['tags'] ?? [],
             docsUrl: $data['docs_url'] ?? null,
+            timeToFix: $data['time_to_fix'] ?? null,
         );
     }
 
@@ -58,6 +60,7 @@ final class AnalyzerMetadata
             'severity' => $this->severity->value,
             'tags' => $this->tags ?: null,
             'docs_url' => $this->docsUrl,
+            'time_to_fix' => $this->timeToFix,
         ], fn ($value) => $value !== null);
     }
 }
