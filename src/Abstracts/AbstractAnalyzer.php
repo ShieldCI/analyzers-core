@@ -250,6 +250,32 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
     }
 
     /**
+     * Get the base path of the application.
+     * Used for constructing config file paths and other file operations.
+     *
+     * This method attempts to get the base path using Laravel's base_path()
+     * helper function, falling back to getcwd() if the helper is not available.
+     *
+     * @return string The base path of the application, or empty string if unable to determine
+     */
+    protected function getBasePath(): string
+    {
+        if (function_exists('base_path')) {
+            $basePathResult = base_path();
+            if (is_string($basePathResult)) {
+                return $basePathResult;
+            }
+        }
+
+        $cwd = getcwd();
+        if (is_string($cwd)) {
+            return $cwd;
+        }
+
+        return '';
+    }
+
+    /**
      * Get the current environment using Laravel's config helper.
      *
      * This method uses the config() helper function to get the environment,
