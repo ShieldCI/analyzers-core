@@ -22,6 +22,7 @@ final class AnalyzerMetadata
         public readonly Severity $severity,
         public readonly array $tags = [],
         public readonly ?string $docsUrl = null,
+        public readonly ?int $timeToFix = null,
     ) {
     }
 
