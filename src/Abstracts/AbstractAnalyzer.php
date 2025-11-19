@@ -59,6 +59,19 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      */
     protected ?array $relevantEnvironments = null;
 
+    /**
+     * Optional ConfigRepository for testability.
+     * Child classes that inject ConfigRepository should set this property
+     * in their constructor to enable testable environment detection.
+     *
+     * This property is intentionally untyped to avoid Laravel dependencies
+     * in the core package. In Laravel implementations, this will be an
+     * instance of \Illuminate\Contracts\Config\Repository.
+     *
+     * @var mixed
+     */
+    protected $configRepository = null;
+
     private float $startTime = 0.0;
 
     /**
@@ -276,10 +289,11 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
     }
 
     /**
-     * Get the current environment using Laravel's config helper.
+     * Get the current environment using Laravel's config helper or injected ConfigRepository.
      *
-     * This method uses the config() helper function to get the environment,
-     * which works for both runtime (production) and testing scenarios.
+     * This method prioritizes an injected ConfigRepository (for testability) over the
+     * global config() helper function. This allows analyzers to be properly tested
+     * with mocked configuration while still working in production.
      *
      * The environment is automatically mapped to standard environment types
      * using the 'shieldci.environment_mapping' configuration.
@@ -297,7 +311,38 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      */
     protected function getEnvironment(): string
     {
-        // Get raw environment from Laravel config
+        // Priority 1: use injected ConfigRepository when available (test-friendly)
+        if ($this->configRepository !== null && is_object($this->configRepository)) {
+            if (! method_exists($this->configRepository, 'get')) {
+                $rawEnv = 'production';
+            } else {
+                $configRepo = $this->configRepository;
+                /** @phpstan-var object $configRepo */
+                $callback = [$configRepo, 'get'];
+                if (! is_callable($callback)) {
+                    $rawEnv = 'production';
+                } else {
+                    /** @var callable(string, mixed): mixed $callback */
+                    $rawEnv = call_user_func($callback, 'app.env', 'production');
+                }
+            }
+
+            if (! is_string($rawEnv) || $rawEnv === '') {
+                $rawEnv = 'production';
+            }
+
+            // Apply environment mapping if configured (uses global config() helper for mapping config)
+            if (function_exists('config')) {
+                $mapping = config('shieldci.environment_mapping', []);
+                if (is_array($mapping) && isset($mapping[$rawEnv])) {
+                    return $mapping[$rawEnv];
+                }
+            }
+
+            return $rawEnv;
+        }
+
+        // Priority 2: Fall back to global config() helper
         $rawEnv = 'production'; // Default fallback
 
         if (function_exists('config')) {
