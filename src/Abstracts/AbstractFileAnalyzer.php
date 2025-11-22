@@ -173,6 +173,26 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     }
 
     /**
+     * Override getBasePath to use explicitly set $basePath property.
+     *
+     * FileAnalyzers allow setting a custom basePath (primarily for testing).
+     * This override ensures that when basePath is explicitly set via setBasePath(),
+     * it takes precedence over Laravel's base_path() helper.
+     *
+     * @return string The base path (from $basePath property or parent fallback)
+     */
+    protected function getBasePath(): string
+    {
+        // Use the explicitly set basePath if available (for testing scenarios)
+        if ($this->basePath !== '') {
+            return $this->basePath;
+        }
+
+        // Otherwise delegate to parent implementation (base_path() or getcwd())
+        return parent::getBasePath();
+    }
+
+    /**
      * Override getEnvironment to prioritize .env file reading.
      *
      * File analyzers often need to read from .env files in test scenarios
