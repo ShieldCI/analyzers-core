@@ -106,6 +106,55 @@ class AbstractAnalyzerTest extends TestCase
         $this->assertEquals(Severity::High, $issue->severity);
         $this->assertEquals('Fix it', $issue->recommendation);
     }
+
+    public function testGetBasePathReturnsNonEmptyString(): void
+    {
+        $analyzer = new IssueCreatingAnalyzer();
+        $basePath = $analyzer->exposedGetBasePath();
+
+        // The critical fix: should never be empty
+        $this->assertNotEquals('', $basePath);
+        $this->assertIsString($basePath);
+    }
+
+    public function testBuildPathWithNoSegments(): void
+    {
+        $analyzer = new IssueCreatingAnalyzer();
+        $path = $analyzer->exposedBuildPath();
+
+        $basePath = $analyzer->exposedGetBasePath();
+        $this->assertEquals($basePath, $path);
+    }
+
+    public function testBuildPathWithSingleSegment(): void
+    {
+        $analyzer = new IssueCreatingAnalyzer();
+        $path = $analyzer->exposedBuildPath('vendor');
+
+        $basePath = $analyzer->exposedGetBasePath();
+        $expected = $basePath . DIRECTORY_SEPARATOR . 'vendor';
+
+        $this->assertEquals($expected, $path);
+    }
+
+    public function testBuildPathWithMultipleSegments(): void
+    {
+        $analyzer = new IssueCreatingAnalyzer();
+        $path = $analyzer->exposedBuildPath('vendor', 'composer', 'autoload.php');
+
+        $basePath = $analyzer->exposedGetBasePath();
+        $expected = $basePath . DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR . 'composer' . DIRECTORY_SEPARATOR . 'autoload.php';
+
+        $this->assertEquals($expected, $path);
+    }
+
+    public function testBuildPathUsesDirectorySeparator(): void
+    {
+        $analyzer = new IssueCreatingAnalyzer();
+        $path = $analyzer->exposedBuildPath('config', 'app.php');
+
+        $this->assertStringContainsString(DIRECTORY_SEPARATOR, $path);
+    }
 }
 
 // Test implementations
@@ -263,5 +312,15 @@ class IssueCreatingAnalyzer extends AbstractAnalyzer
         );
 
         return $this->failed('Issue found', [$issue]);
+    }
+
+    public function exposedGetBasePath(): string
+    {
+        return $this->getBasePath();
+    }
+
+    public function exposedBuildPath(string ...$segments): string
+    {
+        return $this->buildPath(...$segments);
     }
 }

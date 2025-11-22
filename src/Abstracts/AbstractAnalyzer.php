@@ -269,23 +269,52 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      * This method attempts to get the base path using Laravel's base_path()
      * helper function, falling back to getcwd() if the helper is not available.
      *
-     * @return string The base path of the application, or empty string if unable to determine
+     * Changed from returning empty string to '.' (current directory) as final fallback
+     * to prevent invalid paths like '/vendor/autoload.php' when path is concatenated.
+     *
+     * @return string The base path of the application, never empty (minimum '.')
      */
     protected function getBasePath(): string
     {
         if (function_exists('base_path')) {
             $basePathResult = base_path();
-            if (is_string($basePathResult)) {
+            if (is_string($basePathResult) && $basePathResult !== '') {
                 return $basePathResult;
             }
         }
 
         $cwd = getcwd();
-        if (is_string($cwd)) {
+        if (is_string($cwd) && $cwd !== '') {
             return $cwd;
         }
 
-        return '';
+        // Final fallback: current directory (safer than empty string)
+        return '.';
+    }
+
+    /**
+     * Build a file path from segments using proper directory separator.
+     *
+     * This helper method constructs paths in a cross-platform compatible way
+     * using DIRECTORY_SEPARATOR and ensures a valid base path.
+     *
+     * Examples:
+     * - $this->buildPath('vendor', 'autoload.php') → '/path/to/project/vendor/autoload.php'
+     * - $this->buildPath('config', 'app.php') → '/path/to/project/config/app.php'
+     * - $this->buildPath() → '/path/to/project' (base path only)
+     *
+     * @param  string  ...$segments  Path segments to join
+     * @return string The constructed absolute path
+     */
+    protected function buildPath(string ...$segments): string
+    {
+        $basePath = $this->getBasePath();
+
+        if (empty($segments)) {
+            return $basePath;
+        }
+
+        return $basePath . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $segments);
     }
 
     /**
