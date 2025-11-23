@@ -220,6 +220,47 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
     }
 
     /**
+     * Create a result based on issue severity levels.
+     *
+     * This helper method standardizes the pattern of returning different result types
+     * based on the severity of issues found during analysis:
+     * - Returns failed() for High or Critical severity issues
+     * - Returns warning() for Medium or Low severity issues
+     * - Returns passed() when no issues are found
+     *
+     * This ensures consistent severity handling across all analyzers and prevents
+     * critical issues from being downgraded to warnings.
+     *
+     * @param string $message Summary message describing the issues found
+     * @param array<Issue> $issues Array of issues found during analysis
+     * @param array<string, mixed> $metadata Optional metadata to include in the result
+     * @return ResultInterface The appropriate result type based on issue severity
+     */
+    protected function resultBySeverity(string $message, array $issues, array $metadata = []): ResultInterface
+    {
+        if (empty($issues)) {
+            return $this->passed($message, $metadata);
+        }
+
+        // Check if any issue has High or Critical severity
+        $hasHighSeverityIssue = false;
+        foreach ($issues as $issue) {
+            if ($issue->severity->level() >= Severity::High->level()) {
+                $hasHighSeverityIssue = true;
+
+                break;
+            }
+        }
+
+        // Return failed for High/Critical issues, warning for Low/Medium issues
+        if ($hasHighSeverityIssue) {
+            return $this->failed($message, $issues, $metadata);
+        }
+
+        return $this->warning($message, $issues, $metadata);
+    }
+
+    /**
      * Create an issue.
      *
      * @param array<string, mixed> $metadata
