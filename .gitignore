@@ -11,3 +11,4 @@ coverage/
 Thumbs.db
 .php_cs.cache
 .php-cs-fixer.cache
+coverage.xml
