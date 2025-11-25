@@ -6,6 +6,7 @@ Shared foundation for building static analysis tools. Includes abstract analyzer
 [![codecov](https://codecov.io/gh/shieldci/analyzers-core/branch/master/graph/badge.svg)](https://codecov.io/gh/shieldci/analyzers-core)
 [![PHP Version](https://img.shields.io/badge/PHP-8.1%2B-blue)](https://www.php.net/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![PHPStan](https://img.shields.io/badge/PHPStan-Level%209-brightgreen)](https://phpstan.org/)
 
 ## Features
 
