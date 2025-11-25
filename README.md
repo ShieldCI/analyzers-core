@@ -2,6 +2,11 @@
 
 Shared foundation for building static analysis tools. Includes abstract analyzer classes, result formatters, file parsers, and utilities.
 
+[![Tests](https://github.com/shieldci/analyzers-core/actions/workflows/tests.yml/badge.svg)](https://github.com/shieldci/analyzers-core/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/shieldci/analyzers-core/branch/main/graph/badge.svg)](https://codecov.io/gh/shieldci/analyzers-core)
+[![PHP Version](https://img.shields.io/badge/PHP-8.1%2B-blue)](https://www.php.net/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 ## Features
 
 - **Framework Agnostic**: Works with any PHP 8.1+ project
@@ -260,8 +265,6 @@ src/
 
 tests/
 ├── Unit/              # Unit tests
-├── Feature/           # Feature tests
-└── Fixtures/          # Test fixtures
 ```
 
 ## Used By
