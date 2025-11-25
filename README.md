@@ -12,7 +12,7 @@ Shared foundation for building static analysis tools. Includes abstract analyzer
 - **Framework Agnostic**: Works with any PHP 8.1+ project
 - **Type Safe**: Full type hints and strict typing
 - **Extensible**: Easy to create custom analyzers
-- **Well Tested**: Comprehensive test suite (95%+ coverage)
+- **Well Tested**: Comprehensive test suite (90%+ coverage)
 - **Modern PHP**: Uses PHP 8.1+ features
 - **Laravel Compatible**: Works with Laravel 9.x, 10.x, 11.x, and 12.x
 
