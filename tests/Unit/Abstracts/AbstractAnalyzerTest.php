@@ -534,10 +534,14 @@ class ErrorAnalyzer extends AbstractAnalyzer
 
 class ResultBySeverityAnalyzer extends AbstractAnalyzer
 {
+    /**
+     * @param array<Issue> $issues
+     */
     public function __construct(
         private array $issues,
         private string $message
-    ) {}
+    ) {
+    }
 
     protected function metadata(): AnalyzerMetadata
     {
