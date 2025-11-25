@@ -345,6 +345,120 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertIsArray($files);
         $this->assertEmpty($files);
     }
+
+    public function testGetBasePathUsesExplicitlySetBasePath(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath('/custom/base/path');
+
+        $basePath = $analyzer->exposedGetBasePath();
+
+        $this->assertEquals('/custom/base/path', $basePath);
+    }
+
+    public function testGetBasePathFallsBackToParentWhenNotSet(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        // Don't set basePath
+
+        $basePath = $analyzer->exposedGetBasePath();
+
+        // Should fall back to parent implementation (getcwd or base_path helper)
+        $this->assertNotEmpty($basePath);
+        $this->assertIsString($basePath);
+    }
+
+    public function testGetEnvironmentReadsFromEnvFileWhenBasePathSet(): void
+    {
+        // Create .env file
+        $envFile = $this->testDir . '/.env';
+        file_put_contents($envFile, "APP_ENV=local\nAPP_DEBUG=true");
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+
+        $environment = $analyzer->exposedGetEnvironment();
+
+        $this->assertEquals('local', $environment);
+    }
+
+    public function testGetEnvironmentFallsBackToParentWhenNoEnvFile(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+        // No .env file exists
+
+        $environment = $analyzer->exposedGetEnvironment();
+
+        // Should fall back to parent implementation (production by default)
+        $this->assertIsString($environment);
+        $this->assertEquals('production', $environment);
+    }
+
+    public function testGetEnvironmentHandlesInvalidEnvFile(): void
+    {
+        // Create .env file without APP_ENV
+        $envFile = $this->testDir . '/.env';
+        file_put_contents($envFile, "APP_DEBUG=true\nOTHER_VAR=value");
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+
+        $environment = $analyzer->exposedGetEnvironment();
+
+        // Should fall back to parent when APP_ENV not found
+        $this->assertIsString($environment);
+    }
+
+    public function testGetFilesToAnalyzeHandlesSingleFilePath(): void
+    {
+        $singleFile = $this->testDir . '/src/File1.php';
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+        $analyzer->setPaths(['src/File1.php']);
+
+        $files = iterator_to_array($analyzer->getFilesToAnalyzePublic());
+
+        $this->assertCount(1, $files);
+        $this->assertEquals($singleFile, $files[0]->getPathname());
+    }
+
+    public function testMatchesPatternEscapesRegexCharacters(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+
+        // Test that regex special chars in pattern are escaped
+        $this->assertTrue($analyzer->matchesPatternPublic('/path/[test].php', '/path/[test].php'));
+        $this->assertFalse($analyzer->matchesPatternPublic('/path/test.php', '/path/[test].php'));
+    }
+
+    public function testShouldAnalyzeFileReturnsTrueWhenNoExcludePatterns(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        // No exclude patterns set
+        $file = new \SplFileInfo($this->testDir . '/src/File1.php');
+
+        $result = $analyzer->shouldAnalyzeFilePublic($file);
+
+        $this->assertTrue($result);
+    }
+
+    public function testGetPhpFilesReturnsEmptyArrayWhenNoPhpFiles(): void
+    {
+        // Create directory with no PHP files
+        $emptyDir = $this->testDir . '/empty';
+        mkdir($emptyDir);
+        file_put_contents($emptyDir . '/README.md', '# Empty');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+        $analyzer->setPaths(['empty']);
+
+        $files = $analyzer->getPhpFilesPublic();
+
+        $this->assertEmpty($files);
+    }
 }
 
 // Concrete implementation for testing
@@ -397,5 +511,15 @@ class ConcreteFileAnalyzer extends AbstractFileAnalyzer
     public function getFilesToAnalyzePublic(): iterable
     {
         return $this->getFilesToAnalyze();
+    }
+
+    public function exposedGetBasePath(): string
+    {
+        return $this->getBasePath();
+    }
+
+    public function exposedGetEnvironment(): string
+    {
+        return $this->getEnvironment();
     }
 }
