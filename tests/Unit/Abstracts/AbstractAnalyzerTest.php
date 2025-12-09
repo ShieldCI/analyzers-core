@@ -324,6 +324,98 @@ class AbstractAnalyzerTest extends TestCase
         $this->assertArrayHasKey('warning_count', $metadata);
         $this->assertEquals(3, $metadata['warning_count']);
     }
+
+    public function testGetRelativePathReturnsFileWhenBasePathIsEmpty(): void
+    {
+        $analyzer = new RelativePathAnalyzer('');
+        $result = $analyzer->exposedGetRelativePath('/var/www/project/src/File.php');
+
+        $this->assertEquals('/var/www/project/src/File.php', $result);
+    }
+
+    public function testGetRelativePathReturnsFileWhenBasePathIsDot(): void
+    {
+        $analyzer = new RelativePathAnalyzer('.');
+        $result = $analyzer->exposedGetRelativePath('/var/www/project/src/File.php');
+
+        $this->assertEquals('/var/www/project/src/File.php', $result);
+    }
+
+    public function testGetRelativePathStripsBasePath(): void
+    {
+        $analyzer = new RelativePathAnalyzer('/var/www/project');
+        $result = $analyzer->exposedGetRelativePath('/var/www/project/src/File.php');
+
+        $this->assertEquals('src/File.php', $result);
+    }
+
+    public function testGetRelativePathHandlesTrailingSlashInBasePath(): void
+    {
+        $analyzer = new RelativePathAnalyzer('/var/www/project/');
+        $result = $analyzer->exposedGetRelativePath('/var/www/project/src/File.php');
+
+        $this->assertEquals('src/File.php', $result);
+    }
+
+    public function testGetRelativePathHandlesWindowsBackslashes(): void
+    {
+        $analyzer = new RelativePathAnalyzer('C:\\Projects\\myapp');
+        $result = $analyzer->exposedGetRelativePath('C:\\Projects\\myapp\\src\\File.php');
+
+        $this->assertEquals('src/File.php', $result);
+    }
+
+    public function testGetRelativePathHandlesMixedSlashes(): void
+    {
+        $analyzer = new RelativePathAnalyzer('C:/Projects/myapp');
+        $result = $analyzer->exposedGetRelativePath('C:\\Projects\\myapp\\src\\File.php');
+
+        $this->assertEquals('src/File.php', $result);
+    }
+
+    public function testGetRelativePathReturnsOriginalWhenFileNotUnderBasePath(): void
+    {
+        $analyzer = new RelativePathAnalyzer('/var/www/project1');
+        $result = $analyzer->exposedGetRelativePath('/var/www/project2/src/File.php');
+
+        $this->assertEquals('/var/www/project2/src/File.php', $result);
+    }
+
+    public function testGetRelativePathHandlesNestedDirectories(): void
+    {
+        $analyzer = new RelativePathAnalyzer('/var/www/project');
+        $result = $analyzer->exposedGetRelativePath('/var/www/project/app/Http/Controllers/UserController.php');
+
+        $this->assertEquals('app/Http/Controllers/UserController.php', $result);
+    }
+
+    public function testGetRelativePathNormalizesSlashes(): void
+    {
+        $analyzer = new RelativePathAnalyzer('/var/www/project');
+        $result = $analyzer->exposedGetRelativePath('/var/www/project/src\\File.php');
+
+        // Result should have forward slashes
+        $this->assertEquals('src/File.php', $result);
+        $this->assertStringNotContainsString('\\', $result);
+    }
+
+    public function testGetRelativePathHandlesFileInRootOfBasePath(): void
+    {
+        $analyzer = new RelativePathAnalyzer('/var/www/project');
+        $result = $analyzer->exposedGetRelativePath('/var/www/project/README.md');
+
+        $this->assertEquals('README.md', $result);
+    }
+
+    public function testGetRelativePathIsCaseSensitive(): void
+    {
+        $analyzer = new RelativePathAnalyzer('/var/www/Project');
+        $result = $analyzer->exposedGetRelativePath('/var/www/project/src/File.php');
+
+        // Should return original path if case doesn't match (on case-sensitive systems)
+        // Note: On Windows this might behave differently
+        $this->assertEquals('/var/www/project/src/File.php', $result);
+    }
 }
 
 // Test implementations
@@ -723,5 +815,39 @@ class WarningWithMetadataAnalyzer extends AbstractAnalyzer
     protected function runAnalysis(): ResultInterface
     {
         return $this->warning('Warnings found', [], ['warning_count' => 3]);
+    }
+}
+
+class RelativePathAnalyzer extends AbstractAnalyzer
+{
+    public function __construct(
+        private string $testBasePath
+    ) {
+    }
+
+    protected function metadata(): AnalyzerMetadata
+    {
+        return new AnalyzerMetadata(
+            id: 'relative-path-analyzer',
+            name: 'Relative Path Analyzer',
+            description: 'Test analyzer for getRelativePath',
+            category: Category::Security,
+            severity: Severity::High
+        );
+    }
+
+    protected function runAnalysis(): ResultInterface
+    {
+        return $this->passed('Analysis completed');
+    }
+
+    protected function getBasePath(): string
+    {
+        return $this->testBasePath;
+    }
+
+    public function exposedGetRelativePath(string $file): string
+    {
+        return $this->getRelativePath($file);
     }
 }
