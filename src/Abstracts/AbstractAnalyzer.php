@@ -468,4 +468,26 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
 
         return false;
     }
+
+    /**
+     * Get relative path from base path.
+     */
+    protected function getRelativePath(string $file): string
+    {
+        $basePath = $this->getBasePath();
+
+        if ($basePath === '' || $basePath === '.') {
+            return $file;
+        }
+
+        $basePath = rtrim($basePath, '/\\').'/';
+        $normalizedFile = str_replace('\\', '/', $file);
+        $normalizedBasePath = str_replace('\\', '/', $basePath);
+
+        if (str_starts_with($normalizedFile, $normalizedBasePath)) {
+            return substr($normalizedFile, strlen($normalizedBasePath));
+        }
+
+        return $file;
+    }
 }
