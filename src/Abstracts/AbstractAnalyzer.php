@@ -7,7 +7,7 @@ namespace ShieldCI\AnalyzersCore\Abstracts;
 use ShieldCI\AnalyzersCore\Contracts\{AnalyzerInterface, ResultInterface};
 use ShieldCI\AnalyzersCore\Enums\Severity;
 use ShieldCI\AnalyzersCore\Results\AnalysisResult;
-use ShieldCI\AnalyzersCore\ValueObjects\{AnalyzerMetadata, Issue, Location};
+use ShieldCI\AnalyzersCore\ValueObjects\{AnalyzerMetadata, CodeSnippet, Issue, Location};
 use Throwable;
 
 /**
@@ -280,6 +280,58 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
             recommendation: $recommendation,
             code: $code,
             metadata: $metadata
+        );
+    }
+
+    /**
+     * Create an issue with code snippet.
+     *
+     * This helper method creates an issue and automatically generates a code snippet
+     * from the file if code snippets are enabled in the configuration.
+     *
+     * @param string $message The issue message
+     * @param string $filePath Absolute path to the file
+     * @param int $lineNumber The line number where the issue occurs
+     * @param Severity $severity The severity level
+     * @param string $recommendation How to fix the issue
+     * @param int|null $column Optional column number
+     * @param int|null $contextLines Number of lines to show before/after (null = use config default)
+     * @param string|null $code Optional error code
+     * @param array<string, mixed> $metadata Additional metadata
+     * @return Issue
+     */
+    protected function createIssueWithSnippet(
+        string $message,
+        string $filePath,
+        int $lineNumber,
+        Severity $severity,
+        string $recommendation,
+        ?int $column = null,
+        ?int $contextLines = null,
+        ?string $code = null,
+        array $metadata = []
+    ): Issue {
+        $location = new Location(
+            file: $filePath,
+            line: $lineNumber,
+            column: $column
+        );
+
+        // Only generate code snippet if enabled in config
+        $codeSnippet = null;
+        if (function_exists('config') && config('shieldci.report.show_code_snippets', true)) {
+            $snippetLines = $contextLines ?? (int) config('shieldci.report.snippet_context_lines', 5);
+            $codeSnippet = CodeSnippet::fromFile($filePath, $lineNumber, $snippetLines);
+        }
+
+        return new Issue(
+            message: $message,
+            location: $location,
+            severity: $severity,
+            recommendation: $recommendation,
+            code: $code,
+            metadata: $metadata,
+            codeSnippet: $codeSnippet
         );
     }
 

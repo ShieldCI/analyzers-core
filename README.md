@@ -45,6 +45,7 @@ composer require shieldci/analyzers-core
 3. **Value Objects**
    - `Location` - Represents a code location (file, line, column)
    - `Issue` - Represents a specific issue found
+   - `CodeSnippet` - Represents a code snippet with context lines
    - `AnalyzerMetadata` - Metadata about an analyzer
 
 4. **Results**
@@ -55,6 +56,7 @@ composer require shieldci/analyzers-core
    - `AstParser` - AST parsing using nikic/php-parser
    - `FileParser` - File content parsing utilities
    - `CodeHelper` - Code analysis helpers
+   - `ConfigFileHelper` - Laravel configuration file utilities
 
 6. **Formatters**
    - `JsonFormatter` - Format results as JSON
@@ -92,13 +94,22 @@ class MySecurityAnalyzer extends AbstractFileAnalyzer
         foreach ($this->getPhpFiles() as $file) {
             $content = $this->readFile($file);
 
-            if (str_contains($content, 'eval(')) {
-                $issues[] = $this->createIssue(
-                    message: 'Dangerous eval() function found',
-                    location: new Location($file, 1),
-                    severity: Severity::Critical,
-                    recommendation: 'Remove eval() and use safer alternatives'
-                );
+            // Find line number where eval() appears
+            $lines = explode("\n", $content);
+            foreach ($lines as $lineNum => $line) {
+                if (str_contains($line, 'eval(')) {
+                    $issues[] = $this->createIssue(
+                        message: 'Dangerous eval() function found',
+                        location: new Location($file, $lineNum + 1),
+                        severity: Severity::Critical,
+                        recommendation: 'Remove eval() and use safer alternatives',
+                        code: 'dangerous-eval',
+                        codeSnippet: \ShieldCI\AnalyzersCore\ValueObjects\CodeSnippet::fromFile(
+                            $file,
+                            $lineNum + 1
+                        )
+                    );
+                }
             }
         }
 
@@ -210,31 +221,215 @@ $isSql = CodeHelper::looksLikeSql($string);
 $isValid = CodeHelper::isValidClassName('MyClass');
 ```
 
+### Using Code Snippets
+
+The `CodeSnippet` value object provides rich code context for issues with several advanced features:
+
+```php
+<?php
+
+use ShieldCI\AnalyzersCore\ValueObjects\CodeSnippet;
+
+// Create a code snippet from a file
+$snippet = CodeSnippet::fromFile(
+    filePath: '/path/to/file.php',
+    targetLine: 42,
+    contextLines: 8  // Lines before/after to show (default: 8)
+);
+
+if ($snippet !== null) {
+    // Get the lines with line numbers as keys
+    $lines = $snippet->getLines();
+
+    // Get the target line number
+    $targetLine = $snippet->getTargetLine();
+
+    // Get file path
+    $filePath = $snippet->getFilePath();
+
+    // Convert to array for serialization
+    $array = $snippet->toArray();
+}
+```
+
+**Advanced Features:**
+
+1. **Smart Context Expansion**
+   - Automatically detects method/class signatures above the target line
+   - Expands context to include signature if within 15 lines
+   - Provides crucial context for understanding where issues occur
+   - Detects: classes, interfaces, traits, enums, public/protected/private methods
+
+2. **Configurable Context**
+   - Default: 8 lines before and after target line
+   - Customizable via `contextLines` parameter
+   - Automatically handles file boundaries
+
+3. **Line Truncation**
+   - Truncates long lines to 250 characters to prevent terminal wrapping
+   - Preserves readability in console output
+
+4. **Null Safety**
+   - Returns `null` if file doesn't exist or can't be read
+   - Graceful error handling for runtime exceptions
+
+**Example with Issue:**
+
+```php
+<?php
+
+use ShieldCI\AnalyzersCore\ValueObjects\{Issue, Location, CodeSnippet};
+use ShieldCI\AnalyzersCore\Enums\Severity;
+
+$issue = new Issue(
+    message: 'Hardcoded credentials detected',
+    location: new Location('/path/to/file.php', 42),
+    severity: Severity::Critical,
+    recommendation: 'Move credentials to environment variables',
+    code: 'hardcoded-credentials',
+    metadata: ['type' => 'password'],
+    codeSnippet: CodeSnippet::fromFile('/path/to/file.php', 42)
+);
+
+// The code snippet is now attached to the issue
+// It will be displayed in console output with:
+// - Line numbers (red for target, gray for context)
+// - Arrow indicator (→) on target line
+// - Optional PHP syntax highlighting
+// - Red background on target line
+```
+
+**Smart Context Expansion Example:**
+
+```php
+// Given this code:
+// Line 35: public function processPayment($amount)
+// Line 36: {
+// Line 37:     // validation
+// Line 38:     // ...
+// Line 42:     $hardcodedKey = 'secret123';  // ← Issue here
+// Line 43: }
+
+// Even though line 35 is normally outside the 8-line context window,
+// CodeSnippet automatically includes it because it's the method signature
+$snippet = CodeSnippet::fromFile('/path/to/file.php', 42);
+
+// Result includes lines 35-50 (method signature + context)
+// instead of just lines 34-50
+```
+
+### Using Config File Helper
+
+The `ConfigFileHelper` utility provides powerful methods for working with Laravel configuration files, particularly useful for analyzers that need to report issues in config files with precise line numbers.
+
+```php
+<?php
+
+use ShieldCI\AnalyzersCore\Support\ConfigFileHelper;
+
+// Get the path to a config file
+$configPath = ConfigFileHelper::getConfigPath(
+    basePath: '/path/to/project',
+    file: 'database',  // with or without .php extension
+    fallback: fn($file) => config_path($file)  // Optional Laravel helper fallback
+);
+// Result: /path/to/project/config/database.php
+
+// Find the line number where a specific key is defined
+$lineNumber = ConfigFileHelper::findKeyLine(
+    configFile: '/path/to/project/config/database.php',
+    key: 'default'
+);
+// Returns the line number (1-indexed) where 'default' => is defined
+
+// Find a key within a parent array
+$lineNumber = ConfigFileHelper::findKeyLine(
+    configFile: '/path/to/project/config/database.php',
+    key: 'driver',
+    parentKey: 'connections'  // Search within 'connections' array
+);
+// Returns the line number where 'driver' => is defined within 'connections'
+
+// Find a nested key within a specific array item
+$lineNumber = ConfigFileHelper::findNestedKeyLine(
+    configFile: '/path/to/project/config/cache.php',
+    parentKey: 'stores',
+    nestedKey: 'driver',
+    nestedValue: 'redis'  // Search within 'redis' store configuration
+);
+// Returns the line number where 'driver' => is defined
+// within the 'redis' item in the 'stores' array
+```
+
+**Advanced Features:**
+
+1. **Comment-Aware Searching**
+   - Automatically strips single-line comments (`//`, `#`)
+   - Avoids false positives from commented-out config
+
+2. **Precise Pattern Matching**
+   - Uses regex to match exact array key patterns: `'key' =>` or `"key" =>`
+   - Handles various spacing: `'key'=>` or `'key' =>`
+   - Avoids matching keys in string values or comments
+
+3. **Nested Array Navigation**
+   - Can search within parent arrays using `parentKey` parameter
+   - Detects when entering/exiting parent array boundaries
+   - Handles nested array structures like connections, stores, etc.
+
+4. **Smart Indentation Detection**
+   - Uses indentation level to determine array nesting
+   - Stops searching when encountering top-level keys outside target scope
+   - Prevents false matches in unrelated config sections
+
+5. **Fallback Support**
+   - Returns line 1 if key not found (safe default)
+   - Supports optional Laravel `config_path()` fallback for non-Laravel environments
+
+**Use Cases:**
+
+- **Database Analyzers**: Find connection settings, driver configurations
+- **Cache Analyzers**: Locate cache store configurations, driver settings
+- **Session Analyzers**: Find session driver, lifetime, security settings
+- **Queue Analyzers**: Locate queue connection, driver configurations
+- **Mail Analyzers**: Find mail driver, encryption settings
+
 ## Enums
+
+ShieldCI Analyzers Core provides three powerful enums with rich helper methods for better developer experience.
 
 ### Status
 
-- `Passed` - Analysis passed
-- `Failed` - Analysis found issues
-- `Warning` - Analysis found warnings
-- `Skipped` - Analysis was skipped
-- `Error` - Analysis encountered an error
+Represents the result status of an analyzer execution.
+
+**Cases:**
+- `Status::Passed` - Analysis completed successfully with no issues
+- `Status::Failed` - Analysis found critical issues that need fixing
+- `Status::Warning` - Analysis found warnings that should be reviewed
+- `Status::Skipped` - Analysis was skipped (not applicable)
+- `Status::Error` - Analysis encountered an error during execution
 
 ### Category
 
-- `Security` - Security vulnerabilities and risks
-- `Performance` - Performance issues and optimizations
-- `CodeQuality` - Code quality and maintainability
-- `BestPractices` - Best practices and conventions
-- `Reliability` - Reliability and stability issues
+Represents the category/type of an analyzer.
+
+**Cases:**
+- `Category::Security` - Security vulnerabilities and risks (🔒)
+- `Category::Performance` - Performance issues and optimizations (⚡)
+- `Category::CodeQuality` - Code quality and maintainability (📊)
+- `Category::BestPractices` - Best practices and conventions (✨)
+- `Category::Reliability` - Reliability and stability issues (🛡️)
 
 ### Severity
 
-- `Critical` - Critical issue requiring immediate attention
-- `High` - High priority issue
-- `Medium` - Medium priority issue
-- `Low` - Low priority issue
-- `Info` - Informational message
+Represents the severity level of an issue.
+
+**Cases:**
+- `Severity::Critical` - Critical security or stability issue requiring immediate attention
+- `Severity::High` - High priority issue that should be addressed soon
+- `Severity::Medium` - Medium priority issue that should be considered
+- `Severity::Low` - Low priority issue or minor improvement
+- `Severity::Info` - Informational message or suggestion
 
 ## Testing
 
