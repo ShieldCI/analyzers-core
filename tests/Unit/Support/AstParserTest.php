@@ -25,12 +25,26 @@ class AstParserTest extends TestCase
     {
         parent::tearDown();
         if (is_dir($this->testDir)) {
-            $files = array_diff(scandir($this->testDir) ?: [], ['.', '..']);
-            foreach ($files as $file) {
-                unlink($this->testDir . '/' . $file);
-            }
-            rmdir($this->testDir);
+            $this->recursiveDelete($this->testDir);
         }
+    }
+
+    private function recursiveDelete(string $dir): void
+    {
+        if (! is_dir($dir)) {
+            return;
+        }
+
+        $files = array_diff(scandir($dir) ?: [], ['.', '..']);
+        foreach ($files as $file) {
+            $path = $dir . '/' . $file;
+            if (is_dir($path)) {
+                $this->recursiveDelete($path);
+            } else {
+                @unlink($path);
+            }
+        }
+        @rmdir($dir);
     }
 
     public function testParseCodeReturnsAstNodes(): void
