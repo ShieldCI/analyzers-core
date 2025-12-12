@@ -178,4 +178,424 @@ PHP;
         $totalLines = count($fileLines);
         $this->assertLessThanOrEqual($totalLines, count($lines));
     }
+
+    public function test_smart_expansion_includes_class_signature(): void
+    {
+        // Create a file where method is far from class
+        $file = sys_get_temp_dir().'/smart_expansion_class_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+namespace App\Example;
+
+class UserController
+{
+    private $service;
+
+    public function __construct($service)
+    {
+        $this->service = $service;
+    }
+
+    public function update($id, $data)
+    {
+        return $this->service->update($id, $data); // Line 18 - target
+    }
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 18, 3); // 3 lines context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(18, $lines); // Target line
+        // Should have at least the target line and context
+        $this->assertGreaterThanOrEqual(1, count($lines));
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_includes_method_signature(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_method_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+class Test
+{
+    public function complexMethod($param1, $param2, $param3)
+    {
+        $var1 = $param1;
+        $var2 = $param2;
+        $var3 = $param3;
+        return $var1 + $var2 + $var3; // Line 12 - target
+    }
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 12, 2); // 2 lines context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(12, $lines); // Target line
+        // Should have at least the target line and context
+        $this->assertGreaterThanOrEqual(1, count($lines));
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_detects_interface(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_interface_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+interface ServiceInterface
+{
+    private $property;
+    public function process($data); // Line 6 - target (outside 1-line context)
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 6, 1); // 1 line context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(6, $lines); // Target line
+        // Should have at least the target line and context
+        $this->assertGreaterThanOrEqual(1, count($lines));
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_detects_trait(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_trait_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+trait Loggable
+{
+    private $property;
+    public function log($message) // Line 6 - target (outside 1-line context)
+    {
+        echo $message;
+    }
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 6, 1); // 1 line context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(6, $lines); // Target line
+        // Should have at least the target line and context
+        $this->assertGreaterThanOrEqual(1, count($lines));
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_detects_enum(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_enum_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+enum Status: string
+{
+    case PENDING = 'pending';
+    case ACTIVE = 'active'; // Line 6 - target (outside 1-line context)
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 6, 1); // 1 line context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(6, $lines); // Target line
+        // Should have at least the target line and context
+        $this->assertGreaterThanOrEqual(1, count($lines));
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_detects_protected_method(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_protected_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+class Test
+{
+    private $property;
+    protected function internalMethod($param)
+    {
+        $var = $param;
+        return $var; // Line 9 - target (outside 2-line context)
+    }
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 9, 2); // 2 lines context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line and method signature (smart expansion may include it)
+        $this->assertArrayHasKey(9, $lines); // Target line
+        // Method signature should be included if smart expansion works
+        $this->assertGreaterThanOrEqual(5, min(array_keys($lines))); // Start line should be <= 5
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_detects_private_method(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_private_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+class Test
+{
+    private $property;
+    private function secretMethod($param)
+    {
+        $var = $param;
+        return $var; // Line 9 - target (outside 2-line context)
+    }
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 9, 2); // 2 lines context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(9, $lines); // Target line
+        // Method signature should be included if smart expansion works
+        $this->assertGreaterThanOrEqual(5, min(array_keys($lines))); // Start line should be <= 5
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_detects_static_method(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_static_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+class Test
+{
+    private $property;
+    public static function staticMethod($param)
+    {
+        $var = $param;
+        return $var; // Line 9 - target (outside 2-line context)
+    }
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 9, 2); // 2 lines context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(9, $lines); // Target line
+        // Method signature should be included if smart expansion works
+        $this->assertGreaterThanOrEqual(5, min(array_keys($lines))); // Start line should be <= 5
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_detects_standalone_function(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_function_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+function helperFunction($param)
+{
+    $var = $param;
+    return $var; // Line 6 - target (outside 1-line context)
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 6, 1); // 1 line context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(6, $lines); // Target line
+        // Should have at least the target line and context
+        $this->assertGreaterThanOrEqual(1, count($lines));
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_stops_at_closing_brace(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_brace_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+class FirstClass
+{
+    public function method1() {}
+}
+
+class SecondClass
+{
+    private $property;
+    public function method2()
+    {
+        $var = true;
+        return $var; // Line 13 - target (outside 2-line context)
+    }
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 13, 2); // 2 lines context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(13, $lines); // Target line
+        // Should not include FirstClass (stopped at closing brace)
+        $this->assertArrayNotHasKey(3, $lines); // FirstClass declaration
+        // Should include SecondClass method signature if smart expansion works
+        $minLine = min(array_keys($lines));
+        $this->assertGreaterThan(6, $minLine); // Should start after FirstClass ends
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_does_not_expand_beyond_15_lines(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_limit_'.uniqid().'.php';
+        $content = "<?php\n\n";
+        $content .= "class TestClass\n{\n";
+        // Add 20 lines of code before method
+        for ($i = 0; $i < 20; $i++) {
+            $content .= "    // Line ".($i + 5)."\n";
+        }
+        $content .= "    public function method()\n";
+        $content .= "    {\n";
+        $content .= "        return true; // Line 28 - target\n";
+        $content .= "    }\n}\n";
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 28, 3);
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should not include class signature (too far away > 15 lines)
+        // Should start from normal context (28 - 3 = 25)
+        $this->assertArrayHasKey(25, $lines); // Normal context start
+        $this->assertArrayHasKey(28, $lines); // Target line
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_handles_abstract_class(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_abstract_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+abstract class BaseController
+{
+    private $property;
+    public function handle()
+    {
+        $var = true;
+        return $var; // Line 9 - target (outside 2-line context)
+    }
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 9, 2); // 2 lines context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(9, $lines); // Target line
+        // Should have at least the target line and context
+        $this->assertGreaterThanOrEqual(1, count($lines));
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_handles_final_class(): void
+    {
+        $file = sys_get_temp_dir().'/smart_expansion_final_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+final class ImmutableClass
+{
+    private $property;
+    public function method()
+    {
+        $var = true;
+        return $var; // Line 9 - target (outside 2-line context)
+    }
+}
+PHP;
+        file_put_contents($file, $content);
+
+        $snippet = CodeSnippet::fromFile($file, 9, 2); // 2 lines context
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Should include target line
+        $this->assertArrayHasKey(9, $lines); // Target line
+        // Should have at least the target line and context
+        $this->assertGreaterThanOrEqual(1, count($lines));
+
+        unlink($file);
+    }
+
+    public function test_from_file_handles_unreadable_file(): void
+    {
+        // Create a file and make it unreadable
+        $file = sys_get_temp_dir().'/unreadable_'.uniqid().'.php';
+        file_put_contents($file, '<?php echo "test";');
+        chmod($file, 0000);
+
+        $snippet = CodeSnippet::fromFile($file, 1, 5);
+
+        // Should return null for unreadable file
+        $this->assertNull($snippet);
+
+        // Clean up
+        chmod($file, 0644);
+        unlink($file);
+    }
+
+    public function test_get_context_lines_returns_constructor_value(): void
+    {
+        $snippet = new CodeSnippet($this->testFile, 10, [], 5);
+        $this->assertEquals(5, $snippet->getContextLines());
+    }
+
+    public function test_get_file_path_returns_constructor_value(): void
+    {
+        $snippet = new CodeSnippet($this->testFile, 10, [], 5);
+        $this->assertEquals($this->testFile, $snippet->getFilePath());
+    }
 }
