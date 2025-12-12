@@ -312,16 +312,25 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
         array $metadata = []
     ): Issue {
         $location = new Location(
-            file: $filePath,
+            file: $this->getRelativePath($filePath),
             line: $lineNumber,
             column: $column
         );
 
         // Only generate code snippet if enabled in config
         $codeSnippet = null;
-        if (function_exists('config') && config('shieldci.report.show_code_snippets', true)) {
-            $snippetLines = $contextLines ?? (int) config('shieldci.report.snippet_context_lines', 5);
-            $codeSnippet = CodeSnippet::fromFile($filePath, $lineNumber, $snippetLines);
+        if (function_exists('config')) {
+            try {
+                $showSnippets = config('shieldci.report.show_code_snippets', true);
+                if ($showSnippets) {
+                    $snippetLines = $contextLines ?? (int) config('shieldci.report.snippet_context_lines', 8);
+                    $codeSnippet = CodeSnippet::fromFile($filePath, $lineNumber, $snippetLines);
+                }
+            } catch (\Throwable $e) {
+                // Silently fail if code snippet generation fails
+                // This prevents analyzer errors from breaking the analysis
+                $codeSnippet = null;
+            }
         }
 
         return new Issue(
