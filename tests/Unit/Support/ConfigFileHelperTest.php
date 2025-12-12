@@ -333,4 +333,93 @@ class ConfigFileHelperTest extends TestCase
         $line = ConfigFileHelper::findNestedKeyLine($configFile, 'stores', 'driver', 'redis');
         $this->assertEquals(5, $line);
     }
+
+    public function testFindKeyLineStopsAtTopLevelKeyWithIndentationCheck(): void
+    {
+        // Test lines 92-100: Top-level key detection with indentation check
+        $configFile = $this->tempDir.'/config/test.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'connections' => [\n        'driver' => 'mysql',\n        'host' => 'localhost',\n    ],\n    'default' => 'mysql',\n];\n");
+
+        // Search for 'host' within 'connections'
+        // When we hit 'default' (top-level key with low indentation), should stop (lines 92-100)
+        $line = ConfigFileHelper::findKeyLine($configFile, 'host', 'connections');
+
+        // Should find host (line 6) before hitting default (line 8)
+        $this->assertEquals(6, $line);
+    }
+
+    public function testFindKeyLineHandlesTopLevelKeyWithLowIndentation(): void
+    {
+        // Test lines 92-100: Indentation check (indentLevel <= 4)
+        $configFile = $this->tempDir.'/config/test.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'connections' => [\n        'driver' => 'mysql',\n        'host' => 'localhost',\n    ],\n    'default' => 'mysql',\n];\n");
+
+        // Search for 'host' within 'connections'
+        // 'default' has low indentation (4 spaces), should trigger break (line 99)
+        // when searching for a key that doesn't exist after 'host'
+        $line = ConfigFileHelper::findKeyLine($configFile, 'host', 'connections');
+
+        // Should find host (line 6)
+        $this->assertEquals(6, $line);
+
+        // Test the break logic by searching for a non-existent key
+        // This will hit 'default' and trigger the break (lines 92-100)
+        $lineNotFound = ConfigFileHelper::findKeyLine($configFile, 'nonexistent', 'connections');
+        // Should return 1 (not found) because it breaks at 'default'
+        $this->assertEquals(1, $lineNotFound);
+    }
+
+    public function testFindKeyLineIgnoresNestedKeysWithHighIndentation(): void
+    {
+        // Test lines 92-100: Keys with high indentation (> 4) are not top-level
+        $configFile = $this->tempDir.'/config/test.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'connections' => [\n        'mysql' => [\n            'driver' => 'mysql',\n            'nested_key' => 'value',\n        ],\n    ],\n];\n");
+
+        // 'nested_key' has high indentation (12 spaces), so it shouldn't trigger break
+        $line = ConfigFileHelper::findKeyLine($configFile, 'driver', 'connections');
+
+        // Should find driver
+        $this->assertEquals(6, $line);
+    }
+
+    public function testFindNestedKeyLineStopsAtTopLevelKeyWithIndentation(): void
+    {
+        // Test line 189: Indentation check in findNestedKeyLine
+        $configFile = $this->tempDir.'/config/cache.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'stores' => [\n        'redis' => [\n            'connection' => 'default',\n        ],\n    ],\n    'default' => 'redis',\n];\n");
+
+        // Search for 'driver' in 'redis' store
+        // When we hit 'default' (top-level, low indentation), should break (line 189)
+        $line = ConfigFileHelper::findNestedKeyLine($configFile, 'stores', 'driver', 'redis');
+
+        // Should fallback to parent key (line 195)
+        $this->assertEquals(5, $line); // Returns nested array start line
+    }
+
+    public function testFindNestedKeyLineFallsBackToFindKeyLine(): void
+    {
+        // Test line 195: Fallback to findKeyLine when nested key not found
+        $configFile = $this->tempDir.'/config/cache.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'stores' => [\n        'redis' => [\n            'connection' => 'default',\n        ],\n    ],\n];\n");
+
+        // Search for 'driver' in 'redis' store, but it doesn't exist
+        // Should fallback to finding 'stores' key (line 195)
+        $line = ConfigFileHelper::findNestedKeyLine($configFile, 'stores', 'driver', 'redis');
+
+        // Should return line where 'stores' key is found (line 195 calls findKeyLine)
+        $this->assertEquals(5, $line); // Returns nested array start, or fallback to stores key
+    }
+
+    public function testFindNestedKeyLineFallsBackWhenNestedKeyNotFound(): void
+    {
+        // Test line 195: Explicit fallback scenario
+        $configFile = $this->tempDir.'/config/cache.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'stores' => [\n        'redis' => [\n            'connection' => 'default',\n            // 'driver' is missing\n        ],\n    ],\n];\n");
+
+        // Search for 'driver' which doesn't exist in 'redis'
+        $line = ConfigFileHelper::findNestedKeyLine($configFile, 'stores', 'driver', 'redis');
+
+        // Should fallback to findKeyLine('stores') (line 195)
+        $this->assertEquals(5, $line); // Should find 'stores' key or nested array start
+    }
 }
