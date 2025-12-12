@@ -77,25 +77,6 @@ class CodeSnippet
     }
 
     /**
-     * Calculate the start and end line numbers for the snippet.
-     *
-     * @param int $targetLine The target line number
-     * @param int $totalLines Total lines in the file
-     * @param int $contextLines Lines before/after to include
-     * @return array{int, int} [startLine, endLine]
-     */
-    private static function calculateBounds(
-        int $targetLine,
-        int $totalLines,
-        int $contextLines
-    ): array {
-        $startLine = max($targetLine - $contextLines, 1);
-        $endLine = min($targetLine + $contextLines, $totalLines);
-
-        return [$startLine, $endLine];
-    }
-
-    /**
      * Calculate bounds with smart context expansion to include method/class signatures.
      *
      * @param SplFileObject $file The file object
