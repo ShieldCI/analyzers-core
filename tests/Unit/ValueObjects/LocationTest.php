@@ -101,4 +101,63 @@ class LocationTest extends TestCase
         // @phpstan-ignore-next-line - Testing that readonly property throws error
         $location->file = '/new/path.php';
     }
+
+    public function testCanBeCreatedWithNullLine(): void
+    {
+        $location = new Location('/path/to/file.php', null);
+
+        $this->assertEquals('/path/to/file.php', $location->file);
+        $this->assertNull($location->line);
+        $this->assertNull($location->column);
+    }
+
+    public function testToStringWithNullLine(): void
+    {
+        $location = new Location('/path/to/file.php', null);
+
+        $this->assertEquals('/path/to/file.php', (string) $location);
+    }
+
+    public function testToStringWithNullLineAndColumn(): void
+    {
+        $location = new Location('/path/to/file.php', null, 10);
+
+        // Column is ignored when line is null
+        $this->assertEquals('/path/to/file.php', (string) $location);
+    }
+
+    public function testToArrayWithNullLine(): void
+    {
+        $location = new Location('/path/to/file.php', null);
+        $array = $location->toArray();
+
+        $this->assertEquals([
+            'file' => '/path/to/file.php',
+        ], $array);
+    }
+
+    public function testFromArrayWithNullLine(): void
+    {
+        $data = [
+            'file' => '/path/to/file.php',
+            'line' => null,
+        ];
+
+        $location = Location::fromArray($data);
+
+        $this->assertEquals('/path/to/file.php', $location->file);
+        $this->assertNull($location->line);
+    }
+
+    public function testFromArrayWithoutLine(): void
+    {
+        $data = [
+            'file' => '/path/to/file.php',
+        ];
+
+        $location = Location::fromArray($data);
+
+        $this->assertEquals('/path/to/file.php', $location->file);
+        $this->assertNull($location->line);
+    }
 }

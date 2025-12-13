@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Support;
 
+use ShieldCI\AnalyzersCore\ValueObjects\CodeSnippet;
+
 /**
  * Utility for parsing and analyzing file contents.
  */
@@ -224,31 +226,45 @@ class FileParser
     }
 
     /**
-     * Get code snippet from file with context lines.
+     * Get code snippet from file with context lines as a plain string.
+     *
+     * This method is useful when you need a simple string snippet, such as for
+     * the `code` parameter in `createIssue()`. It uses CodeSnippet internally
+     * for better performance and features (including smart context expansion),
+     * but returns a plain string for backward compatibility.
+     *
+     * **When to use:**
+     * - For simple string snippets (e.g., `code` parameter in `createIssue()`)
+     * - When you don't need structured line-by-line data
+     * - For backward compatibility with existing code
+     *
+     * **When to use CodeSnippet::fromFile() instead:**
+     * - When you need structured data with line numbers
+     * - For `createIssueWithSnippet()` which expects a CodeSnippet object
+     * - When you need access to line-by-line data with keys
      *
      * @param  string  $filePath  Path to the file
      * @param  int  $line  Target line number (1-indexed)
-     * @param  int  $contextLines  Number of context lines before and after
-     * @return string|null  Code snippet as string, or null if file cannot be read
+     * @param  int  $contextLines  Number of context lines before and after (default: 2)
+     * @return string|null  Code snippet as string with newlines, or null if file cannot be read
      */
     public static function getCodeSnippet(string $filePath, int $line, int $contextLines = 2): ?string
     {
-        $lines = self::getLines($filePath);
+        $codeSnippet = CodeSnippet::fromFile($filePath, $line, $contextLines);
 
-        if (empty($lines)) {
+        if ($codeSnippet === null) {
             return null;
         }
 
-        $start = max(0, $line - $contextLines - 1);
-        $end = min(count($lines), $line + $contextLines);
+        // Convert CodeSnippet object to plain string format (maintaining backward compatibility)
+        // Note: CodeSnippet lines are already rtrimmed, so we need to add newlines back
+        $lines = $codeSnippet->getLines();
+        $result = '';
 
-        $snippet = [];
-        for ($i = $start; $i < $end; $i++) {
-            if (isset($lines[$i])) {
-                $snippet[] = $lines[$i];
-            }
+        foreach ($lines as $lineContent) {
+            $result .= $lineContent . "\n";
         }
 
-        return implode('', $snippet);
+        return $result;
     }
 }

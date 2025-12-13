@@ -28,7 +28,7 @@ final class Issue
     /**
      * Create from array.
      *
-     * @param array{message: string, location: array{file: string, line: int, column?: int}, severity: string, recommendation: string, code?: string, metadata?: array<string, mixed>, code_snippet?: array<string, mixed>|null} $data
+     * @param array{message: string, location: array{file: string, line?: int|null, column?: int|null}, severity: string, recommendation: string, code?: string, metadata?: array<string, mixed>, code_snippet?: array<string, mixed>|null} $data
      */
     public static function fromArray(array $data): self
     {
