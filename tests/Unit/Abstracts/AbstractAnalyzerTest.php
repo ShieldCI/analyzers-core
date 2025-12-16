@@ -859,6 +859,111 @@ class AbstractAnalyzerTest extends TestCase
             }
         }
     }
+
+    public function testCreateIssueWithSnippetSkipsSnippetWhenLineNumberIsNull(): void
+    {
+        // Test line 323: ! is_null($lineNumber) - Should skip snippet generation when null
+        $testFile = sys_get_temp_dir().'/test_null_line_'.uniqid().'.php';
+        file_put_contents($testFile, "<?php\n\nclass Test\n{\n    public function method()\n    {\n        return true; // Line 7\n    }\n}\n");
+
+        $analyzer = new IssueWithNullLineNumberAnalyzer($testFile);
+        $result = $analyzer->analyze();
+
+        $issues = $result->getIssues();
+        $this->assertCount(1, $issues);
+
+        $issue = $issues[0];
+        // Issue should be created but code snippet should always be null
+        // because lineNumber is null (line 323 condition)
+        $this->assertEquals('Test issue with null line number', $issue->message);
+        $this->assertNull($issue->location->line, 'Line number should be null');
+        $this->assertNull($issue->codeSnippet, 'Code snippet should be null when line number is null (line 323)');
+
+        unlink($testFile);
+    }
+
+    public function testCreateIssueWithSnippetCatchesCodeSnippetExceptions(): void
+    {
+        // Test lines 329-333: catch (\Throwable $e) block
+        // Create a file that will cause CodeSnippet::fromFile() to potentially fail
+        $testFile = sys_get_temp_dir().'/test_exception_'.uniqid().'.php';
+        file_put_contents($testFile, "<?php\nshort file\n");
+
+        if (function_exists('config')) {
+            // Enable code snippets
+            $originalShowSnippets = config('shieldci.report.show_code_snippets', null);
+            $originalContextLines = config('shieldci.report.snippet_context_lines', null);
+            config(['shieldci.report.show_code_snippets' => true]);
+            config(['shieldci.report.snippet_context_lines' => 100]); // Request more lines than file has
+
+            try {
+                $analyzer = new IssueWithSnippetAnalyzer($testFile);
+                $result = $analyzer->analyze();
+
+                $issues = $result->getIssues();
+                $this->assertCount(1, $issues);
+
+                $issue = $issues[0];
+                // Issue should still be created even if snippet generation throws
+                $this->assertEquals('Test issue with snippet', $issue->message);
+                $this->assertNotNull($issue->location);
+                // Code snippet may be null if generation failed (lines 329-333)
+                // The important thing is that the issue was still created successfully
+                $this->assertIsObject($issue);
+            } finally {
+                // Restore config
+                if ($originalShowSnippets !== null) {
+                    config(['shieldci.report.show_code_snippets' => $originalShowSnippets]);
+                }
+                if ($originalContextLines !== null) {
+                    config(['shieldci.report.snippet_context_lines' => $originalContextLines]);
+                }
+            }
+        } else {
+            // If config() doesn't exist, just verify the issue is created
+            $analyzer = new IssueWithSnippetAnalyzer($testFile);
+            $result = $analyzer->analyze();
+
+            $issues = $result->getIssues();
+            $this->assertCount(1, $issues);
+            $issue = $issues[0];
+            $this->assertEquals('Test issue with snippet', $issue->message);
+        }
+
+        unlink($testFile);
+    }
+
+    public function testCreateIssueWithSnippetFallsBackToNullOnException(): void
+    {
+        // Test line 332: $codeSnippet = null (in catch block)
+        // Use a non-existent file to trigger exception in CodeSnippet::fromFile()
+        $nonExistentFile = sys_get_temp_dir().'/definitely_does_not_exist_'.uniqid().'.php';
+
+        if (function_exists('config')) {
+            $originalShowSnippets = config('shieldci.report.show_code_snippets', null);
+            config(['shieldci.report.show_code_snippets' => true]);
+
+            try {
+                $analyzer = new IssueWithSnippetAnalyzer($nonExistentFile);
+                $result = $analyzer->analyze();
+
+                $issues = $result->getIssues();
+                $issue = $issues[0];
+
+                // Exception should be caught, codeSnippet set to null (line 332)
+                // and issue still created successfully
+                $this->assertNull($issue->codeSnippet, 'Code snippet should be null after exception (line 332)');
+                $this->assertEquals('Test issue with snippet', $issue->message);
+                $this->assertNotNull($issue->location);
+            } finally {
+                if ($originalShowSnippets !== null) {
+                    config(['shieldci.report.show_code_snippets' => $originalShowSnippets]);
+                }
+            }
+        } else {
+            $this->markTestSkipped('config() function not available');
+        }
+    }
 }
 
 // Test implementations
@@ -1507,6 +1612,38 @@ class ConfigRepositoryAnalyzer extends AbstractAnalyzer
     public function exposedGetEnvironment(): string
     {
         return $this->getEnvironment();
+    }
+}
+
+class IssueWithNullLineNumberAnalyzer extends AbstractAnalyzer
+{
+    public function __construct(
+        private string $testFile
+    ) {
+    }
+
+    protected function metadata(): AnalyzerMetadata
+    {
+        return new AnalyzerMetadata(
+            id: 'issue-with-null-line-analyzer',
+            name: 'Issue With Null Line Number Analyzer',
+            description: 'Test analyzer for createIssueWithSnippet with null line number',
+            category: Category::Security,
+            severity: Severity::High
+        );
+    }
+
+    protected function runAnalysis(): ResultInterface
+    {
+        $issue = $this->createIssueWithSnippet(
+            message: 'Test issue with null line number',
+            filePath: $this->testFile,
+            lineNumber: null, // This is the key: null line number
+            severity: Severity::High,
+            recommendation: 'Fix it'
+        );
+
+        return $this->failed('Issue found', [$issue]);
     }
 }
 

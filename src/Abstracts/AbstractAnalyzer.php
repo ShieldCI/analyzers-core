@@ -303,7 +303,7 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
     protected function createIssueWithSnippet(
         string $message,
         string $filePath,
-        int $lineNumber,
+        ?int $lineNumber,
         Severity $severity,
         string $recommendation,
         ?int $column = null,
@@ -319,7 +319,7 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
 
         // Only generate code snippet if enabled in config
         $codeSnippet = null;
-        if (function_exists('config')) {
+        if (function_exists('config') && ! is_null($lineNumber)) {
             try {
                 $showSnippets = config('shieldci.report.show_code_snippets', true);
                 if ($showSnippets) {
