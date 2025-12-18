@@ -25,8 +25,8 @@ class CategoryTest extends TestCase
     {
         $this->assertEquals('security', Category::Security->value);
         $this->assertEquals('performance', Category::Performance->value);
-        $this->assertEquals('code_quality', Category::CodeQuality->value);
-        $this->assertEquals('best_practices', Category::BestPractices->value);
+        $this->assertEquals('code-quality', Category::CodeQuality->value);
+        $this->assertEquals('best-practices', Category::BestPractices->value);
         $this->assertEquals('reliability', Category::Reliability->value);
     }
 
