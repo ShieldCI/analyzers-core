@@ -11,8 +11,8 @@ enum Category: string
 {
     case Security = 'security';
     case Performance = 'performance';
-    case CodeQuality = 'code_quality';
-    case BestPractices = 'best_practices';
+    case CodeQuality = 'code-quality';
+    case BestPractices = 'best-practices';
     case Reliability = 'reliability';
 
     /**
