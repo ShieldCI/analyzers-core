@@ -291,7 +291,7 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      *
      * @param string $message The issue message
      * @param string $filePath Absolute path to the file
-     * @param int $lineNumber The line number where the issue occurs
+     * @param int|null $lineNumber The line number where the issue occurs
      * @param Severity $severity The severity level
      * @param string $recommendation How to fix the issue
      * @param int|null $column Optional column number
