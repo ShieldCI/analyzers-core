@@ -127,7 +127,7 @@ class ConfigFileHelper
 
         $inParentArray = false;
         $inNestedArray = false;
-        $nestedArrayStartLine = 0;
+        $nestedArrayStartLine = 1; // Default to line 1 (never 0, as line numbers are 1-indexed)
 
         foreach ($lines as $lineNumber => $line) {
             // Strip single-line comments
