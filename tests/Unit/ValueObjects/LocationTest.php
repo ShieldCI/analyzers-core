@@ -160,4 +160,101 @@ class LocationTest extends TestCase
         $this->assertEquals('/path/to/file.php', $location->file);
         $this->assertNull($location->line);
     }
+
+    public function testHandlesZeroLineNumberGracefully(): void
+    {
+        $location = new Location('/path/to/file.php', 0);
+
+        // Line 0 is stored but treated as invalid
+        $this->assertEquals(0, $location->line);
+
+        // toString treats it as null (no line number)
+        $this->assertEquals('/path/to/file.php', (string) $location);
+
+        // toArray omits invalid line number
+        $this->assertEquals(['file' => '/path/to/file.php'], $location->toArray());
+    }
+
+    public function testHandlesNegativeLineNumberGracefully(): void
+    {
+        $location = new Location('/path/to/file.php', -1);
+
+        // Negative line is stored but treated as invalid
+        $this->assertEquals(-1, $location->line);
+
+        // toString treats it as null
+        $this->assertEquals('/path/to/file.php', (string) $location);
+
+        // toArray omits invalid line number
+        $this->assertEquals(['file' => '/path/to/file.php'], $location->toArray());
+    }
+
+    public function testHandlesZeroColumnNumberGracefully(): void
+    {
+        $location = new Location('/path/to/file.php', 42, 0);
+
+        // Column 0 is stored but treated as invalid
+        $this->assertEquals(42, $location->line);
+        $this->assertEquals(0, $location->column);
+
+        // toString includes line but omits invalid column
+        $this->assertEquals('/path/to/file.php:42', (string) $location);
+
+        // toArray includes line but omits invalid column
+        $this->assertEquals([
+            'file' => '/path/to/file.php',
+            'line' => 42,
+        ], $location->toArray());
+    }
+
+    public function testHandlesNegativeColumnNumberGracefully(): void
+    {
+        $location = new Location('/path/to/file.php', 42, -5);
+
+        // Negative column is stored but treated as invalid
+        $this->assertEquals(42, $location->line);
+        $this->assertEquals(-5, $location->column);
+
+        // toString includes line but omits invalid column
+        $this->assertEquals('/path/to/file.php:42', (string) $location);
+
+        // toArray includes line but omits invalid column
+        $this->assertEquals([
+            'file' => '/path/to/file.php',
+            'line' => 42,
+        ], $location->toArray());
+    }
+
+    public function testHandlesBothInvalidLineAndColumnGracefully(): void
+    {
+        $location = new Location('/path/to/file.php', 0, 0);
+
+        // Both stored but treated as invalid
+        $this->assertEquals(0, $location->line);
+        $this->assertEquals(0, $location->column);
+
+        // toString shows only file
+        $this->assertEquals('/path/to/file.php', (string) $location);
+
+        // toArray shows only file
+        $this->assertEquals(['file' => '/path/to/file.php'], $location->toArray());
+    }
+
+    public function testAcceptsValidLineAndColumn(): void
+    {
+        $location = new Location('/path/to/file.php', 1, 1);
+
+        $this->assertEquals(1, $location->line);
+        $this->assertEquals(1, $location->column);
+
+        // toString shows full location
+        $this->assertEquals('/path/to/file.php:1:1', (string) $location);
+
+        // toArray includes all values
+        $this->assertEquals([
+            'file' => '/path/to/file.php',
+            'line' => 1,
+            'column' => 1,
+        ], $location->toArray());
+    }
 }
