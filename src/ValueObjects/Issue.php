@@ -8,6 +8,9 @@ use ShieldCI\AnalyzersCore\Enums\Severity;
 
 /**
  * Represents a specific issue found during analysis.
+ *
+ * The location can be null for application-wide issues that are not
+ * tied to a specific file (e.g., maintenance mode, missing dependencies).
  */
 final class Issue
 {
@@ -16,7 +19,7 @@ final class Issue
      */
     public function __construct(
         public readonly string $message,
-        public readonly Location $location,
+        public readonly ?Location $location,
         public readonly Severity $severity,
         public readonly string $recommendation,
         public readonly ?string $code = null,
@@ -28,7 +31,7 @@ final class Issue
     /**
      * Create from array.
      *
-     * @param array{message: string, location: array{file: string, line?: int|null, column?: int|null}, severity: string, recommendation: string, code?: string, metadata?: array<string, mixed>, code_snippet?: array<string, mixed>|null} $data
+     * @param array{message: string, location?: array{file: string, line?: int|null, column?: int|null}|null, severity: string, recommendation: string, code?: string, metadata?: array<string, mixed>, code_snippet?: array<string, mixed>|null} $data
      */
     public static function fromArray(array $data): self
     {
@@ -59,7 +62,7 @@ final class Issue
 
         return new self(
             message: $data['message'],
-            location: Location::fromArray($data['location']),
+            location: isset($data['location']) ? Location::fromArray($data['location']) : null,
             severity: Severity::from($data['severity']),
             recommendation: $data['recommendation'],
             code: $data['code'] ?? null,
@@ -77,7 +80,7 @@ final class Issue
     {
         return array_filter([
             'message' => $this->message,
-            'location' => $this->location->toArray(),
+            'location' => $this->location?->toArray(),
             'severity' => $this->severity->value,
             'recommendation' => $this->recommendation,
             'code' => $this->code,

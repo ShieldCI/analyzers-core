@@ -473,6 +473,7 @@ class AbstractAnalyzerTest extends TestCase
 
         $issues = $result->getIssues();
         $issue = $issues[0];
+        $this->assertNotNull($issue->location);
         $this->assertEquals(15, $issue->location->column);
 
         unlink($testFile);
@@ -545,6 +546,7 @@ class AbstractAnalyzerTest extends TestCase
         $issue = $issues[0];
 
         // Location should use relative path, not absolute
+        $this->assertNotNull($issue->location);
         $this->assertEquals('test.php', $issue->location->file);
         $this->assertNotEquals($testFile, $issue->location->file);
 
@@ -876,6 +878,7 @@ class AbstractAnalyzerTest extends TestCase
         // Issue should be created but code snippet should always be null
         // because lineNumber is null (line 323 condition)
         $this->assertEquals('Test issue with null line number', $issue->message);
+        $this->assertNotNull($issue->location);
         $this->assertNull($issue->location->line, 'Line number should be null');
         $this->assertNull($issue->codeSnippet, 'Code snippet should be null when line number is null (line 323)');
 
@@ -963,6 +966,44 @@ class AbstractAnalyzerTest extends TestCase
         } else {
             $this->markTestSkipped('config() function not available');
         }
+    }
+
+    public function test_create_issue_with_null_location(): void
+    {
+        $analyzer = new class () extends AbstractAnalyzer {
+            protected function metadata(): AnalyzerMetadata
+            {
+                return new AnalyzerMetadata(
+                    id: 'test-null-location',
+                    name: 'Test Null Location',
+                    description: 'Test',
+                    category: Category::Security,
+                    severity: Severity::High
+                );
+            }
+
+            protected function runAnalysis(): ResultInterface
+            {
+                // Create issue without location
+                $issue = $this->createIssue(
+                    message: 'Application is in maintenance mode',
+                    location: null,
+                    severity: Severity::High,
+                    recommendation: 'Run: php artisan up'
+                );
+
+                return $this->failed('Found application-wide issue', [$issue]);
+            }
+        };
+
+        $result = $analyzer->analyze();
+
+        $this->assertFalse($result->isSuccess());
+        $this->assertCount(1, $result->getIssues());
+
+        $issue = $result->getIssues()[0];
+        $this->assertNull($issue->location);
+        $this->assertEquals('Application is in maintenance mode', $issue->message);
     }
 }
 
