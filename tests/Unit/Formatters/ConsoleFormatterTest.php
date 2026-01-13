@@ -359,4 +359,33 @@ class ConsoleFormatterTest extends TestCase
         $this->assertStringContainsString('$x = $_GET', $output);
         $this->assertStringContainsString('echo $x', $output);
     }
+
+    public function test_format_issues_with_null_location(): void
+    {
+        $issue = new Issue(
+            message: 'Application is in maintenance mode',
+            location: null,
+            severity: Severity::High,
+            recommendation: 'Disable maintenance mode'
+        );
+
+        $result = AnalysisResult::failed(
+            'test-analyzer',
+            'Application issue found',
+            [$issue]
+        );
+
+        $formatter = new ConsoleFormatter(useColors: false, verbose: true);
+        $output = $formatter->format([$result]);
+
+        // Should contain the issue message
+        $this->assertStringContainsString('Application is in maintenance mode', $output);
+
+        // Should NOT show "Location:" when location is null
+        $this->assertStringNotContainsString('Location:', $output);
+
+        // Should contain severity and recommendation
+        $this->assertStringContainsString('Severity:', $output);
+        $this->assertStringContainsString('Recommendation:', $output);
+    }
 }

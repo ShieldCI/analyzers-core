@@ -65,6 +65,7 @@ class IssueTest extends TestCase
         $issue = Issue::fromArray($data);
 
         $this->assertEquals('Test message', $issue->message);
+        $this->assertNotNull($issue->location);
         $this->assertEquals('/path/to/file.php', $issue->location->file);
         $this->assertEquals(42, $issue->location->line);
         $this->assertEquals(Severity::High, $issue->severity);
@@ -269,5 +270,59 @@ class IssueTest extends TestCase
         $this->assertEquals('/path/to/file.php', $snippetArray['file']);
         $this->assertEquals(42, $snippetArray['target_line']);
         $this->assertArrayHasKey('lines', $snippetArray);
+    }
+
+    public function test_creates_issue_with_null_location(): void
+    {
+        $issue = new Issue(
+            message: 'Application is in maintenance mode',
+            location: null,
+            severity: Severity::High,
+            recommendation: 'Disable maintenance mode with: php artisan up',
+            code: 'MAINTENANCE_MODE',
+            metadata: ['is_down' => true]
+        );
+
+        $this->assertNull($issue->location);
+        $this->assertEquals('Application is in maintenance mode', $issue->message);
+        $this->assertEquals(Severity::High, $issue->severity);
+    }
+
+    public function test_to_array_handles_null_location(): void
+    {
+        $issue = new Issue(
+            message: 'Application-wide issue',
+            location: null,
+            severity: Severity::Medium,
+            recommendation: 'Fix this'
+        );
+
+        $array = $issue->toArray();
+
+        $this->assertArrayHasKey('message', $array);
+        $this->assertArrayHasKey('severity', $array);
+        $this->assertArrayHasKey('recommendation', $array);
+
+        // Location should not be in array when null (filtered by array_filter)
+        $this->assertArrayNotHasKey('location', $array);
+    }
+
+    public function test_from_array_handles_missing_location(): void
+    {
+        /**
+         * @var array{message: string, severity: string, recommendation: string}
+         */
+        $data = [
+            'message' => 'Application issue',
+            // 'location' key is missing
+            'severity' => 'medium',
+            'recommendation' => 'Fix it',
+        ];
+
+        // Testing with missing location key (valid for nullable location)
+        $issue = Issue::fromArray($data);
+
+        $this->assertNull($issue->location);
+        $this->assertEquals('Application issue', $issue->message);
     }
 }

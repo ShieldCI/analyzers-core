@@ -155,10 +155,15 @@ class ConsoleFormatter implements ReporterInterface
 
                 foreach ($result->getIssues() as $issue) {
                     $output[] = '    • ' . $issue->message;
-                    $output[] = $this->color(
-                        '      Location: ' . $issue->location,
-                        'gray'
-                    );
+
+                    // Only show location if it exists
+                    if ($issue->location !== null) {
+                        $output[] = $this->color(
+                            '      Location: ' . $issue->location,
+                            'gray'
+                        );
+                    }
+
                     $output[] = $this->color(
                         '      Severity: ' . $issue->severity->label(),
                         $issue->severity->color()

@@ -267,7 +267,7 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      */
     protected function createIssue(
         string $message,
-        Location $location,
+        ?Location $location,
         Severity $severity,
         string $recommendation,
         ?string $code = null,
@@ -288,6 +288,9 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      *
      * This helper method creates an issue and automatically generates a code snippet
      * from the file if code snippets are enabled in the configuration.
+     *
+     * Note: This method always creates issues WITH a location (file + line).
+     * For application-wide issues without a file, use createIssue() with null location.
      *
      * @param string $message The issue message
      * @param string $filePath Absolute path to the file
