@@ -170,7 +170,7 @@ class PackageDetector
         }
 
         // Verify at least one panel provider is registered
-        return self::isPanelProviderRegistered($foundPanelProviders, $basePath);
+        return self::isServiceProviderRegistered($foundPanelProviders, $basePath);
     }
 
     /**
@@ -263,21 +263,23 @@ class PackageDetector
     }
 
     /**
-     * Check if any of the panel provider classes are registered.
+     * Check if a service provider is registered.
      *
      * Checks both Laravel 11+ (bootstrap/providers.php) and Laravel 10- (config/app.php).
      *
-     * @param  array<string>  $panelProviders  Fully qualified panel provider class names
+     * @param  string|array<string>  $providerClasses  Provider class name(s) to check
      * @param  string  $basePath  Application base path
-     * @return bool True if at least one panel provider is registered
+     * @return bool True if at least one provider is registered
      */
-    private static function isPanelProviderRegistered(array $panelProviders, string $basePath): bool
+    private static function isServiceProviderRegistered(string|array $providerClasses, string $basePath): bool
     {
+        $providers = is_array($providerClasses) ? $providerClasses : [$providerClasses];
+
         // Laravel 11+: Check bootstrap/providers.php
         $bootstrapProviders = $basePath.DIRECTORY_SEPARATOR.'bootstrap'.DIRECTORY_SEPARATOR.'providers.php';
         if (file_exists($bootstrapProviders)) {
             $content = file_get_contents($bootstrapProviders);
-            if ($content !== false && self::isAnyProviderInContent($panelProviders, $content)) {
+            if ($content !== false && self::isAnyProviderInContent($providers, $content)) {
                 return true;
             }
         }
@@ -286,7 +288,7 @@ class PackageDetector
         $configApp = $basePath.DIRECTORY_SEPARATOR.'config'.DIRECTORY_SEPARATOR.'app.php';
         if (file_exists($configApp)) {
             $content = file_get_contents($configApp);
-            if ($content !== false && self::isAnyProviderInContent($panelProviders, $content)) {
+            if ($content !== false && self::isAnyProviderInContent($providers, $content)) {
                 return true;
             }
         }
@@ -366,6 +368,73 @@ class PackageDetector
     public static function hasLivewire(string $basePath): bool
     {
         return self::hasPackage('livewire/livewire', $basePath);
+    }
+
+    /**
+     * Check if Laravel Horizon is installed.
+     *
+     * Laravel Horizon is a dashboard for monitoring Redis queues.
+     *
+     * Note: This only checks composer.lock. Use isHorizonConfigured() to verify
+     * that Horizon has been set up via artisan commands.
+     *
+     * @param  string  $basePath  Application base path
+     * @return bool True if Horizon is installed
+     *
+     * @see https://laravel.com/docs/horizon
+     */
+    public static function hasHorizon(string $basePath): bool
+    {
+        return self::hasPackage('laravel/horizon', $basePath);
+    }
+
+    /**
+     * Check if Horizon is configured and ready to use.
+     *
+     * This method verifies that Horizon has been properly set up by checking:
+     * 1. Package installed in composer.lock
+     * 2. config/horizon.php exists (published via horizon:install)
+     * 3. app/Providers/HorizonServiceProvider.php exists
+     * 4. Provider is registered in bootstrap/providers.php or config/app.php
+     *
+     * Running "php artisan horizon:install" creates the configuration file,
+     * service provider, and registers it automatically.
+     *
+     * @param  string  $basePath  Application base path
+     * @return bool True if Horizon is installed, configured, and registered
+     *
+     * @see https://laravel.com/docs/horizon#installation
+     */
+    public static function isHorizonConfigured(string $basePath): bool
+    {
+        // 1. Must be installed in composer.lock
+        if (! self::hasHorizon($basePath)) {
+            return false;
+        }
+
+        // 2. config/horizon.php must exist (published via horizon:install)
+        $configPath = $basePath.DIRECTORY_SEPARATOR.'config'.DIRECTORY_SEPARATOR.'horizon.php';
+        if (! file_exists($configPath)) {
+            return false;
+        }
+
+        // 3. HorizonServiceProvider must exist
+        $providerPath = $basePath.DIRECTORY_SEPARATOR.'app'.DIRECTORY_SEPARATOR.
+            'Providers'.DIRECTORY_SEPARATOR.'HorizonServiceProvider.php';
+        if (! file_exists($providerPath)) {
+            return false;
+        }
+
+        // 4. Extract namespace from provider file to support custom application namespaces
+        $namespace = self::extractNamespaceFromFile($providerPath);
+
+        // Build fully qualified class name (fallback to App if namespace extraction fails)
+        $providerClass = $namespace
+            ? $namespace.'\\Providers\\HorizonServiceProvider'
+            : 'App\\Providers\\HorizonServiceProvider';
+
+        // 5. Provider must be registered
+        return self::isServiceProviderRegistered($providerClass, $basePath);
     }
 
     /**

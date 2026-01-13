@@ -651,6 +651,198 @@ PHP;
     }
 
     // =================================================================
+    // Tests for hasHorizon()
+    // =================================================================
+
+    public function test_has_horizon_returns_true_when_installed(): void
+    {
+        $this->createComposerLock(['laravel/horizon']);
+
+        $result = PackageDetector::hasHorizon($this->testDir);
+
+        $this->assertTrue($result);
+    }
+
+    public function test_has_horizon_returns_false_when_not_installed(): void
+    {
+        $this->createComposerLock(['laravel/framework']);
+
+        $result = PackageDetector::hasHorizon($this->testDir);
+
+        $this->assertFalse($result);
+    }
+
+    // =================================================================
+    // Tests for isHorizonConfigured()
+    // =================================================================
+
+    public function test_is_horizon_configured_returns_false_when_package_not_installed(): void
+    {
+        $this->createComposerLock(['laravel/framework']);
+
+        $result = PackageDetector::isHorizonConfigured($this->testDir);
+
+        $this->assertFalse($result);
+    }
+
+    public function test_is_horizon_configured_returns_false_when_config_missing(): void
+    {
+        $this->createComposerLock(['laravel/horizon']);
+        // Don't create config/horizon.php
+
+        $result = PackageDetector::isHorizonConfigured($this->testDir);
+
+        $this->assertFalse($result);
+    }
+
+    public function test_is_horizon_configured_returns_false_when_provider_missing(): void
+    {
+        $this->createComposerLock(['laravel/horizon']);
+
+        // Create config but not provider
+        $configDir = $this->testDir.'/config';
+        mkdir($configDir, 0755, true);
+        file_put_contents($configDir.'/horizon.php', '<?php return [];');
+
+        $result = PackageDetector::isHorizonConfigured($this->testDir);
+
+        $this->assertFalse($result);
+    }
+
+    public function test_is_horizon_configured_returns_false_when_provider_not_registered(): void
+    {
+        $this->createComposerLock(['laravel/horizon']);
+
+        // Create config
+        $configDir = $this->testDir.'/config';
+        mkdir($configDir, 0755, true);
+        file_put_contents($configDir.'/horizon.php', '<?php return [];');
+
+        // Create provider
+        $providersDir = $this->testDir.'/app/Providers';
+        mkdir($providersDir, 0755, true);
+        file_put_contents($providersDir.'/HorizonServiceProvider.php', '<?php namespace App\Providers;');
+
+        // Don't register it
+
+        $result = PackageDetector::isHorizonConfigured($this->testDir);
+
+        $this->assertFalse($result);
+    }
+
+    public function test_is_horizon_configured_returns_true_when_fully_configured(): void
+    {
+        $this->createComposerLock(['laravel/horizon']);
+
+        // Create config
+        $configDir = $this->testDir.'/config';
+        mkdir($configDir, 0755, true);
+        file_put_contents($configDir.'/horizon.php', '<?php return [];');
+
+        // Create provider
+        $providersDir = $this->testDir.'/app/Providers';
+        mkdir($providersDir, 0755, true);
+        file_put_contents($providersDir.'/HorizonServiceProvider.php', '<?php namespace App\Providers;');
+
+        // Register provider (Laravel 11 style)
+        $this->registerProviderInBootstrap('App\\Providers\\HorizonServiceProvider');
+
+        $result = PackageDetector::isHorizonConfigured($this->testDir);
+
+        $this->assertTrue($result);
+    }
+
+    public function test_is_horizon_configured_detects_registration_in_config_app(): void
+    {
+        $this->createComposerLock(['laravel/horizon']);
+
+        // Create config
+        $configDir = $this->testDir.'/config';
+        mkdir($configDir, 0755, true);
+        file_put_contents($configDir.'/horizon.php', '<?php return [];');
+
+        // Create provider
+        $providersDir = $this->testDir.'/app/Providers';
+        mkdir($providersDir, 0755, true);
+        file_put_contents($providersDir.'/HorizonServiceProvider.php', '<?php namespace App\Providers;');
+
+        // Register provider (Laravel 10 style)
+        $this->registerProviderInConfigApp('App\\Providers\\HorizonServiceProvider');
+
+        $result = PackageDetector::isHorizonConfigured($this->testDir);
+
+        $this->assertTrue($result);
+    }
+
+    public function test_is_horizon_configured_works_with_custom_namespace(): void
+    {
+        $this->createComposerLock(['laravel/horizon']);
+
+        // Create config
+        $configDir = $this->testDir.'/config';
+        mkdir($configDir, 0755, true);
+        file_put_contents($configDir.'/horizon.php', '<?php return [];');
+
+        // Create provider with CUSTOM namespace
+        $providersDir = $this->testDir.'/app/Providers';
+        mkdir($providersDir, 0755, true);
+
+        $providerCode = <<<'PHP'
+<?php
+
+namespace Acme\Providers;
+
+use Laravel\Horizon\HorizonApplicationServiceProvider;
+
+class HorizonServiceProvider extends HorizonApplicationServiceProvider
+{
+    //
+}
+PHP;
+        file_put_contents($providersDir.'/HorizonServiceProvider.php', $providerCode);
+
+        // Register provider with custom namespace
+        $this->registerProviderInBootstrap('Acme\\Providers\\HorizonServiceProvider');
+
+        $result = PackageDetector::isHorizonConfigured($this->testDir);
+
+        $this->assertTrue($result);
+    }
+
+    public function test_is_horizon_configured_falls_back_to_app_namespace_when_extraction_fails(): void
+    {
+        $this->createComposerLock(['laravel/horizon']);
+
+        // Create config
+        $configDir = $this->testDir.'/config';
+        mkdir($configDir, 0755, true);
+        file_put_contents($configDir.'/horizon.php', '<?php return [];');
+
+        // Create provider WITHOUT namespace declaration (unusual but possible)
+        $providersDir = $this->testDir.'/app/Providers';
+        mkdir($providersDir, 0755, true);
+
+        $providerCode = <<<'PHP'
+<?php
+
+// No namespace declaration - should fallback to App\Providers\HorizonServiceProvider
+
+class HorizonServiceProvider
+{
+    //
+}
+PHP;
+        file_put_contents($providersDir.'/HorizonServiceProvider.php', $providerCode);
+
+        // Register provider using default App namespace (what the fallback expects)
+        $this->registerProviderInBootstrap('App\\Providers\\HorizonServiceProvider');
+
+        $result = PackageDetector::isHorizonConfigured($this->testDir);
+
+        $this->assertTrue($result);
+    }
+
+    // =================================================================
     // Tests for Caching
     // =================================================================
 
