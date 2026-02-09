@@ -358,6 +358,21 @@ YAML;
         $this->assertTrue($result);
     }
 
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_is_laravel_vapor_detects_lambda_runtime_class(): void
+    {
+        // Load the stub class so class_exists() returns true (line 36)
+        require_once __DIR__.'/../../Fixtures/LambdaRuntime.php';
+
+        $result = PlatformDetector::isLaravelVapor($this->testDir);
+
+        // Should return true because LambdaRuntime class exists (line 36)
+        $this->assertTrue($result);
+    }
+
     public function test_is_serverless_returns_false_with_unrelated_env_vars(): void
     {
         // Set some unrelated environment variables

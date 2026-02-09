@@ -70,10 +70,10 @@ class CodeSnippet
             }
 
             return new self($filePath, $targetLine, $lines, $contextLines);
-        } catch (RuntimeException $e) {
+        } catch (RuntimeException $e) { // @codeCoverageIgnoreStart
             // File reading error, return null
             return null;
-        }
+        } // @codeCoverageIgnoreEnd
     }
 
     /**
@@ -126,7 +126,7 @@ class CodeSnippet
             $line = $file->current();
 
             if (! is_string($line)) {
-                continue;
+                continue; // @codeCoverageIgnore
             }
 
             $trimmed = trim($line);

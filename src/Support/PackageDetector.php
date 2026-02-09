@@ -221,7 +221,7 @@ class PackageDetector
             }
 
             return null;
-        } catch (\Throwable $e) {
+        } catch (\Throwable $e) { // @codeCoverageIgnoreStart
             // Fall back to regex-based detection
             if (! preg_match('/extends\s+(?:\\\\?Filament\\\\Panel\\\\)?PanelProvider/', $content)) {
                 return null;
@@ -237,7 +237,7 @@ class PackageDetector
             }
 
             return $namespace ? $namespace.'\\'.$className : $className;
-        }
+        } // @codeCoverageIgnoreEnd
     }
 
     /**
@@ -251,7 +251,7 @@ class PackageDetector
         $content = file_get_contents($filePath);
 
         if ($content === false) {
-            return null;
+            return null; // @codeCoverageIgnore
         }
 
         // Match namespace declaration

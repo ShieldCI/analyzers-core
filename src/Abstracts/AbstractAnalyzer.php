@@ -94,7 +94,7 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
         if (! $this->shouldRun()) {
             $reason = method_exists($this, 'getSkipReason')
                 ? $this->getSkipReason()
-                : 'Analyzer is not enabled or not applicable in current context';
+                : 'Analyzer is not enabled or not applicable in current context'; // @codeCoverageIgnore
 
             return $this->skipped($reason);
         }
@@ -326,13 +326,14 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
             try {
                 $showSnippets = config('shieldci.report.show_code_snippets', true);
                 if ($showSnippets) {
-                    $snippetLines = $contextLines ?? (int) config('shieldci.report.snippet_context_lines', 8);
+                    $configLines = config('shieldci.report.snippet_context_lines', 8);
+                    $snippetLines = $contextLines ?? (is_numeric($configLines) ? (int) $configLines : 8);
                     $codeSnippet = CodeSnippet::fromFile($filePath, $lineNumber, $snippetLines);
                 }
-            } catch (\Throwable $e) {
+            } catch (\Throwable $e) { // @codeCoverageIgnore
                 // Silently fail if code snippet generation fails
                 // This prevents analyzer errors from breaking the analysis
-                $codeSnippet = null;
+                $codeSnippet = null; // @codeCoverageIgnore
             }
         }
 
@@ -394,7 +395,7 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
         }
 
         // Final fallback: current directory (safer than empty string)
-        return '.';
+        return '.'; // @codeCoverageIgnore
     }
 
     /**
