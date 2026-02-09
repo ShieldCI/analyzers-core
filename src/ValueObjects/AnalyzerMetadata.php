@@ -12,6 +12,21 @@ use ShieldCI\AnalyzersCore\Enums\{Category, Severity};
 final class AnalyzerMetadata
 {
     /**
+     * Static resolver for documentation base URL.
+     *
+     * This allows frameworks (like Laravel) to inject their config() resolver
+     * while keeping analyzers-core framework-agnostic.
+     *
+     * @var (callable(): string)|null
+     */
+    private static $docsBaseUrlResolver = null;
+
+    /**
+     * Default documentation base URL.
+     */
+    private const DEFAULT_DOCS_BASE_URL = 'https://docs.shieldci.com';
+
+    /**
      * @param array<string> $tags
      */
     public function __construct(
@@ -24,6 +39,57 @@ final class AnalyzerMetadata
         public readonly ?string $docsUrl = null,
         public readonly ?int $timeToFix = null,
     ) {
+    }
+
+    /**
+     * Set the documentation base URL resolver.
+     *
+     * This allows frameworks to inject their configuration mechanism.
+     * Example (Laravel): AnalyzerMetadata::setDocsBaseUrlResolver(fn () => config('shieldci.docs_base_url'));
+     *
+     * @param callable(): string $resolver
+     */
+    public static function setDocsBaseUrlResolver(callable $resolver): void
+    {
+        self::$docsBaseUrlResolver = $resolver;
+    }
+
+    /**
+     * Reset the documentation base URL resolver (useful for testing).
+     */
+    public static function resetDocsBaseUrlResolver(): void
+    {
+        self::$docsBaseUrlResolver = null;
+    }
+
+    /**
+     * Get the documentation URL for this analyzer.
+     *
+     * If an explicit docsUrl was provided, returns that.
+     * Otherwise, auto-generates from base URL + category + id.
+     *
+     * Example: https://docs.shieldci.com/analyzers/security/sql-injection
+     */
+    public function getDocsUrl(): string
+    {
+        // If explicit URL was provided, use it
+        if ($this->docsUrl !== null) {
+            return $this->docsUrl;
+        }
+
+        // Get base URL from resolver or use default
+        if (self::$docsBaseUrlResolver !== null) {
+            /** @var mixed $resolvedUrl */
+            $resolvedUrl = (self::$docsBaseUrlResolver)();
+            $baseUrl = is_string($resolvedUrl) ? $resolvedUrl : self::DEFAULT_DOCS_BASE_URL;
+        } else {
+            $baseUrl = self::DEFAULT_DOCS_BASE_URL;
+        }
+
+        // Remove trailing slash
+        $baseUrl = rtrim($baseUrl, '/');
+
+        return "{$baseUrl}/analyzers/{$this->category->value}/{$this->id}";
     }
 
     /**
@@ -59,7 +125,7 @@ final class AnalyzerMetadata
             'category' => $this->category->value,
             'severity' => $this->severity->value,
             'tags' => $this->tags ?: null,
-            'docs_url' => $this->docsUrl,
+            'docs_url' => $this->getDocsUrl(),
             'time_to_fix' => $this->timeToFix,
         ], fn ($value) => $value !== null);
     }
