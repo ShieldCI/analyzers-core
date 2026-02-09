@@ -33,7 +33,7 @@ class AstParser implements ParserInterface
 
         $code = file_get_contents($filePath);
         if ($code === false) {
-            return [];
+            return []; // @codeCoverageIgnore
         }
 
         return $this->parseCode($code);

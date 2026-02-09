@@ -976,6 +976,125 @@ JSON;
         $this->assertTrue($result);
     }
 
+    public function test_is_filament_configured_skips_class_without_extends(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        // Create a PHP file that contains 'extends' and 'PanelProvider' as strings
+        // (passes the quick string check) but the actual class has no extends clause
+        // This triggers line 205: $class->extends === null
+        $providerCode = <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+// The words "extends" and "PanelProvider" appear in this comment
+class StandaloneClass
+{
+    public function description(): string
+    {
+        return 'This class extends nothing and is not a PanelProvider';
+    }
+}
+PHP;
+        file_put_contents($filamentDir.'/StandaloneClass.php', $providerCode);
+
+        $result = PackageDetector::isFilamentConfigured($this->testDir);
+
+        $this->assertFalse($result);
+    }
+
+    public function test_is_filament_configured_returns_false_when_provider_not_in_bootstrap(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        // Create a valid PanelProvider class
+        $providerCode = <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Filament\Panel\PanelProvider;
+
+class AdminPanelProvider extends PanelProvider
+{
+    //
+}
+PHP;
+        file_put_contents($filamentDir.'/AdminPanelProvider.php', $providerCode);
+
+        // Register a DIFFERENT provider — isAnyProviderInContent() returns false (line 321)
+        $bootstrapDir = $this->testDir.'/bootstrap';
+        mkdir($bootstrapDir, 0755, true);
+        $content = <<<'PHP'
+<?php
+
+return [
+    App\Providers\AppServiceProvider::class,
+];
+PHP;
+        file_put_contents($bootstrapDir.'/providers.php', $content);
+
+        $result = PackageDetector::isFilamentConfigured($this->testDir);
+
+        $this->assertFalse($result);
+    }
+
+    public function test_get_composer_lock_content_handles_unreadable_file(): void
+    {
+        // Create composer.lock and make it unreadable (lines 480, 482)
+        $lockPath = $this->testDir.DIRECTORY_SEPARATOR.'composer.lock';
+        file_put_contents($lockPath, '{"packages":[]}');
+        chmod($lockPath, 0000);
+
+        // Suppress expected PHP warning from file_get_contents on unreadable file
+        $previousHandler = set_error_handler(fn () => true);
+
+        try {
+            $result = PackageDetector::hasPackage('laravel/nova', $this->testDir);
+        } finally {
+            restore_error_handler();
+        }
+
+        $this->assertFalse($result);
+
+        // Restore permissions for cleanup
+        chmod($lockPath, 0644);
+    }
+
+    public function test_get_panel_provider_handles_unreadable_file(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        // Create a provider file with correct content but make it unreadable (line 189)
+        $providerFile = $filamentDir.'/AdminPanelProvider.php';
+        file_put_contents($providerFile, "<?php\nnamespace App\\Providers\\Filament;\nuse Filament\\Panel\\PanelProvider;\nclass AdminPanelProvider extends PanelProvider {}");
+        chmod($providerFile, 0000);
+
+        // Suppress expected PHP warning from file_get_contents on unreadable file
+        $previousHandler = set_error_handler(fn () => true);
+
+        try {
+            $result = PackageDetector::isFilamentConfigured($this->testDir);
+        } finally {
+            restore_error_handler();
+        }
+
+        $this->assertFalse($result);
+
+        // Restore permissions for cleanup
+        chmod($providerFile, 0644);
+    }
+
     public function test_does_not_match_substring_of_package_name(): void
     {
         $this->createComposerLock(['my-vendor/laravel-nova-tools']);

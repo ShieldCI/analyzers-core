@@ -422,4 +422,38 @@ class ConfigFileHelperTest extends TestCase
         // Should fallback to findKeyLine('stores') (line 195)
         $this->assertEquals(5, $line); // Should find 'stores' key or nested array start
     }
+
+    public function testFindNestedKeyLineBreaksAtTopLevelKeyAndFallsBackToFindKeyLine(): void
+    {
+        // Test lines 189, 195: The loop finds a top-level key with low indentation
+        // after the parent array, breaks out, and falls back to findKeyLine()
+        $configFile = $this->tempDir.'/config/queue.php';
+        // Structure: 'connections' parent is found, but nestedValue 'nonexistent' is never
+        // found as a sub-array, so $inNestedArray stays false. When 'batching' (top-level,
+        // indentation <= 4) is encountered, the break at line 189 triggers.
+        // After the loop, line 195 returns findKeyLine('connections').
+        $content = <<<'PHP'
+<?php
+
+return [
+    'connections' => [
+        'database' => [
+            'table' => 'jobs',
+        ],
+    ],
+    'batching' => [
+        'table' => 'job_batches',
+    ],
+];
+PHP;
+        file_put_contents($configFile, $content);
+
+        // Search for nestedValue 'nonexistent' which doesn't exist as a sub-array key
+        // inside 'connections'. The loop will pass through without setting $inNestedArray,
+        // hit 'batching' top-level key, break, and fall back to findKeyLine('connections').
+        $line = ConfigFileHelper::findNestedKeyLine($configFile, 'connections', 'driver', 'nonexistent');
+
+        // Should fall back to the line of the 'connections' parent key (line 4)
+        $this->assertEquals(4, $line);
+    }
 }

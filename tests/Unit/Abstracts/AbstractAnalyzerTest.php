@@ -584,17 +584,10 @@ class AbstractAnalyzerTest extends TestCase
 
     public function testCreateIssueWithSnippetRespectsShowCodeSnippetsConfig(): void
     {
-        // This test requires config() function to exist
-        if (! function_exists('config')) {
-            $this->markTestSkipped('config() function not available in test environment');
-        }
+        $GLOBALS['__shieldci_test_config'] = [];
 
         $testFile = sys_get_temp_dir().'/test_snippet_disabled_'.uniqid().'.php';
         file_put_contents($testFile, "<?php\n\nclass Test\n{\n    public function method()\n    {\n        return true; // Line 7\n    }\n}\n");
-
-        // Save original config values
-        $originalShowSnippets = config('shieldci.report.show_code_snippets', true);
-        $originalContextLines = config('shieldci.report.snippet_context_lines', 8);
 
         try {
             // Disable code snippets
@@ -610,9 +603,7 @@ class AbstractAnalyzerTest extends TestCase
             $this->assertEquals('Test issue with snippet', $issue->message);
             $this->assertNull($issue->codeSnippet, 'Code snippet should be null when show_code_snippets is disabled');
         } finally {
-            // Restore original config
-            config(['shieldci.report.show_code_snippets' => $originalShowSnippets]);
-            config(['shieldci.report.snippet_context_lines' => $originalContextLines]);
+            unset($GLOBALS['__shieldci_test_config']);
         }
 
         unlink($testFile);
@@ -665,17 +656,11 @@ class AbstractAnalyzerTest extends TestCase
 
     public function testCreateIssueWithSnippetUsesConfigContextLines(): void
     {
-        // This test requires config() function to exist
-        if (! function_exists('config')) {
-            $this->markTestSkipped('config() function not available in test environment');
-        }
+        $GLOBALS['__shieldci_test_config'] = [];
 
         $testFile = sys_get_temp_dir().'/test_snippet_config_'.uniqid().'.php';
         file_put_contents($testFile, "<?php\n\nclass Test\n{\n    public function method()\n    {\n        return true; // Line 7\n    }\n}\n");
 
-        // Set config value for snippet_context_lines
-        $originalValue = config('shieldci.report.snippet_context_lines', null);
-        $originalShowSnippets = config('shieldci.report.show_code_snippets', true);
         config(['shieldci.report.snippet_context_lines' => 3]);
         config(['shieldci.report.show_code_snippets' => true]);
 
@@ -686,37 +671,27 @@ class AbstractAnalyzerTest extends TestCase
             $issues = $result->getIssues();
             $issue = $issues[0];
 
-            if ($issue->codeSnippet !== null) {
-                // Should use context lines from config (3)
-                $this->assertEquals(3, $issue->codeSnippet->getContextLines());
-            }
+            $this->assertNotNull($issue->codeSnippet);
+            // Should use context lines from config (3)
+            $this->assertEquals(3, $issue->codeSnippet->getContextLines());
         } finally {
-            // Restore original config
-            if ($originalValue !== null) {
-                config(['shieldci.report.snippet_context_lines' => $originalValue]);
-            }
+            unset($GLOBALS['__shieldci_test_config']);
             unlink($testFile);
         }
     }
 
     public function testGetBasePathUsesBasePathFunction(): void
     {
-        // Test that getBasePath() works when base_path() exists
-        // In Laravel, base_path() would be available
-        // In test environment, it might fall back to getcwd()
-        $analyzer = new BasePathAnalyzer();
-        $basePath = $analyzer->exposedGetBasePath();
+        $GLOBALS['__shieldci_test_base_path'] = '/custom/test/path';
 
-        // Should return a non-empty string (either from base_path() or getcwd())
-        $this->assertIsString($basePath);
-        $this->assertNotEmpty($basePath);
+        try {
+            $analyzer = new BasePathAnalyzer();
+            $basePath = $analyzer->exposedGetBasePath();
 
-        // If base_path() exists and returns a string, it should use that (lines 373-375)
-        if (function_exists('base_path')) {
-            $basePathResult = base_path();
-            if (is_string($basePathResult) && $basePathResult !== '') {
-                $this->assertEquals($basePathResult, $basePath);
-            }
+            // Should return the custom path from base_path() stub
+            $this->assertEquals('/custom/test/path', $basePath);
+        } finally {
+            unset($GLOBALS['__shieldci_test_base_path']);
         }
     }
 
@@ -780,15 +755,11 @@ class AbstractAnalyzerTest extends TestCase
 
     public function testGetEnvironmentAppliesMappingFromConfigRepository(): void
     {
-        if (! function_exists('config')) {
-            $this->markTestSkipped('config() function not available for environment mapping');
-        }
+        $GLOBALS['__shieldci_test_config'] = [];
 
         $mockConfig = new MockConfigRepository(['app.env' => 'production-us']);
         $analyzer = new ConfigRepositoryAnalyzer($mockConfig);
 
-        // Set up environment mapping
-        $originalMapping = config('shieldci.environment_mapping', null);
         config(['shieldci.environment_mapping' => ['production-us' => 'production']]);
 
         try {
@@ -796,9 +767,7 @@ class AbstractAnalyzerTest extends TestCase
             // Should map 'production-us' to 'production' (line 460)
             $this->assertEquals('production', $environment);
         } finally {
-            if ($originalMapping !== null) {
-                config(['shieldci.environment_mapping' => $originalMapping]);
-            }
+            unset($GLOBALS['__shieldci_test_config']);
         }
     }
 
@@ -814,11 +783,7 @@ class AbstractAnalyzerTest extends TestCase
 
     public function testGetEnvironmentUsesGlobalConfigWhenNoRepository(): void
     {
-        if (! function_exists('config')) {
-            $this->markTestSkipped('config() function not available');
-        }
-
-        $originalEnv = config('app.env', null);
+        $GLOBALS['__shieldci_test_config'] = [];
         config(['app.env' => 'local']);
 
         try {
@@ -828,21 +793,13 @@ class AbstractAnalyzerTest extends TestCase
             // Should use global config('app.env') (line 471-473)
             $this->assertEquals('local', $environment);
         } finally {
-            if ($originalEnv !== null) {
-                config(['app.env' => $originalEnv]);
-            }
+            unset($GLOBALS['__shieldci_test_config']);
         }
     }
 
     public function testGetEnvironmentAppliesMappingFromGlobalConfig(): void
     {
-        if (! function_exists('config')) {
-            $this->markTestSkipped('config() function not available');
-        }
-
-        $originalEnv = config('app.env', null);
-        $originalMapping = config('shieldci.environment_mapping', null);
-
+        $GLOBALS['__shieldci_test_config'] = [];
         config(['app.env' => 'staging-preview']);
         config(['shieldci.environment_mapping' => ['staging-preview' => 'staging']]);
 
@@ -853,12 +810,7 @@ class AbstractAnalyzerTest extends TestCase
             // Should map 'staging-preview' to 'staging' (line 480-481)
             $this->assertEquals('staging', $environment);
         } finally {
-            if ($originalEnv !== null) {
-                config(['app.env' => $originalEnv]);
-            }
-            if ($originalMapping !== null) {
-                config(['shieldci.environment_mapping' => $originalMapping]);
-            }
+            unset($GLOBALS['__shieldci_test_config']);
         }
     }
 
@@ -887,50 +839,30 @@ class AbstractAnalyzerTest extends TestCase
 
     public function testCreateIssueWithSnippetCatchesCodeSnippetExceptions(): void
     {
+        $GLOBALS['__shieldci_test_config'] = [];
+        config(['shieldci.report.show_code_snippets' => true]);
+        config(['shieldci.report.snippet_context_lines' => 100]); // Request more lines than file has
+
         // Test lines 329-333: catch (\Throwable $e) block
         // Create a file that will cause CodeSnippet::fromFile() to potentially fail
         $testFile = sys_get_temp_dir().'/test_exception_'.uniqid().'.php';
         file_put_contents($testFile, "<?php\nshort file\n");
 
-        if (function_exists('config')) {
-            // Enable code snippets
-            $originalShowSnippets = config('shieldci.report.show_code_snippets', null);
-            $originalContextLines = config('shieldci.report.snippet_context_lines', null);
-            config(['shieldci.report.show_code_snippets' => true]);
-            config(['shieldci.report.snippet_context_lines' => 100]); // Request more lines than file has
-
-            try {
-                $analyzer = new IssueWithSnippetAnalyzer($testFile);
-                $result = $analyzer->analyze();
-
-                $issues = $result->getIssues();
-                $this->assertCount(1, $issues);
-
-                $issue = $issues[0];
-                // Issue should still be created even if snippet generation throws
-                $this->assertEquals('Test issue with snippet', $issue->message);
-                $this->assertNotNull($issue->location);
-                // Code snippet may be null if generation failed (lines 329-333)
-                // The important thing is that the issue was still created successfully
-                $this->assertIsObject($issue);
-            } finally {
-                // Restore config
-                if ($originalShowSnippets !== null) {
-                    config(['shieldci.report.show_code_snippets' => $originalShowSnippets]);
-                }
-                if ($originalContextLines !== null) {
-                    config(['shieldci.report.snippet_context_lines' => $originalContextLines]);
-                }
-            }
-        } else {
-            // If config() doesn't exist, just verify the issue is created
+        try {
             $analyzer = new IssueWithSnippetAnalyzer($testFile);
             $result = $analyzer->analyze();
 
             $issues = $result->getIssues();
             $this->assertCount(1, $issues);
+
             $issue = $issues[0];
+            // Issue should still be created even if snippet generation throws
             $this->assertEquals('Test issue with snippet', $issue->message);
+            $this->assertNotNull($issue->location);
+            // The important thing is that the issue was still created successfully
+            $this->assertIsObject($issue);
+        } finally {
+            unset($GLOBALS['__shieldci_test_config']);
         }
 
         unlink($testFile);
@@ -938,34 +870,38 @@ class AbstractAnalyzerTest extends TestCase
 
     public function testCreateIssueWithSnippetFallsBackToNullOnException(): void
     {
+        $GLOBALS['__shieldci_test_config'] = [];
+        config(['shieldci.report.show_code_snippets' => true]);
+
         // Test line 332: $codeSnippet = null (in catch block)
         // Use a non-existent file to trigger exception in CodeSnippet::fromFile()
         $nonExistentFile = sys_get_temp_dir().'/definitely_does_not_exist_'.uniqid().'.php';
 
-        if (function_exists('config')) {
-            $originalShowSnippets = config('shieldci.report.show_code_snippets', null);
-            config(['shieldci.report.show_code_snippets' => true]);
+        try {
+            $analyzer = new IssueWithSnippetAnalyzer($nonExistentFile);
+            $result = $analyzer->analyze();
 
-            try {
-                $analyzer = new IssueWithSnippetAnalyzer($nonExistentFile);
-                $result = $analyzer->analyze();
+            $issues = $result->getIssues();
+            $issue = $issues[0];
 
-                $issues = $result->getIssues();
-                $issue = $issues[0];
-
-                // Exception should be caught, codeSnippet set to null (line 332)
-                // and issue still created successfully
-                $this->assertNull($issue->codeSnippet, 'Code snippet should be null after exception (line 332)');
-                $this->assertEquals('Test issue with snippet', $issue->message);
-                $this->assertNotNull($issue->location);
-            } finally {
-                if ($originalShowSnippets !== null) {
-                    config(['shieldci.report.show_code_snippets' => $originalShowSnippets]);
-                }
-            }
-        } else {
-            $this->markTestSkipped('config() function not available');
+            // CodeSnippet::fromFile returns null for non-existent file, so codeSnippet is null
+            $this->assertNull($issue->codeSnippet, 'Code snippet should be null for non-existent file');
+            $this->assertEquals('Test issue with snippet', $issue->message);
+            $this->assertNotNull($issue->location);
+        } finally {
+            unset($GLOBALS['__shieldci_test_config']);
         }
+    }
+
+    public function testGetEnvironmentFallsBackWhenCallbackNotCallable(): void
+    {
+        // Test line 457: is_callable() returns false for private get() method
+        $mockConfig = new NonCallableConfigRepository();
+        $analyzer = new ConfigRepositoryAnalyzer($mockConfig);
+        $environment = $analyzer->exposedGetEnvironment();
+
+        // Should fallback to 'production' because get() is private
+        $this->assertEquals('production', $environment);
     }
 
     public function test_create_issue_with_null_location(): void

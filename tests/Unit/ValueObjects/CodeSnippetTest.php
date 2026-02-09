@@ -602,31 +602,82 @@ PHP;
     public function test_from_file_handles_runtime_exception(): void
     {
         // Test lines 73-75: Catch RuntimeException and return null
-        // Create a file that will cause issues when reading
+        // Create a valid file and verify the fromFile method works correctly
+        // The RuntimeException catch block is marked with @codeCoverageIgnore
+        // since SplFileObject blocks on FIFOs and there's no portable way to trigger it
         $file = sys_get_temp_dir().'/runtime_exception_'.uniqid().'.php';
-
-        // Create file and then make it problematic
         file_put_contents($file, "<?php\nclass Test {}\n");
-
-        // Try to read with a problematic scenario
-        // One way to trigger RuntimeException is to delete the file after opening
-        // or use a file that causes issues with SplFileObject
-
-        // Actually, let's test with a file that exists but causes issues
-        // We can't easily trigger RuntimeException with SplFileObject in normal cases,
-        // but we can test the code path exists
 
         $snippet = CodeSnippet::fromFile($file, 2, 5);
 
-        // Should either succeed or return null (if RuntimeException occurs)
-        // In normal cases, it should succeed
-        if ($snippet === null) {
-            // If it returns null, that's fine (line 75)
-            $this->assertNull($snippet);
-        } else {
-            // If it succeeds, that's also fine
-            $this->assertNotNull($snippet);
-        }
+        // Normal file should succeed
+        $this->assertNotNull($snippet);
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_detects_class_signature_in_search_range(): void
+    {
+        // Test line 136: Class signature is detected within backwards search range
+        // When there's no method signature between target and class, the class line is returned
+        $file = sys_get_temp_dir().'/class_signature_range_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+class MyService
+{
+    public $x = 1;
+    public $y = 2;
+    public $z = 3;
+    public $w = 4; // Line 8 - target
+}
+PHP;
+        file_put_contents($file, $content);
+
+        // Context of 3 puts startLine at max(8-3,1)=5. Search backwards from line 7 to 5.
+        // No method/function between lines 5-7, but class at line 3 is within 15-line limit
+        // Actually startLine=5, so minLine=5, and search goes 7->6->5. Class at 3 is below minLine.
+        // Let's use context=6 so startLine=max(8-6,1)=2, search from 7 down to 2.
+        // Class at line 3 is within range. No method found before it.
+        $snippet = CodeSnippet::fromFile($file, 8, 6);
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Smart expansion should have found 'class MyService' at line 3
+        $this->assertArrayHasKey(3, $lines);
+        $this->assertStringContainsString('class MyService', $lines[3]);
+
+        unlink($file);
+    }
+
+    public function test_smart_expansion_detects_standalone_function_signature(): void
+    {
+        // Test line 146: Standalone function is detected in backwards search
+        // Important: no closing braces between function signature and target line,
+        // because findSignatureLine() stops at '}' (assuming end of previous method)
+        $file = sys_get_temp_dir().'/standalone_function_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+function calculateTotal($a, $b, $c)
+{
+    $subtotal = $a + $b;
+    $tax = $subtotal * 0.1;
+    $shipping = 5.00;
+    $total = $subtotal + $tax + $shipping;
+    return $total; // Line 9 - target
+PHP;
+        file_put_contents($file, $content);
+
+        // Context of 7 puts startLine at max(9-7,1)=2, so function at line 3 is in range
+        // Search backwards from line 8 to line 2: no } encountered, function found at line 3
+        $snippet = CodeSnippet::fromFile($file, 9, 7);
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // Smart expansion should have found standalone function at line 3
+        $this->assertArrayHasKey(3, $lines);
+        $this->assertStringContainsString('function calculateTotal', $lines[3]);
 
         unlink($file);
     }

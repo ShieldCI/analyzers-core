@@ -435,17 +435,21 @@ class AstParserTest extends TestCase
 
     public function testFindFunctionCallsReturnsFalseWhenNameNotNameNode(): void
     {
-        // Test line 130: When function name is not a Node\Name
-        // This is hard to create in normal PHP, but we can test the code path
-        // by ensuring it handles cases where name is not Name node
-        $code = '<?php $x = 42;';
+        // Test line 130: Variable function calls have Expr\Variable name, not Node\Name
+        // $func("test") produces a FuncCall where name is Expr\Variable, not Node\Name
+        $code = '<?php $func("test"); strlen("test");';
         $ast = $this->parser->parseCode($code);
 
-        $calls = $this->parser->findFunctionCalls($ast, 'someFunction');
+        // $func("test") is a FuncCall but name is Expr\Variable, not Node\Name
+        // This exercises line 130 (return false) for the variable call
+        $calls = $this->parser->findFunctionCalls($ast, 'func');
 
-        // Should return empty (line 130 would return false if name is not Name node)
         $this->assertIsArray($calls);
         $this->assertEmpty($calls);
+
+        // Confirm strlen is still found (normal path)
+        $strlenCalls = $this->parser->findFunctionCalls($ast, 'strlen');
+        $this->assertCount(1, $strlenCalls);
     }
 
     public function testHasVariableInterpolationDetectsVariablesInStringValues(): void
@@ -458,6 +462,19 @@ class AstParserTest extends TestCase
         $result = $this->parser->hasVariableInterpolation($ast);
 
         // Should detect variables in strings (line 204 checks string->value)
+        $this->assertTrue($result);
+    }
+
+    public function testHasVariableInterpolationDetectsVarPatternInSingleQuotedString(): void
+    {
+        // Test line 204: Single-quoted strings preserve literal $ signs in the value
+        // The regex /\$\w+/ should match the literal $name in the node's value
+        $code = "<?php \$x = 'Hello \$name';";
+        $ast = $this->parser->parseCode($code);
+
+        $result = $this->parser->hasVariableInterpolation($ast);
+
+        // Single-quoted strings contain literal $name which matches the regex
         $this->assertTrue($result);
     }
 
