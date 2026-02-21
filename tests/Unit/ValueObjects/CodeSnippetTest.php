@@ -682,6 +682,186 @@ PHP;
         unlink($file);
     }
 
+    public function test_signature_within_window_does_not_shrink_context(): void
+    {
+        // Bug 1 regression: when a signature is found WITHIN the naive window,
+        // the old code snapped startLine forward to it, shrinking above-context.
+        // The fix should leave the window unchanged since the signature is already visible.
+        $file = sys_get_temp_dir().'/sig_within_window_'.uniqid().'.php';
+        $content = <<<'PHP'
+<?php
+
+namespace App;
+
+class Example
+{
+    public function first()
+    {
+        return 1; // Line 9 - method signature at line 7 is WITHIN ctx=8 window
+    }
+
+    public function second($a, $b)
+    {
+        $x = $a + $b;
+        return $x; // Line 15 - target, naive window [7..23]
+    }
+}
+PHP;
+        file_put_contents($file, $content);
+
+        // target=15, ctx=8 → naive startLine=7, endLine=23 (capped at 18)
+        // Method signature at line 13 is INSIDE [7..18], so no adjustment
+        $snippet = CodeSnippet::fromFile($file, 15, 8);
+        $this->assertNotNull($snippet);
+        $lines = $snippet->getLines();
+
+        // The naive start (line 7) should still be present — not snapped forward
+        $this->assertArrayHasKey(7, $lines);
+        // Also verify target is present
+        $this->assertArrayHasKey(15, $lines);
+
+        unlink($file);
+    }
+
+    public function test_signature_outside_window_expands_to_include_it(): void
+    {
+        // Bug 2 fix: when a signature is OUTSIDE the naive window,
+        // the new code should expand upward to include it.
+        // File must be long enough that edge compensation doesn't bring startLine
+        // below the signature line.
+        $file = sys_get_temp_dir().'/sig_outside_window_'.uniqid().'.php';
+        $lines = ["<?php\n"];                            // Line 1
+        $lines[] = "\n";                                 // Line 2
+        $lines[] = "class Service\n";                    // Line 3
+        $lines[] = "{\n";                                // Line 4
+        for ($i = 5; $i <= 12; $i++) {
+            $lines[] = "    // filler line {$i}\n";      // Lines 5-12
+        }
+        $lines[] = "    public function process()\n";    // Line 13
+        $lines[] = "    {\n";                            // Line 14
+        for ($i = 15; $i <= 24; $i++) {
+            $lines[] = "        \$step{$i} = true;\n";   // Lines 15-24
+        }
+        $lines[] = "        return true;\n";             // Line 25 - target
+        $lines[] = "    }\n";                            // Line 26
+        $lines[] = "\n";                                 // Line 27
+        // Add enough lines so endLine doesn't hit totalLines (prevents edge compensation)
+        for ($i = 28; $i <= 40; $i++) {
+            $lines[] = "    // padding {$i}\n";           // Lines 28-40
+        }
+        $lines[] = "}\n";                                // Line 41
+        file_put_contents($file, implode('', $lines));
+
+        // target=25, ctx=8 → naive startLine=17, endLine=min(33,42)=33
+        // No edge compensation (neither boundary hit).
+        // searchMin=max(25-15,1)=10. Search from 24 down to 10: finds method at 13.
+        // 13 < 17 → expansion. Budget=16, linesAbove=12, linesBelow=4. minBelow=3.
+        // 4 >= 3 → expand! startLine=13, endLine=min(25+4,42)=29.
+        $snippet = CodeSnippet::fromFile($file, 25, 8);
+        $this->assertNotNull($snippet);
+        $resultLines = $snippet->getLines();
+
+        // Should have expanded to include method signature at line 13
+        $this->assertArrayHasKey(13, $resultLines);
+        $this->assertStringContainsString('function process', $resultLines[13]);
+        // Target should still be included
+        $this->assertArrayHasKey(25, $resultLines);
+
+        unlink($file);
+    }
+
+    public function test_signature_too_far_for_budget_keeps_centered(): void
+    {
+        // Budget guard: when the signature is found OUTSIDE the window but too far
+        // away to fit within the total budget while maintaining minimum below-context.
+        // This exercises the "linesBelow < minBelow" else branch.
+        $file = sys_get_temp_dir().'/sig_too_far_'.uniqid().'.php';
+        $lines = ["<?php\n"];           // Line 1
+        $lines[] = "\n";                // Line 2
+        $lines[] = "\n";                // Line 3
+        $lines[] = "\n";                // Line 4
+        $lines[] = "\n";                // Line 5
+        // Function signature at line 6 — no closing braces between here and target
+        $lines[] = "function bigFunction(\$a)\n"; // Line 6
+        $lines[] = "{\n";               // Line 7
+        for ($i = 8; $i <= 19; $i++) {
+            $lines[] = "    \$step{$i} = true;\n";
+        }
+        $lines[] = "    return true;\n"; // Line 20 - target
+        $lines[] = "}\n";               // Line 21
+        file_put_contents($file, implode('', $lines));
+
+        // target=20, ctx=2 → naive startLine=18, endLine=min(22,22)=22 (trailing \n → 22 lines)
+        // No edge compensation (no unused lines on either side).
+        // searchMin=max(20-15,1)=5. Search from 19 down to 5: finds function at line 6.
+        // 6 < 18 → enters expansion block.
+        // Budget=4, linesAbove=20-6=14, linesBelow=4-14=-10, minBelow=min(3,2)=2.
+        // -10 < 2 → else branch (no expansion), keeps centered window.
+        $snippet = CodeSnippet::fromFile($file, 20, 2);
+        $this->assertNotNull($snippet);
+        $resultLines = $snippet->getLines();
+
+        // Window should remain centered — signature at line 6 NOT included
+        $this->assertArrayNotHasKey(6, $resultLines);
+        // Target should be present
+        $this->assertArrayHasKey(20, $resultLines);
+        // Naive start should be present (no expansion occurred)
+        $this->assertArrayHasKey(18, $resultLines);
+
+        unlink($file);
+    }
+
+    public function test_edge_compensation_near_start_extends_end(): void
+    {
+        // When target is near the start of file, unused above-lines should be
+        // redistributed to extend the end of the snippet.
+        $file = sys_get_temp_dir().'/edge_start_'.uniqid().'.php';
+        $lines = [];
+        for ($i = 1; $i <= 12; $i++) {
+            $lines[] = "// Line {$i}\n";
+        }
+        file_put_contents($file, implode('', $lines));
+
+        // target=3, ctx=5 → naive startLine=max(3-5,1)=1, endLine=min(3+5,12)=8
+        // unusedAbove = 1-(3-5) = 3. endLine = min(8+3,12) = 11
+        $snippet = CodeSnippet::fromFile($file, 3, 5);
+        $this->assertNotNull($snippet);
+        $resultLines = $snippet->getLines();
+
+        // End should be extended to 11 (not naive 8)
+        $this->assertArrayHasKey(11, $resultLines);
+        // Start should be 1
+        $this->assertArrayHasKey(1, $resultLines);
+
+        unlink($file);
+    }
+
+    public function test_edge_compensation_near_end_extends_start(): void
+    {
+        // When target is near the end of file, unused below-lines should be
+        // redistributed to extend the start of the snippet.
+        $file = sys_get_temp_dir().'/edge_end_'.uniqid().'.php';
+        $lines = [];
+        for ($i = 1; $i <= 50; $i++) {
+            // No trailing newline on last line to avoid SplFileObject counting an extra empty line
+            $lines[] = "// Line {$i}".($i < 50 ? "\n" : '');
+        }
+        file_put_contents($file, implode('', $lines));
+
+        // target=48, ctx=5 → naive startLine=max(48-5,1)=43, endLine=min(48+5,50)=50
+        // unusedBelow = (48+5)-50 = 3. startLine = max(43-3,1) = 40
+        $snippet = CodeSnippet::fromFile($file, 48, 5);
+        $this->assertNotNull($snippet);
+        $resultLines = $snippet->getLines();
+
+        // Start should be extended to 40 (not naive 43)
+        $this->assertArrayHasKey(40, $resultLines);
+        // End should be 50
+        $this->assertArrayHasKey(50, $resultLines);
+
+        unlink($file);
+    }
+
     public function test_find_signature_line_skips_non_string_lines(): void
     {
         // Test line 129: continue when line is not a string

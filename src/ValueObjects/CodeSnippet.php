@@ -79,6 +79,11 @@ class CodeSnippet
     /**
      * Calculate bounds with smart context expansion to include method/class signatures.
      *
+     * Uses edge compensation to redistribute unused context lines when the target is
+     * near the start or end of a file. Only expands the window upward when a signature
+     * is found OUTSIDE the current window — signatures already visible within the
+     * centered window are left alone to avoid shrinking above-context.
+     *
      * @param SplFileObject $file The file object
      * @param int $targetLine The target line number
      * @param int $totalLines Total lines in the file
@@ -91,17 +96,35 @@ class CodeSnippet
         int $totalLines,
         int $contextLines
     ): array {
-        // Start with basic bounds
+        // Start with basic centered bounds
         $startLine = max($targetLine - $contextLines, 1);
         $endLine = min($targetLine + $contextLines, $totalLines);
 
-        // Look for method/class signature above target line
-        $signatureLine = self::findSignatureLine($file, $targetLine, $startLine);
+        // Edge compensation: when near file boundaries, redistribute unused lines
+        $unusedAbove = ($targetLine - $contextLines) < 1 ? 1 - ($targetLine - $contextLines) : 0;
+        $endLine = min($endLine + $unusedAbove, $totalLines);
 
-        // If we found a signature and it's not too far above (max 15 lines),
-        // adjust startLine to include it
-        if ($signatureLine !== null && ($targetLine - $signatureLine) <= 15) {
-            $startLine = $signatureLine;
+        $unusedBelow = ($targetLine + $contextLines) > $totalLines ? ($targetLine + $contextLines) - $totalLines : 0;
+        $startLine = max($startLine - $unusedBelow, 1);
+
+        // Search for signatures up to 15 lines above target (beyond naive window)
+        $searchMin = max($targetLine - 15, 1);
+        $signatureLine = self::findSignatureLine($file, $targetLine, $searchMin);
+
+        // Only expand if signature is OUTSIDE the current window (above startLine).
+        // Signatures already within the window are visible without adjustment.
+        if ($signatureLine !== null && $signatureLine < $startLine) {
+            $totalBudget = 2 * $contextLines;
+            $linesAbove = $targetLine - $signatureLine;
+            $linesBelow = $totalBudget - $linesAbove;
+
+            // Only expand if we can maintain minimum context below target
+            $minBelow = min(3, $contextLines);
+            if ($linesBelow >= $minBelow) {
+                $startLine = $signatureLine;
+                $endLine = min($targetLine + $linesBelow, $totalLines);
+            }
+            // else: signature too far away to include within budget, keep centered
         }
 
         return [$startLine, $endLine];
