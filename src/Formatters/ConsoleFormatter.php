@@ -173,7 +173,7 @@ class ConsoleFormatter implements ReporterInterface
                     if ($issue->codeSnippet !== null && $this->verbose) {
                         $output[] = $this->color('      Code:', 'gray');
                         foreach ($issue->codeSnippet->getLines() as $lineNum => $lineContent) {
-                            $prefix = $lineNum === $issue->codeSnippet->getTargetLine() ? '> ' : '  ';
+                            $prefix = $lineNum === $issue->codeSnippet->getTargetLine() ? '→ ' : '  ';
                             $output[] = $this->color(sprintf('        %s%4d | %s', $prefix, $lineNum, $lineContent), 'gray');
                         }
                     }
