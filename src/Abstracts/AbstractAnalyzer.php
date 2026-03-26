@@ -270,7 +270,6 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
         ?Location $location,
         Severity $severity,
         string $recommendation,
-        ?string $code = null,
         array $metadata = []
     ): Issue {
         return new Issue(
@@ -278,7 +277,6 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
             location: $location,
             severity: $severity,
             recommendation: $recommendation,
-            code: $code,
             metadata: $metadata
         );
     }
@@ -299,7 +297,6 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      * @param string $recommendation How to fix the issue
      * @param int|null $column Optional column number
      * @param int|null $contextLines Number of lines to show before/after (null = use config default)
-     * @param string|null $code Optional error code
      * @param array<string, mixed> $metadata Additional metadata
      * @return Issue
      */
@@ -311,7 +308,6 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
         string $recommendation,
         ?int $column = null,
         ?int $contextLines = null,
-        ?string $code = null,
         array $metadata = []
     ): Issue {
         $location = new Location(
@@ -342,7 +338,6 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
             location: $location,
             severity: $severity,
             recommendation: $recommendation,
-            code: $code,
             metadata: $metadata,
             codeSnippet: $codeSnippet
         );

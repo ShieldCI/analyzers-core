@@ -170,11 +170,11 @@ class ConsoleFormatter implements ReporterInterface
                     );
                     $output[] = '      Recommendation: ' . $issue->recommendation;
 
-                    if ($issue->code !== null && $this->verbose) {
+                    if ($issue->codeSnippet !== null && $this->verbose) {
                         $output[] = $this->color('      Code:', 'gray');
-                        $lines = explode(PHP_EOL, $issue->code);
-                        foreach ($lines as $line) {
-                            $output[] = $this->color('        ' . $line, 'gray');
+                        foreach ($issue->codeSnippet->getLines() as $lineNum => $lineContent) {
+                            $prefix = $lineNum === $issue->codeSnippet->getTargetLine() ? '→ ' : '  ';
+                            $output[] = $this->color(sprintf('        %s%4d | %s', $prefix, $lineNum, $lineContent), 'gray');
                         }
                     }
                 }

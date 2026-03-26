@@ -71,7 +71,7 @@ composer require shieldci/analyzers-core
 
 use ShieldCI\AnalyzersCore\Abstracts\AbstractFileAnalyzer;
 use ShieldCI\AnalyzersCore\Contracts\ResultInterface;
-use ShieldCI\AnalyzersCore\ValueObjects\{AnalyzerMetadata, Issue, Location};
+use ShieldCI\AnalyzersCore\ValueObjects\AnalyzerMetadata;
 use ShieldCI\AnalyzersCore\Enums\{Category, Severity};
 
 class MySecurityAnalyzer extends AbstractFileAnalyzer
@@ -98,16 +98,13 @@ class MySecurityAnalyzer extends AbstractFileAnalyzer
             $lines = explode("\n", $content);
             foreach ($lines as $lineNum => $line) {
                 if (str_contains($line, 'eval(')) {
-                    $issues[] = $this->createIssue(
+                    $issues[] = $this->createIssueWithSnippet(
                         message: 'Dangerous eval() function found',
-                        location: new Location($file, $lineNum + 1),
+                        filePath: $file,
+                        lineNumber: $lineNum + 1,
                         severity: Severity::Critical,
                         recommendation: 'Remove eval() and use safer alternatives',
-                        code: 'dangerous-eval',
-                        codeSnippet: \ShieldCI\AnalyzersCore\ValueObjects\CodeSnippet::fromFile(
-                            $file,
-                            $lineNum + 1
-                        )
+                        metadata: ['code' => 'dangerous-eval']
                     );
                 }
             }
@@ -286,17 +283,14 @@ $issue = new Issue(
     location: new Location('/path/to/file.php', 42),
     severity: Severity::Critical,
     recommendation: 'Move credentials to environment variables',
-    code: 'hardcoded-credentials',
-    metadata: ['type' => 'password'],
+    metadata: ['type' => 'password', 'code' => 'hardcoded-credentials'],
     codeSnippet: CodeSnippet::fromFile('/path/to/file.php', 42)
 );
 
-// The code snippet is now attached to the issue
-// It will be displayed in console output with:
-// - Line numbers (red for target, gray for context)
-// - Arrow indicator (→) on target line
-// - Optional PHP syntax highlighting
-// - Red background on target line
+// The code snippet is displayed in verbose console output with:
+// - Line numbers alongside each line
+// - "→" prefix on the target line, "  " prefix on context lines
+// - Indentation preserved (trailing whitespace stripped, leading kept)
 ```
 
 **Smart Context Expansion Example:**
