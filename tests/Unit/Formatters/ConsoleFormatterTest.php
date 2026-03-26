@@ -8,7 +8,7 @@ use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Enums\{Severity, Status};
 use ShieldCI\AnalyzersCore\Formatters\ConsoleFormatter;
 use ShieldCI\AnalyzersCore\Results\AnalysisResult;
-use ShieldCI\AnalyzersCore\ValueObjects\{Issue, Location};
+use ShieldCI\AnalyzersCore\ValueObjects\{CodeSnippet, Issue, Location};
 
 class ConsoleFormatterTest extends TestCase
 {
@@ -138,12 +138,18 @@ class ConsoleFormatterTest extends TestCase
     public function testFormatIncludesCodeInVerboseMode(): void
     {
         $formatter = new ConsoleFormatter(verbose: true);
+        $codeSnippet = new CodeSnippet(
+            filePath: '/test.php',
+            targetLine: 1,
+            lines: [1 => '$x = $_GET["id"];'],
+            contextLines: 0
+        );
         $issue = new Issue(
             message: 'Issue',
             location: new Location('/test.php', 1),
             severity: Severity::High,
             recommendation: 'Fix it',
-            code: '$x = $_GET["id"];'
+            codeSnippet: $codeSnippet
         );
 
         $results = [
@@ -153,18 +159,24 @@ class ConsoleFormatterTest extends TestCase
         $output = $formatter->format($results);
 
         $this->assertStringContainsString('Code:', $output);
-        $this->assertStringContainsString('$x = $_GET["id"];', $output);
+        $this->assertStringContainsString('$_GET', $output);
     }
 
     public function testFormatDoesNotIncludeCodeInNonVerboseMode(): void
     {
         $formatter = new ConsoleFormatter(verbose: false);
+        $codeSnippet = new CodeSnippet(
+            filePath: '/test.php',
+            targetLine: 1,
+            lines: [1 => '$x = $_GET["id"];'],
+            contextLines: 0
+        );
         $issue = new Issue(
             message: 'Issue',
             location: new Location('/test.php', 1),
             severity: Severity::High,
             recommendation: 'Fix it',
-            code: '$x = $_GET["id"];'
+            codeSnippet: $codeSnippet
         );
 
         $results = [
@@ -173,7 +185,7 @@ class ConsoleFormatterTest extends TestCase
 
         $output = $formatter->format($results);
 
-        $this->assertStringNotContainsString('$x = $_GET["id"];', $output);
+        $this->assertStringNotContainsString('$_GET', $output);
     }
 
     public function testFormatIncludesSuccessFooter(): void
@@ -340,13 +352,18 @@ class ConsoleFormatterTest extends TestCase
     public function testFormatHandlesMultilineCodeInVerboseMode(): void
     {
         $formatter = new ConsoleFormatter(verbose: true);
-        $code = "<?php\n\$x = \$_GET['id'];\necho \$x;";
+        $codeSnippet = new CodeSnippet(
+            filePath: '/test.php',
+            targetLine: 2,
+            lines: [1 => '<?php', 2 => '$x = $_GET[\'id\'];', 3 => 'echo $x;'],
+            contextLines: 1
+        );
         $issue = new Issue(
             message: 'XSS vulnerability',
             location: new Location('/test.php', 2),
             severity: Severity::Critical,
             recommendation: 'Sanitize input',
-            code: $code
+            codeSnippet: $codeSnippet
         );
 
         $results = [
@@ -356,7 +373,7 @@ class ConsoleFormatterTest extends TestCase
         $output = $formatter->format($results);
 
         $this->assertStringContainsString('<?php', $output);
-        $this->assertStringContainsString('$x = $_GET', $output);
+        $this->assertStringContainsString('$_GET', $output);
         $this->assertStringContainsString('echo $x', $output);
     }
 

@@ -147,8 +147,7 @@ class JsonFormatterTest extends TestCase
             message: 'Test issue',
             location: new Location('/test.php', 42),
             severity: Severity::High,
-            recommendation: 'Fix it',
-            code: '$x = $_GET["id"];'
+            recommendation: 'Fix it'
         );
 
         $results = [

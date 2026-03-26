@@ -22,7 +22,6 @@ final class Issue
         public readonly ?Location $location,
         public readonly Severity $severity,
         public readonly string $recommendation,
-        public readonly ?string $code = null,
         public readonly array $metadata = [],
         public readonly ?CodeSnippet $codeSnippet = null,
     ) {
@@ -31,7 +30,7 @@ final class Issue
     /**
      * Create from array.
      *
-     * @param array{message: string, location?: array{file: string, line?: int|null, column?: int|null}|null, severity: string, recommendation: string, code?: string, metadata?: array<string, mixed>, code_snippet?: array<string, mixed>|null} $data
+     * @param array{message: string, location?: array{file: string, line?: int|null, column?: int|null}|null, severity: string, recommendation: string, metadata?: array<string, mixed>, code_snippet?: array<string, mixed>|null} $data
      */
     public static function fromArray(array $data): self
     {
@@ -65,7 +64,6 @@ final class Issue
             location: isset($data['location']) ? Location::fromArray($data['location']) : null,
             severity: Severity::from($data['severity']),
             recommendation: $data['recommendation'],
-            code: $data['code'] ?? null,
             metadata: $data['metadata'] ?? [],
             codeSnippet: $codeSnippet,
         );
@@ -83,7 +81,6 @@ final class Issue
             'location' => $this->location?->toArray(),
             'severity' => $this->severity->value,
             'recommendation' => $this->recommendation,
-            'code' => $this->code,
             'metadata' => $this->metadata ?: null,
             'code_snippet' => $this->codeSnippet?->toArray(),
         ], fn ($value) => $value !== null && $value !== []);

@@ -1093,7 +1093,6 @@ class IssueCreatingAnalyzer extends AbstractAnalyzer
             location: new Location('/test.php', 42),
             severity: Severity::High,
             recommendation: 'Fix it',
-            code: '$x = $_GET["id"];',
             metadata: ['type' => 'xss']
         );
 

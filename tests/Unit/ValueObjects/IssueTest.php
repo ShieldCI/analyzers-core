@@ -24,14 +24,12 @@ class IssueTest extends TestCase
         $this->assertEquals($location, $issue->location);
         $this->assertEquals(Severity::High, $issue->severity);
         $this->assertEquals('Fix it', $issue->recommendation);
-        $this->assertNull($issue->code);
         $this->assertEquals([], $issue->metadata);
     }
 
-    public function testCanBeCreatedWithCodeAndMetadata(): void
+    public function testCanBeCreatedWithMetadata(): void
     {
         $location = new Location('/path/to/file.php', 42);
-        $code = '$x = $_GET["id"];';
         $metadata = ['type' => 'xss'];
 
         $issue = new Issue(
@@ -39,12 +37,10 @@ class IssueTest extends TestCase
             location: $location,
             severity: Severity::Critical,
             recommendation: 'Sanitize input',
-            code: $code,
             metadata: $metadata
         );
 
         $this->assertEquals('XSS vulnerability', $issue->message);
-        $this->assertEquals($code, $issue->code);
         $this->assertEquals($metadata, $issue->metadata);
     }
 
@@ -58,7 +54,6 @@ class IssueTest extends TestCase
             ],
             'severity' => 'high',
             'recommendation' => 'Fix it',
-            'code' => 'some code',
             'metadata' => ['key' => 'value'],
         ];
 
@@ -70,7 +65,6 @@ class IssueTest extends TestCase
         $this->assertEquals(42, $issue->location->line);
         $this->assertEquals(Severity::High, $issue->severity);
         $this->assertEquals('Fix it', $issue->recommendation);
-        $this->assertEquals('some code', $issue->code);
         $this->assertEquals(['key' => 'value'], $issue->metadata);
     }
 
@@ -82,7 +76,6 @@ class IssueTest extends TestCase
             location: $location,
             severity: Severity::High,
             recommendation: 'Fix it',
-            code: 'some code',
             metadata: ['key' => 'value']
         );
 
@@ -95,7 +88,7 @@ class IssueTest extends TestCase
         $this->assertEquals(42, $location['line']);
         $this->assertEquals('high', $array['severity']);
         $this->assertEquals('Fix it', $array['recommendation']);
-        $this->assertEquals('some code', $array['code']);
+        $this->assertArrayNotHasKey('code', $array);
         $this->assertEquals(['key' => 'value'], $array['metadata']);
     }
 
@@ -279,7 +272,6 @@ class IssueTest extends TestCase
             location: null,
             severity: Severity::High,
             recommendation: 'Disable maintenance mode with: php artisan up',
-            code: 'MAINTENANCE_MODE',
             metadata: ['is_down' => true]
         );
 
