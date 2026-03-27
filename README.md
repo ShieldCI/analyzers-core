@@ -15,7 +15,7 @@ Shared foundation for building static analysis tools. Includes abstract analyzer
 - **Extensible**: Easy to create custom analyzers
 - **Well Tested**: Comprehensive test suite (100% coverage)
 - **Modern PHP**: Uses PHP 8.1+ features
-- **Laravel Compatible**: Works with Laravel 9.x, 10.x, 11.x, and 12.x
+- **Laravel Compatible**: Works with Laravel 9.x, 10.x, 11.x, 12.x and 13.x
 
 ## Requirements
 
