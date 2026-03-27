@@ -234,7 +234,7 @@ class ConfigFileHelper
 
         foreach ($returnNode->expr->items as $item) {
             if (! $item instanceof ArrayItem) {
-                continue;
+                continue; // @codeCoverageIgnore
             }
 
             if (! $item->key instanceof Node\Scalar\String_) {
