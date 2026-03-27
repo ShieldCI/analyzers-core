@@ -4,6 +4,15 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Support;
 
+use PhpParser\Node;
+use PhpParser\Node\ArrayItem;
+use PhpParser\Node\Expr\Array_;
+use PhpParser\Node\Expr\ConstFetch;
+use PhpParser\Node\Expr\FuncCall;
+use PhpParser\Node\Name;
+use PhpParser\Node\Stmt\Return_;
+use PhpParser\NodeFinder;
+
 /**
  * Helper utilities for working with Laravel configuration files.
  */
@@ -193,5 +202,105 @@ class ConfigFileHelper
 
         // Fallback: try to find the parent key
         return self::findKeyLine($configFile, $parentKey);
+    }
+
+    /**
+     * Parse a PHP config file that returns an array and extract top-level string key-value pairs.
+     *
+     * Handles value types: String_, LNumber, DNumber, ConstFetch (true/false/null), FuncCall (env()).
+     * When a value is an env() call, isEnvCall is set to true and the default argument (if any)
+     * is captured in envDefault.
+     *
+     * @return array<string, array{value: mixed, line: int, isEnvCall: bool, envDefault: mixed, envHasDefault: bool}>
+     */
+    public static function parseConfigArray(string $filePath): array
+    {
+        $ast = (new AstParser())->parseFile($filePath);
+
+        if ($ast === []) {
+            return [];
+        }
+
+        $nodeFinder = new NodeFinder();
+
+        /** @var Return_|null $returnNode */
+        $returnNode = $nodeFinder->findFirstInstanceOf($ast, Return_::class);
+
+        if (! $returnNode instanceof Return_ || ! $returnNode->expr instanceof Array_) {
+            return [];
+        }
+
+        $result = [];
+
+        foreach ($returnNode->expr->items as $item) {
+            if (! $item instanceof ArrayItem) {
+                continue;
+            }
+
+            if (! $item->key instanceof Node\Scalar\String_) {
+                continue;
+            }
+
+            $key = $item->key->value;
+            $line = $item->getStartLine();
+            $isEnvCall = false;
+            $envDefault = null;
+            $envHasDefault = false;
+            $value = self::extractNodeValue($item->value);
+
+            if ($item->value instanceof FuncCall
+                && $item->value->name instanceof Name
+                && $item->value->name->toString() === 'env'
+            ) {
+                $isEnvCall = true;
+                $value = null;
+
+                if (isset($item->value->args[1])) {
+                    $arg = $item->value->args[1];
+                    if ($arg instanceof \PhpParser\Node\Arg) {
+                        $envHasDefault = true;
+                        $envDefault = self::extractNodeValue($arg->value);
+                    }
+                }
+            }
+
+            $result[$key] = [
+                'value' => $value,
+                'line' => $line,
+                'isEnvCall' => $isEnvCall,
+                'envDefault' => $envDefault,
+                'envHasDefault' => $envHasDefault,
+            ];
+        }
+
+        return $result;
+    }
+
+    /**
+     * Extract a typed PHP value from an AST node.
+     *
+     * Returns actual PHP scalars (string, int, float, bool, null) for simple
+     * literal nodes. Returns null for complex expressions.
+     */
+    private static function extractNodeValue(Node $node): mixed
+    {
+        if ($node instanceof Node\Scalar\String_) {
+            return $node->value;
+        }
+
+        if ($node instanceof Node\Scalar\LNumber || $node instanceof Node\Scalar\DNumber) {
+            return $node->value;
+        }
+
+        if ($node instanceof ConstFetch) {
+            return match (strtolower($node->name->toString())) {
+                'true' => true,
+                'false' => false,
+                'null' => null,
+                default => $node->name->toString(),
+            };
+        }
+
+        return null;
     }
 }

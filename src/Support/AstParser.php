@@ -4,8 +4,9 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Support;
 
-use PhpParser\{Error, Node, NodeFinder, ParserFactory};
+use PhpParser\{Error, Node, NodeFinder, NodeTraverser, ParserFactory};
 use PhpParser\Node\{Expr, Stmt};
+use PhpParser\NodeVisitor\NameResolver;
 use ShieldCI\AnalyzersCore\Contracts\ParserInterface;
 
 /**
@@ -51,6 +52,24 @@ class AstParser implements ParserInterface
         } catch (Error $e) {
             return [];
         }
+    }
+
+    /**
+     * Traverse AST with NameResolver to resolve fully qualified class names.
+     *
+     * After this, use `$node->getAttribute('resolvedName')` to get FQCNs
+     * on Name nodes (class references, function calls, etc.).
+     *
+     * @param  array<Node>  $ast
+     * @param  array<string, bool>  $options  Options passed to NameResolver (e.g., ['replaceNodes' => false])
+     * @return array<Node>
+     */
+    public function resolveNames(array $ast, array $options = []): array
+    {
+        $traverser = new NodeTraverser();
+        $traverser->addVisitor(new NameResolver(null, $options));
+
+        return $traverser->traverse($ast);
     }
 
     /**
