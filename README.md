@@ -57,6 +57,8 @@ composer require shieldci/analyzers-core
    - `FileParser` - File content parsing utilities
    - `CodeHelper` - Code analysis helpers
    - `ConfigFileHelper` - Laravel configuration file utilities
+   - `MessageHelper` - Error message sanitization (redacts credentials, tokens, IPs)
+   - `InlineSuppressionParser` - Parses `@shieldci-ignore` inline suppression comments
 
 6. **Formatters**
    - `JsonFormatter` - Format results as JSON
@@ -194,6 +196,14 @@ $staticCalls = $parser->findStaticCalls($ast, 'DB', 'raw');
 
 // Find nodes of specific type
 $classes = $parser->findNodes($ast, \PhpParser\Node\Stmt\Class_::class);
+
+// Resolve fully-qualified class names with NameResolver
+// After this, use $node->getAttribute('resolvedName') on Name nodes to get FQCNs
+$resolvedAst = $parser->resolveNames($ast);
+
+// With options — preserve original Name nodes, set only the 'resolvedName' attribute
+$resolvedAst = $parser->resolveNames($ast, ['replaceNodes' => false]);
+$fqcn = $someNameNode->getAttribute('resolvedName')?->toString(); // e.g. 'Illuminate\Database\Eloquent\Model'
 ```
 
 ### Using Code Helpers
@@ -387,6 +397,163 @@ $lineNumber = ConfigFileHelper::findNestedKeyLine(
 - **Session Analyzers**: Find session driver, lifetime, security settings
 - **Queue Analyzers**: Locate queue connection, driver configurations
 - **Mail Analyzers**: Find mail driver, encryption settings
+
+### Parsing Config Arrays
+
+`ConfigFileHelper::parseConfigArray()` parses a PHP config file that returns an array and extracts the top-level key–value pairs via AST — no regex, no fragile text matching.
+
+```php
+<?php
+
+use ShieldCI\AnalyzersCore\Support\ConfigFileHelper;
+
+$entries = ConfigFileHelper::parseConfigArray('/path/to/config/session.php');
+
+// Each entry has: value, line, isEnvCall, envDefault, envHasDefault
+foreach ($entries as $key => $entry) {
+    echo "{$key} on line {$entry['line']}: ";
+
+    if ($entry['isEnvCall']) {
+        // Value comes from env() at runtime
+        echo "env() call";
+        if ($entry['envHasDefault']) {
+            var_dump($entry['envDefault']); // The default argument value
+        }
+    } else {
+        var_dump($entry['value']); // Literal: string, int, float, bool, or null
+    }
+}
+```
+
+**Example — checking session cookie security:**
+
+```php
+$session = ConfigFileHelper::parseConfigArray($configPath);
+
+// Resolve the effective value (literal or env() default)
+$secure = $session['secure']['isEnvCall']
+    ? $session['secure']['envDefault']
+    : $session['secure']['value'];
+
+if ($secure !== true) {
+    $issues[] = $this->createIssueWithSnippet(
+        message: 'Session cookies are not marked secure',
+        filePath: $configPath,
+        lineNumber: $session['secure']['line'],
+        severity: Severity::High,
+        recommendation: 'Set SESSION_SECURE_COOKIE=true in production',
+    );
+}
+```
+
+**Supported value types:**
+
+| PHP Source | `value` |
+|---|---|
+| `'string'` | `'string'` |
+| `42` / `3.14` | `42` / `3.14` |
+| `true` / `false` / `null` | `true` / `false` / `null` |
+| `PHP_INT_MAX` (constant) | `'PHP_INT_MAX'` (string) |
+| `env('KEY')` | `null` (isEnvCall = true) |
+| `env('KEY', 'default')` | `null` (envDefault = `'default'`) |
+| `['nested', 'array']` | `null` (complex, not extracted) |
+
+### Stripping PHP Comments
+
+`FileParser::stripAllComments()` removes all PHP comment styles from source code using the tokenizer — correctly handling comments inside strings, URLs, docblocks, and multiline blocks.
+
+```php
+<?php
+
+use ShieldCI\AnalyzersCore\Support\FileParser;
+
+$code = file_get_contents('/path/to/file.php');
+
+// Strips //, #, /* */, and /** */ comments
+// Preserves line numbering (removed lines replaced with blank lines)
+// Safe for URLs in strings: "https://example.com" is NOT stripped
+$stripped = FileParser::stripAllComments($code);
+```
+
+Unlike `FileParser::stripComments()` (which works on single lines via regex and breaks on URLs), `stripAllComments()` uses `token_get_all()` and handles arbitrary PHP source correctly.
+
+### Sanitizing Error Messages
+
+`MessageHelper::sanitizeErrorMessage()` redacts sensitive values from error messages before they appear in analyzer recommendations — preventing credentials and tokens from leaking into reports.
+
+```php
+<?php
+
+use ShieldCI\AnalyzersCore\Support\MessageHelper;
+
+// Redacts: passwords, API keys, bearer tokens, AWS keys, internal IPs (10.x, 172.x, 192.168.x)
+$safe = MessageHelper::sanitizeErrorMessage(
+    'Connection failed: password=s3cr3t host=10.0.0.5'
+);
+// → 'Connection failed: password=[REDACTED] host=[INTERNAL_IP]'
+
+// Use in analyzer recommendations:
+$issues[] = $this->createIssue(
+    message: 'Redis connection failed',
+    location: null,
+    severity: Severity::High,
+    recommendation: MessageHelper::sanitizeErrorMessage($e->getMessage()),
+);
+```
+
+**Redacted patterns:**
+
+| Pattern | Replacement |
+|---|---|
+| `password=…`, `passwd=…`, `pwd=…` | `[REDACTED]` |
+| `api_key=…`, `apikey=…`, `secret=…` | `[REDACTED]` |
+| `Bearer <token>` | `Bearer [REDACTED]` |
+| `AKIA…` (AWS access key) | `[REDACTED]` |
+| `10.x.x.x`, `172.16–31.x.x`, `192.168.x.x` | `[INTERNAL_IP]` |
+
+### Parsing Inline Suppressions
+
+`InlineSuppressionParser` parses `// @shieldci-ignore` comments to determine whether a given line should suppress a specific analyzer rule.
+
+```php
+<?php
+
+use ShieldCI\AnalyzersCore\Support\InlineSuppressionParser;
+
+$parser = new InlineSuppressionParser();
+$lines  = file('/path/to/file.php', FILE_IGNORE_NEW_LINES);
+
+// Returns true if the line (or an adjacent suppression comment) suppresses $analyzerId
+$suppressed = $parser->isLineSuppressed($lines, $lineNumber, 'sql-injection');
+
+if (! $suppressed) {
+    $issues[] = $this->createIssueWithSnippet(/* … */);
+}
+```
+
+**Supported suppression styles:**
+
+```php
+// Same-line:
+$query = $db->raw($input); // @shieldci-ignore sql-injection
+
+// Previous-line:
+// @shieldci-ignore sql-injection
+$query = $db->raw($input);
+
+// Suppress multiple rules:
+// @shieldci-ignore sql-injection, xss
+echo $userInput;
+
+// Suppress all rules on a line:
+// @shieldci-ignore
+echo $trustedContent;
+
+/**
+ * @shieldci-ignore sql-injection
+ */
+$query = $db->raw($input);
+```
 
 ## Enums
 

@@ -49,4 +49,13 @@ interface ParserInterface
      * @return array<Node>
      */
     public function findStaticCalls(array $ast, string $className, string $methodName): array;
+
+    /**
+     * Traverse AST with NameResolver to resolve fully qualified class names.
+     *
+     * @param  array<Node>  $ast
+     * @param  array<string, bool>  $options  Options passed to NameResolver
+     * @return array<Node>
+     */
+    public function resolveNames(array $ast, array $options = []): array;
 }

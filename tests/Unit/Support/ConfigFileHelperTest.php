@@ -456,4 +456,187 @@ PHP;
         // Should fall back to the line of the 'connections' parent key (line 4)
         $this->assertEquals(4, $line);
     }
+
+    // --- parseConfigArray ---
+
+    public function testParseConfigArrayExtractsStringValues(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, <<<'PHP'
+<?php
+return [
+    'name' => 'MyApp',
+    'url' => 'https://example.com',
+];
+PHP);
+
+        $result = ConfigFileHelper::parseConfigArray($file);
+
+        $this->assertArrayHasKey('name', $result);
+        $this->assertSame('MyApp', $result['name']['value']);
+        $this->assertFalse($result['name']['isEnvCall']);
+        $this->assertSame('https://example.com', $result['url']['value']);
+    }
+
+    public function testParseConfigArrayExtractsBoolAndNull(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, <<<'PHP'
+<?php
+return [
+    'debug' => false,
+    'maintenance' => true,
+    'secret' => null,
+];
+PHP);
+
+        $result = ConfigFileHelper::parseConfigArray($file);
+
+        $this->assertFalse($result['debug']['value']);
+        $this->assertTrue($result['maintenance']['value']);
+        $this->assertNull($result['secret']['value']);
+    }
+
+    public function testParseConfigArrayDetectsEnvCallWithoutDefault(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, <<<'PHP'
+<?php
+return [
+    'key' => env('APP_KEY'),
+];
+PHP);
+
+        $result = ConfigFileHelper::parseConfigArray($file);
+
+        $this->assertTrue($result['key']['isEnvCall']);
+        $this->assertNull($result['key']['value']);
+        $this->assertFalse($result['key']['envHasDefault']);
+        $this->assertNull($result['key']['envDefault']);
+    }
+
+    public function testParseConfigArrayDetectsEnvCallWithDefault(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, <<<'PHP'
+<?php
+return [
+    'debug' => env('APP_DEBUG', false),
+    'name' => env('APP_NAME', 'Laravel'),
+];
+PHP);
+
+        $result = ConfigFileHelper::parseConfigArray($file);
+
+        $this->assertTrue($result['debug']['isEnvCall']);
+        $this->assertTrue($result['debug']['envHasDefault']);
+        $this->assertFalse($result['debug']['envDefault']);
+        $this->assertTrue($result['name']['isEnvCall']);
+        $this->assertTrue($result['name']['envHasDefault']);
+        $this->assertSame('Laravel', $result['name']['envDefault']);
+    }
+
+    public function testParseConfigArrayRecordsLineNumbers(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, <<<'PHP'
+<?php
+return [
+    'name' => 'App',
+    'debug' => false,
+    'key' => env('APP_KEY'),
+];
+PHP);
+
+        $result = ConfigFileHelper::parseConfigArray($file);
+
+        $this->assertSame(3, $result['name']['line']);
+        $this->assertSame(4, $result['debug']['line']);
+        $this->assertSame(5, $result['key']['line']);
+    }
+
+    public function testParseConfigArrayReturnsEmptyForNonExistentFile(): void
+    {
+        $result = ConfigFileHelper::parseConfigArray('/non/existent/config.php');
+
+        $this->assertSame([], $result);
+    }
+
+    public function testParseConfigArrayReturnsEmptyForFileWithoutReturn(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, '<?php echo "no return";');
+
+        $result = ConfigFileHelper::parseConfigArray($file);
+
+        $this->assertSame([], $result);
+    }
+
+    public function testParseConfigArraySkipsNonStringKeys(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, <<<'PHP'
+<?php
+return [
+    'valid' => 'yes',
+    0 => 'numeric key skipped',
+];
+PHP);
+
+        $result = ConfigFileHelper::parseConfigArray($file);
+
+        $this->assertArrayHasKey('valid', $result);
+        $this->assertCount(1, $result);
+    }
+
+    public function testParseConfigArrayExtractsPhpConstantAsString(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, <<<'PHP'
+<?php
+return [
+    'max' => PHP_INT_MAX,
+];
+PHP);
+
+        $result = ConfigFileHelper::parseConfigArray($file);
+
+        $this->assertArrayHasKey('max', $result);
+        $this->assertSame('PHP_INT_MAX', $result['max']['value']);
+        $this->assertFalse($result['max']['isEnvCall']);
+    }
+
+    public function testParseConfigArrayReturnsNullForComplexValues(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, <<<'PHP'
+<?php
+return [
+    'connections' => ['sqlite', 'mysql'],
+];
+PHP);
+
+        $result = ConfigFileHelper::parseConfigArray($file);
+
+        $this->assertArrayHasKey('connections', $result);
+        $this->assertNull($result['connections']['value']);
+        $this->assertFalse($result['connections']['isEnvCall']);
+    }
+
+    public function testParseConfigArrayExtractsIntegerValues(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, <<<'PHP'
+<?php
+return [
+    'port' => 3306,
+    'timeout' => 30.5,
+];
+PHP);
+
+        $result = ConfigFileHelper::parseConfigArray($file);
+
+        $this->assertSame(3306, $result['port']['value']);
+        $this->assertSame(30.5, $result['timeout']['value']);
+    }
 }

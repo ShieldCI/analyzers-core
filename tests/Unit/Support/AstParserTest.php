@@ -489,4 +489,71 @@ class AstParserTest extends TestCase
         // Should detect $total pattern (line 204)
         $this->assertTrue($result);
     }
+
+    // --- resolveNames ---
+
+    public function testResolveNamesResolvesFullyQualifiedClassNames(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class User extends Model {}
+PHP;
+        $ast = $this->parser->parseCode($code);
+        $resolved = $this->parser->resolveNames($ast);
+
+        // Find the Class_ node and check extends is resolved
+        $classes = $this->parser->findNodes($resolved, \PhpParser\Node\Stmt\Class_::class);
+        $this->assertCount(1, $classes);
+
+        /** @var \PhpParser\Node\Stmt\Class_ $classNode */
+        $classNode = $classes[0];
+        $this->assertNotNull($classNode->extends);
+
+        // By default NameResolver replaces Name nodes with FullyQualified nodes
+        $this->assertInstanceOf(\PhpParser\Node\Name\FullyQualified::class, $classNode->extends);
+        $this->assertSame('Illuminate\Database\Eloquent\Model', $classNode->extends->toString());
+    }
+
+    public function testResolveNamesWithEmptyAst(): void
+    {
+        $resolved = $this->parser->resolveNames([]);
+
+        $this->assertIsArray($resolved);
+        $this->assertEmpty($resolved);
+    }
+
+    public function testResolveNamesWithReplaceNodesFalseOption(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace App;
+
+use App\Models\User;
+
+new User();
+PHP;
+        $ast = $this->parser->parseCode($code);
+        $resolved = $this->parser->resolveNames($ast, ['replaceNodes' => false]);
+
+        // With replaceNodes => false, original Name nodes are preserved
+        // but 'resolvedName' attribute is still set
+        $newNodes = $this->parser->findNodes($resolved, \PhpParser\Node\Expr\New_::class);
+        $this->assertCount(1, $newNodes);
+
+        /** @var \PhpParser\Node\Expr\New_ $newNode */
+        $newNode = $newNodes[0];
+        $this->assertInstanceOf(\PhpParser\Node\Name::class, $newNode->class);
+
+        // Original short name preserved
+        $this->assertSame('User', $newNode->class->toString());
+
+        // But resolvedName attribute has the FQCN
+        $resolvedName = $newNode->class->getAttribute('resolvedName');
+        $this->assertInstanceOf(\PhpParser\Node\Name\FullyQualified::class, $resolvedName);
+        $this->assertSame('App\Models\User', $resolvedName->toString());
+    }
 }

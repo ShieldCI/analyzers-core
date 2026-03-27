@@ -226,6 +226,52 @@ class FileParser
     }
 
     /**
+     * Strip all PHP comments from code using the PHP tokenizer.
+     *
+     * Uses token_get_all() to correctly distinguish between actual comments
+     * and comment-like patterns inside strings (e.g., URLs containing "//").
+     * Removes single-line (//, #), multi-line, and docblock comments while
+     * preserving line numbering (comments are replaced with blank lines).
+     *
+     * Unlike stripComments(), which only handles single-line // and # on a
+     * per-line basis and breaks on URLs inside strings, this method handles
+     * all PHP comment styles and is safe for arbitrary PHP source code.
+     *
+     * @param  string  $code  PHP source code (with or without opening <?php tag)
+     */
+    public static function stripAllComments(string $code): string
+    {
+        $needsPrefix = ! str_contains($code, '<?php') && ! str_contains($code, '<?=');
+
+        if ($needsPrefix) {
+            $code = '<?php '.$code;
+        }
+
+        $tokens = @token_get_all($code);
+        $result = '';
+
+        foreach ($tokens as $token) {
+            if (is_array($token)) {
+                if (in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                    // Preserve newlines to maintain line numbering
+                    $result .= str_repeat("\n", substr_count($token[1], "\n"));
+
+                    continue;
+                }
+                $result .= $token[1];
+            } else {
+                $result .= $token;
+            }
+        }
+
+        if ($needsPrefix) {
+            $result = (string) preg_replace('/^<\?php\s?/', '', $result);
+        }
+
+        return $result;
+    }
+
+    /**
      * Get code snippet from file with context lines as a plain string.
      *
      * This method is useful when you need a simple string snippet, such as for

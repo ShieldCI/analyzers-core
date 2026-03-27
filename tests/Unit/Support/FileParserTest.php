@@ -389,4 +389,78 @@ class FileParserTest extends TestCase
 
         $this->assertEquals(0, $count);
     }
+
+    // --- stripAllComments ---
+
+    public function testStripAllCommentsRemovesSingleLineDoubleSlash(): void
+    {
+        $code = "<?php\n\$a = 1; // this is a comment\n\$b = 2;";
+        $result = FileParser::stripAllComments($code);
+
+        $this->assertStringNotContainsString('this is a comment', $result);
+        $this->assertStringContainsString('$a = 1;', $result);
+        $this->assertStringContainsString('$b = 2;', $result);
+    }
+
+    public function testStripAllCommentsRemovesHashComment(): void
+    {
+        $code = "<?php\n# hash comment\n\$a = 1;";
+        $result = FileParser::stripAllComments($code);
+
+        $this->assertStringNotContainsString('hash comment', $result);
+        $this->assertStringContainsString('$a = 1;', $result);
+    }
+
+    public function testStripAllCommentsRemovesMultilineComment(): void
+    {
+        $code = "<?php\n/* multi\n   line\n   comment */\n\$a = 1;";
+        $result = FileParser::stripAllComments($code);
+
+        $this->assertStringNotContainsString('multi', $result);
+        $this->assertStringContainsString('$a = 1;', $result);
+    }
+
+    public function testStripAllCommentsRemovesDocblock(): void
+    {
+        $code = "<?php\n/** @param string \$x */\nfunction foo(\$x) {}";
+        $result = FileParser::stripAllComments($code);
+
+        $this->assertStringNotContainsString('@param', $result);
+        $this->assertStringContainsString('function foo', $result);
+    }
+
+    public function testStripAllCommentsPreservesUrlsInsideStrings(): void
+    {
+        $code = '<?php $url = "https://example.com/path";';
+        $result = FileParser::stripAllComments($code);
+
+        $this->assertStringContainsString('https://example.com/path', $result);
+    }
+
+    public function testStripAllCommentsPreservesLineCount(): void
+    {
+        $code = "<?php\n// line 2 comment\n\$a = 1;\n// line 4 comment\n\$b = 2;";
+        $result = FileParser::stripAllComments($code);
+
+        $this->assertSame(substr_count($code, "\n"), substr_count($result, "\n"));
+    }
+
+    public function testStripAllCommentsWorksWithoutPhpTag(): void
+    {
+        $code = "\$a = 1; // comment\n\$b = 2;";
+        $result = FileParser::stripAllComments($code);
+
+        $this->assertStringNotContainsString('comment', $result);
+        $this->assertStringContainsString('$a = 1;', $result);
+        $this->assertStringNotContainsString('<?php', $result);
+    }
+
+    public function testStripAllCommentsPreservesCodeWithNoComments(): void
+    {
+        $code = "<?php\n\$a = 1;\n\$b = 2;";
+        $result = FileParser::stripAllComments($code);
+
+        $this->assertStringContainsString('$a = 1;', $result);
+        $this->assertStringContainsString('$b = 2;', $result);
+    }
 }
