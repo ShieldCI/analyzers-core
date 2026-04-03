@@ -208,8 +208,19 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
             $envFile = $this->basePath.'/.env';
             if (file_exists($envFile)) {
                 $content = file_get_contents($envFile);
-                if ($content !== false && preg_match('/^APP_ENV\s*=\s*(\w+)/m', $content, $matches)) {
-                    return $matches[1];
+                // Use [^\s#"']+ so hyphenated names like "local-test" are captured in full
+                if ($content !== false && preg_match('/^APP_ENV\s*=\s*["\']?([^\s#"\']+)["\']?/m', $content, $matches)) {
+                    $rawEnv = $matches[1];
+
+                    // Apply environment mapping, consistent with parent::getEnvironment()
+                    if (function_exists('config')) {
+                        $mapping = config('shieldci.environment_mapping', []);
+                        if (is_array($mapping) && isset($mapping[$rawEnv])) {
+                            return $mapping[$rawEnv];
+                        }
+                    }
+
+                    return $rawEnv;
                 }
             }
         }

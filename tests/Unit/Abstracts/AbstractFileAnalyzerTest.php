@@ -410,7 +410,37 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertIsString($environment);
     }
 
-    public function testGetFilesToAnalyzeHandlesSingleFilePath(): void
+    public function testGetEnvironmentAppliesMappingFromEnvFile(): void
+    {
+        $envFile = $this->testDir . '/.env';
+        file_put_contents($envFile, "APP_ENV=local-test\nAPP_DEBUG=true");
+
+        config(['shieldci.environment_mapping' => ['local-test' => 'local']]);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+
+        $environment = $analyzer->exposedGetEnvironment();
+
+        config(['shieldci.environment_mapping' => []]);
+
+        $this->assertEquals('local', $environment);
+    }
+
+    public function testGetEnvironmentReadsHyphenatedEnvFromEnvFile(): void
+    {
+        $envFile = $this->testDir . '/.env';
+        file_put_contents($envFile, "APP_ENV=local-test\nAPP_DEBUG=true");
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+
+        $environment = $analyzer->exposedGetEnvironment();
+
+        $this->assertEquals('local-test', $environment);
+    }
+
+public function testGetFilesToAnalyzeHandlesSingleFilePath(): void
     {
         $singleFile = $this->testDir . '/src/File1.php';
 
