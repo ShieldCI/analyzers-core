@@ -440,7 +440,7 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertEquals('local-test', $environment);
     }
 
-public function testGetFilesToAnalyzeHandlesSingleFilePath(): void
+    public function testGetFilesToAnalyzeHandlesSingleFilePath(): void
     {
         $singleFile = $this->testDir . '/src/File1.php';
 

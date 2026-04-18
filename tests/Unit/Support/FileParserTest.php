@@ -463,4 +463,160 @@ class FileParserTest extends TestCase
         $this->assertStringContainsString('$a = 1;', $result);
         $this->assertStringContainsString('$b = 2;', $result);
     }
+
+    public function testStripAllCommentsStillPreservesStringContent(): void
+    {
+        // Regression lock-in: stripAllComments() MUST preserve string literal content
+        // (consumers like SessionTimeoutAnalyzer parse config array keys from strings).
+        $code = "<?php Log::info('User::all()');";
+        $result = FileParser::stripAllComments($code);
+
+        $this->assertStringContainsString('User::all()', $result);
+    }
+
+    // --- stripCommentsAndStrings ---
+
+    public function testStripCommentsAndStringsRemovesPatternsFromSingleQuotedStrings(): void
+    {
+        $code = "<?php Log::info('Avoid using User::all() in production');";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringNotContainsString('User::all()', $result);
+        $this->assertStringNotContainsString('Avoid using', $result);
+        $this->assertStringContainsString('Log::info', $result);
+    }
+
+    public function testStripCommentsAndStringsRemovesPatternsFromDoubleQuotedStrings(): void
+    {
+        $code = '<?php throw new \Exception("Do not use ->get()->count()");';
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringNotContainsString('->get()->count()', $result);
+        $this->assertStringNotContainsString('Do not use', $result);
+        $this->assertStringContainsString('throw new', $result);
+    }
+
+    public function testStripCommentsAndStringsRemovesPatternsFromHeredocs(): void
+    {
+        $code = "<?php\n\$sql = <<<SQL\nSELECT * FROM users WHERE User::all()\nSQL;\n";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringNotContainsString('User::all()', $result);
+        $this->assertStringNotContainsString('SELECT *', $result);
+        $this->assertStringContainsString('$sql', $result);
+    }
+
+    public function testStripCommentsAndStringsRemovesPatternsFromNowdocs(): void
+    {
+        $code = "<?php\n\$doc = <<<'EOT'\nUser::all() inside nowdoc\nEOT;\n";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringNotContainsString('User::all()', $result);
+        $this->assertStringNotContainsString('inside nowdoc', $result);
+        $this->assertStringContainsString('$doc', $result);
+    }
+
+    public function testStripCommentsAndStringsRemovesPatternsFromBacktickExec(): void
+    {
+        $code = '<?php $output = `echo User::all()`;';
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringNotContainsString('User::all()', $result);
+        $this->assertStringNotContainsString('echo', $result);
+        $this->assertStringContainsString('$output', $result);
+    }
+
+    public function testStripCommentsAndStringsPreservesRealCodeReferences(): void
+    {
+        $code = "<?php User::all();";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringContainsString('User::all()', $result);
+    }
+
+    public function testStripCommentsAndStringsPreservesInterpolatedVariables(): void
+    {
+        // Interpolated variables like $x->foo are real code references and must survive.
+        // The surrounding literal text ("hello ") should be stripped.
+        $code = '<?php echo "hello $x->foo world";';
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringNotContainsString('hello', $result);
+        $this->assertStringNotContainsString('world', $result);
+        $this->assertStringContainsString('$x', $result);
+        $this->assertStringContainsString('foo', $result);
+    }
+
+    public function testStripCommentsAndStringsPreservesLineNumbering(): void
+    {
+        $code = "<?php\n\$sql = <<<SQL\nline1\nline2\nline3\nSQL;\n\$x = 1;\n";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertSame(substr_count($code, "\n"), substr_count($result, "\n"));
+    }
+
+    public function testStripCommentsAndStringsHandlesMultiLineSingleQuotedString(): void
+    {
+        $code = "<?php \$x = 'line1\nline2\nUser::all()';";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringNotContainsString('User::all()', $result);
+        $this->assertStringNotContainsString('line1', $result);
+        $this->assertSame(substr_count($code, "\n"), substr_count($result, "\n"));
+    }
+
+    public function testStripCommentsAndStringsHandlesEmptyStrings(): void
+    {
+        $code = "<?php \$a = ''; \$b = \"\";";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringContainsString('$a', $result);
+        $this->assertStringContainsString('$b', $result);
+    }
+
+    public function testStripCommentsAndStringsStripsInlineHtml(): void
+    {
+        $code = "<p>Avoid User::all() in loops</p>\n<?php \$x = 1; ?>";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringNotContainsString('User::all()', $result);
+        $this->assertStringNotContainsString('Avoid', $result);
+        $this->assertStringContainsString('$x = 1;', $result);
+    }
+
+    public function testStripCommentsAndStringsStripsCommentsAlongsideStrings(): void
+    {
+        $code = "<?php\n// User::all() in comment\n\$x = 'User::all() in string';\nUser::all();";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        // Only the real call should survive — one occurrence total.
+        $this->assertSame(1, substr_count($result, 'User::all()'));
+    }
+
+    public function testStripCommentsAndStringsWorksWithoutPhpTag(): void
+    {
+        $code = "\$x = 'User::all()'; User::all();";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertSame(1, substr_count($result, 'User::all()'));
+        $this->assertStringNotContainsString('<?php', $result);
+    }
+
+    public function testStripCommentsAndStringsWorksWithShortEchoTag(): void
+    {
+        $code = "<?= 'User::all()' ?>";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertStringNotContainsString('User::all()', $result);
+    }
+
+    public function testStripCommentsAndStringsHandlesMalformedInput(): void
+    {
+        // Unterminated string literal — token_get_all is called with @ suppression,
+        // so this should return a string without throwing.
+        $code = "<?php \$x = 'unterminated";
+        $result = FileParser::stripCommentsAndStrings($code);
+
+        $this->assertIsString($result);
+    }
 }
