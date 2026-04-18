@@ -237,6 +237,13 @@ class FileParser
      * per-line basis and breaks on URLs inside strings, this method handles
      * all PHP comment styles and is safe for arbitrary PHP source code.
      *
+     * NOTE: String literal content is PRESERVED by design (so URLs containing
+     * "//" survive). If the stripped output will be pattern-matched (via
+     * str_contains() or preg_match()) to detect code-level anti-patterns,
+     * use {@see stripCommentsAndStrings()} instead — otherwise pattern keywords
+     * inside string literals like Log::info('Avoid User::all()') will
+     * produce false positives.
+     *
      * @param  string  $code  PHP source code (with or without opening <?php tag)
      */
     public static function stripAllComments(string $code): string
@@ -258,6 +265,97 @@ class FileParser
 
                     continue;
                 }
+                $result .= $token[1];
+            } else {
+                $result .= $token;
+            }
+        }
+
+        if ($needsPrefix) {
+            $result = (string) preg_replace('/^<\?php\s?/', '', $result);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Strip all PHP comments AND string literal content from code.
+     *
+     * Intended for analyzers that pattern-match (str_contains / preg_match)
+     * the output to detect code-level anti-patterns. Unlike
+     * {@see stripAllComments()}, which preserves string content, this method
+     * also blanks out literal text inside:
+     *   - Single/double-quoted strings without interpolation (T_CONSTANT_ENCAPSED_STRING)
+     *   - Text chunks inside interpolated double-quoted strings, heredocs,
+     *     nowdocs, and backtick shell-exec (T_ENCAPSED_AND_WHITESPACE)
+     *   - Inline HTML outside PHP tags (T_INLINE_HTML)
+     *
+     * Prevents false positives like:
+     *   Log::info('Avoid using User::all() in production');
+     *   throw new \Exception('Do not use ->get()->count()');
+     * where the pattern keyword is part of a human-readable message.
+     *
+     * Preserves line numbering so Issue Locations remain accurate — multi-line
+     * strings are replaced with quote-wrapped newlines (e.g., 'a\nb\nc'
+     * becomes '\n\n').
+     *
+     * Variables and real code references inside interpolated strings
+     * (e.g., {$user->name}) are preserved: they represent actual runtime code.
+     *
+     * The output is intended for textual pattern matching, not execution —
+     * syntactic validity for edge cases (e.g., binary-string prefix `b'...'`)
+     * is not guaranteed.
+     *
+     * @param  string  $code  PHP source code (with or without opening <?php tag)
+     */
+    public static function stripCommentsAndStrings(string $code): string
+    {
+        $needsPrefix = ! str_contains($code, '<?php') && ! str_contains($code, '<?=');
+
+        if ($needsPrefix) {
+            $code = '<?php '.$code;
+        }
+
+        $tokens = @token_get_all($code);
+        $result = '';
+
+        foreach ($tokens as $token) {
+            if (is_array($token)) {
+                // Strip comments (same as stripAllComments)
+                if (in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                    $result .= str_repeat("\n", substr_count($token[1], "\n"));
+
+                    continue;
+                }
+
+                // Strip single/double-quoted strings without interpolation.
+                // Preserve closing quote + newline count so line numbers are stable
+                // and the surrounding syntax remains roughly intact.
+                if ($token[0] === T_CONSTANT_ENCAPSED_STRING) {
+                    $quote = substr($token[1], -1);
+                    $newlines = substr_count($token[1], "\n");
+                    $result .= $quote.str_repeat("\n", $newlines).$quote;
+
+                    continue;
+                }
+
+                // Strip literal text chunks inside interpolated strings, heredocs,
+                // nowdocs, and backtick exec. Variables and code references in these
+                // contexts are separate tokens (T_VARIABLE, T_OBJECT_OPERATOR, ...)
+                // and pass through unchanged.
+                if ($token[0] === T_ENCAPSED_AND_WHITESPACE) {
+                    $result .= str_repeat("\n", substr_count($token[1], "\n"));
+
+                    continue;
+                }
+
+                // Strip inline HTML (content outside PHP open/close tags).
+                if ($token[0] === T_INLINE_HTML) {
+                    $result .= str_repeat("\n", substr_count($token[1], "\n"));
+
+                    continue;
+                }
+
                 $result .= $token[1];
             } else {
                 $result .= $token;
