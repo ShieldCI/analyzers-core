@@ -29,6 +29,7 @@ class PlatformDetectorTest extends TestCase
             'FUNCTION_TARGET',
             'FUNCTIONS_WORKER_RUNTIME',
             'WEBSITE_INSTANCE_ID',
+            'LARAVEL_CLOUD',
         ]);
     }
 
@@ -383,5 +384,115 @@ YAML;
         $result = PlatformDetector::isServerless();
 
         $this->assertFalse($result);
+    }
+
+    // =================================================================
+    // Tests for isDocker()
+    // =================================================================
+
+    public function test_is_docker_detects_via_dockerenv_file(): void
+    {
+        $tmpFile = tempnam(sys_get_temp_dir(), 'dockerenv');
+        assert($tmpFile !== false);
+
+        $result = PlatformDetector::isDocker(dockerEnvPath: $tmpFile);
+
+        unlink($tmpFile);
+        $this->assertTrue($result);
+    }
+
+    public function test_is_docker_detects_via_cgroup_containing_docker(): void
+    {
+        $tmpCgroup = tempnam(sys_get_temp_dir(), 'cgroup');
+        assert($tmpCgroup !== false);
+        file_put_contents($tmpCgroup, "12:devices:/docker/abc123\n");
+
+        $result = PlatformDetector::isDocker(
+            dockerEnvPath: '/nonexistent-dockerenv',
+            cgroupPath: $tmpCgroup,
+        );
+
+        unlink($tmpCgroup);
+        $this->assertTrue($result);
+    }
+
+    public function test_is_docker_detects_via_cgroup_containing_kubepods(): void
+    {
+        $tmpCgroup = tempnam(sys_get_temp_dir(), 'cgroup');
+        assert($tmpCgroup !== false);
+        file_put_contents($tmpCgroup, "11:cpuset:/kubepods/pod123\n");
+
+        $result = PlatformDetector::isDocker(
+            dockerEnvPath: '/nonexistent-dockerenv',
+            cgroupPath: $tmpCgroup,
+        );
+
+        unlink($tmpCgroup);
+        $this->assertTrue($result);
+    }
+
+    public function test_is_docker_detects_via_cgroup_containing_containerd(): void
+    {
+        $tmpCgroup = tempnam(sys_get_temp_dir(), 'cgroup');
+        assert($tmpCgroup !== false);
+        file_put_contents($tmpCgroup, "0::/system.slice/containerd.service\n");
+
+        $result = PlatformDetector::isDocker(
+            dockerEnvPath: '/nonexistent-dockerenv',
+            cgroupPath: $tmpCgroup,
+        );
+
+        unlink($tmpCgroup);
+        $this->assertTrue($result);
+    }
+
+    public function test_is_docker_returns_false_when_no_indicators_present(): void
+    {
+        $tmpCgroup = tempnam(sys_get_temp_dir(), 'cgroup');
+        assert($tmpCgroup !== false);
+        file_put_contents($tmpCgroup, "12:devices:/system.slice/some-service\n");
+
+        $result = PlatformDetector::isDocker(
+            dockerEnvPath: '/nonexistent-dockerenv',
+            cgroupPath: $tmpCgroup,
+        );
+
+        unlink($tmpCgroup);
+        $this->assertFalse($result);
+    }
+
+    public function test_is_docker_returns_false_when_neither_file_nor_cgroup_exist(): void
+    {
+        $result = PlatformDetector::isDocker(
+            dockerEnvPath: '/nonexistent-dockerenv',
+            cgroupPath: '/nonexistent-cgroup',
+        );
+
+        $this->assertFalse($result);
+    }
+
+    // =================================================================
+    // Tests for isLaravelCloud()
+    // =================================================================
+
+    public function test_is_laravel_cloud_detects_via_env_var(): void
+    {
+        putenv('LARAVEL_CLOUD=1');
+
+        $this->assertTrue(PlatformDetector::isLaravelCloud());
+    }
+
+    public function test_is_laravel_cloud_returns_false_when_env_var_not_set(): void
+    {
+        putenv('LARAVEL_CLOUD');
+
+        $this->assertFalse(PlatformDetector::isLaravelCloud());
+    }
+
+    public function test_is_laravel_cloud_returns_false_when_env_var_is_non_one_value(): void
+    {
+        putenv('LARAVEL_CLOUD=true');
+
+        $this->assertFalse(PlatformDetector::isLaravelCloud());
     }
 }
