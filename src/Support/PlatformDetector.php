@@ -90,4 +90,56 @@ class PlatformDetector
 
         return false;
     }
+
+    /**
+     * Check if running inside a Docker container.
+     *
+     * Detection methods:
+     * 1. /.dockerenv — created by Docker daemon in every container (most reliable)
+     * 2. /proc/self/cgroup — fallback for rootless Docker and some Kubernetes setups
+     *
+     * Note: Cloud implies Docker, but Docker does NOT imply Cloud. Use isLaravelCloud()
+     * for Cloud-specific logic; use this only for checks that are genuinely
+     * "not applicable inside any container" (e.g. OS-level hardening analyzers).
+     *
+     * @param  string  $dockerEnvPath  Override for testing (default: /.dockerenv)
+     * @param  string  $cgroupPath     Override for testing (default: /proc/self/cgroup)
+     */
+    public static function isDocker(
+        string $dockerEnvPath = '/.dockerenv',
+        string $cgroupPath = '/proc/self/cgroup',
+    ): bool {
+        // Docker daemon creates this file in every container
+        if (file_exists($dockerEnvPath)) {
+            return true;
+        }
+
+        // Fallback: cgroup inspection (Linux only)
+        if (is_readable($cgroupPath)) {
+            $cgroup = file_get_contents($cgroupPath);
+            if ($cgroup !== false) {
+                return str_contains($cgroup, 'docker')
+                    || str_contains($cgroup, 'kubepods')
+                    || str_contains($cgroup, 'containerd');
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if running on Laravel Cloud.
+     *
+     * Uses the LARAVEL_CLOUD=1 env var, which Cloud sets on all compute types
+     * (web, worker, scheduled task). This is the sole detection signal — no
+     * fallback — because Cloud declined to commit to stability of any other
+     * runtime fingerprint. A missing env var produces visible false positives,
+     * which is preferable to a stale fallback producing silent misbehaviour.
+     *
+     * @see https://cloud.laravel.com/docs/environments
+     */
+    public static function isLaravelCloud(): bool
+    {
+        return getenv('LARAVEL_CLOUD') === '1';
+    }
 }
