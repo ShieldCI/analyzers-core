@@ -58,4 +58,15 @@ interface ParserInterface
      * @return array<Node>
      */
     public function resolveNames(array $ast, array $options = []): array;
+
+    /**
+     * Collect all 1-indexed line numbers that fall inside any string literal node.
+     *
+     * Returns a hashmap of [lineNumber => true] for O(1) lookup. Use with
+     * isset($result[$lineNumber]) to test whether a line is inside a string.
+     *
+     * @param  array<Node>  $ast
+     * @return array<int, true>
+     */
+    public function collectStringLines(array $ast): array;
 }
