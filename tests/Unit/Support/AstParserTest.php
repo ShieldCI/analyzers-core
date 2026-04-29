@@ -556,4 +556,46 @@ PHP;
         $this->assertInstanceOf(\PhpParser\Node\Name\FullyQualified::class, $resolvedName);
         $this->assertSame('App\Models\User', $resolvedName->toString());
     }
+
+    public function testCollectStringLinesReturnsEmptyForCodeWithNoStrings(): void
+    {
+        $ast = $this->parser->parseCode('<?php $x = Auth::user()->name;');
+        $result = $this->parser->collectStringLines($ast);
+        $this->assertEmpty($result);
+    }
+
+    public function testCollectStringLinesIncludesSingleLineString(): void
+    {
+        $ast = $this->parser->parseCode('<?php $x = "hello world";');
+        $result = $this->parser->collectStringLines($ast);
+        $this->assertArrayHasKey(1, $result);
+    }
+
+    public function testCollectStringLinesCoversAllLinesOfHeredoc(): void
+    {
+        // Line 1: <?php
+        // Line 2: $x = <<<'DOC'
+        // Line 3: line one
+        // Line 4: line two
+        // Line 5: DOC;
+        $code = "<?php\n\$x = <<<'DOC'\nline one\nline two\nDOC;\n";
+        $ast = $this->parser->parseCode($code);
+        $result = $this->parser->collectStringLines($ast);
+
+        $this->assertArrayHasKey(3, $result, 'First content line of heredoc must be in set');
+        $this->assertArrayHasKey(4, $result, 'Second content line of heredoc must be in set');
+    }
+
+    public function testCollectStringLinesCoversInterpolatedString(): void
+    {
+        // Line 1: <?php
+        // Line 2: $name = 'user';     <- single-quoted string, line 2
+        // Line 3: $msg = "Hello $name";  <- interpolated string, line 3
+        $code = "<?php\n\$name = 'user';\n\$msg = \"Hello \$name\";";
+        $ast = $this->parser->parseCode($code);
+        $result = $this->parser->collectStringLines($ast);
+
+        $this->assertArrayHasKey(2, $result, 'Single-quoted string line must be in set');
+        $this->assertArrayHasKey(3, $result, 'Interpolated string line must be in set');
+    }
 }

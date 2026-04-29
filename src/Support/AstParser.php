@@ -73,6 +73,33 @@ class AstParser implements ParserInterface
     }
 
     /**
+     * Collect all 1-indexed line numbers that fall inside any string literal node.
+     *
+     * Returns a hashmap of [lineNumber => true] for O(1) lookup. Use with
+     * isset($result[$lineNumber]) to test whether a line is inside a string.
+     *
+     * @param  array<Node>  $ast
+     * @return array<int, true>
+     */
+    public function collectStringLines(array $ast): array
+    {
+        $lines = [];
+
+        $nodes = [
+            ...$this->nodeFinder->findInstanceOf($ast, Node\Scalar\String_::class),
+            ...$this->nodeFinder->findInstanceOf($ast, Node\Scalar\InterpolatedString::class),
+        ];
+
+        foreach ($nodes as $node) {
+            for ($line = $node->getStartLine(); $line <= $node->getEndLine(); $line++) {
+                $lines[$line] = true;
+            }
+        }
+
+        return $lines;
+    }
+
+    /**
      * @param array<Node> $ast
      * @param class-string<Node> $nodeType
      * @return array<Node>
