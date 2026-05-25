@@ -598,4 +598,50 @@ PHP;
         $this->assertArrayHasKey(2, $result, 'Single-quoted string line must be in set');
         $this->assertArrayHasKey(3, $result, 'Interpolated string line must be in set');
     }
+
+    // --- AST cache ---
+
+    public function testParseFileReturnsSameResultOnSecondCall(): void
+    {
+        $file = $this->testDir . '/cached.php';
+        file_put_contents($file, '<?php class Foo {}');
+
+        $first = $this->parser->parseFile($file);
+        $second = $this->parser->parseFile($file);
+
+        $this->assertCount(count($first), $second);
+        $this->assertSame($first, $second);
+    }
+
+    public function testClearCacheAllowsReparsing(): void
+    {
+        $file = $this->testDir . '/cached2.php';
+        file_put_contents($file, '<?php $x = 1;');
+
+        $first = $this->parser->parseFile($file);
+        $this->assertNotEmpty($first);
+
+        $this->parser->clearCache();
+
+        $second = $this->parser->parseFile($file);
+        $this->assertNotEmpty($second);
+        $this->assertCount(count($first), $second);
+    }
+
+    public function testParseFileUpdatesWhenFileChangesAfterClearCache(): void
+    {
+        $file = $this->testDir . '/changed.php';
+        file_put_contents($file, '<?php $x = 1;');
+
+        $first = $this->parser->parseFile($file);
+        $this->assertNotEmpty($first);
+
+        // Rewrite the file with different content and clear cache
+        file_put_contents($file, '<?php $x = 1; $y = 2; $z = 3;');
+        $this->parser->clearCache();
+
+        $second = $this->parser->parseFile($file);
+        // New content has 3 statements; old had 1
+        $this->assertGreaterThan(count($first), count($second));
+    }
 }

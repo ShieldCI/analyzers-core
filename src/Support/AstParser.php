@@ -17,10 +17,18 @@ class AstParser implements ParserInterface
     private \PhpParser\Parser $parser;
     private NodeFinder $nodeFinder;
 
+    /** @var array<string, array<Node>> */
+    private array $astCache = [];
+
     public function __construct()
     {
         $this->parser = (new ParserFactory())->createForNewestSupportedVersion();
         $this->nodeFinder = new NodeFinder();
+    }
+
+    public function clearCache(): void
+    {
+        $this->astCache = [];
     }
 
     /**
@@ -32,12 +40,19 @@ class AstParser implements ParserInterface
             return [];
         }
 
+        $mtime = filemtime($filePath);
+        $cacheKey = $filePath.':'.($mtime !== false ? $mtime : 0);
+
+        if (isset($this->astCache[$cacheKey])) {
+            return $this->astCache[$cacheKey];
+        }
+
         $code = file_get_contents($filePath);
         if ($code === false) {
             return []; // @codeCoverageIgnore
         }
 
-        return $this->parseCode($code);
+        return $this->astCache[$cacheKey] = $this->parseCode($code);
     }
 
     /**

@@ -34,6 +34,14 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     protected array $excludePatterns = [];
 
     /**
+     * Pre-compiled regex patterns built from $excludePatterns.
+     * Populated by setExcludePatterns() to avoid per-file glob→regex compilation.
+     *
+     * @var array<string>
+     */
+    private array $compiledExcludePatterns = [];
+
+    /**
      * Set the base path.
      */
     public function setBasePath(string $path): static
@@ -63,6 +71,10 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     public function setExcludePatterns(array $patterns): static
     {
         $this->excludePatterns = $patterns;
+        $this->compiledExcludePatterns = array_map(
+            fn (string $p): string => '#^'.str_replace(['\*', '\?'], ['.*', '.'], preg_quote($p, '#')).'$#',
+            $patterns
+        );
 
         return $this;
     }
@@ -133,9 +145,8 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
 
         $path = $file->getPathname();
 
-        // Check against exclude patterns
-        foreach ($this->excludePatterns as $pattern) {
-            if ($this->matchesPattern($path, $pattern)) {
+        foreach ($this->compiledExcludePatterns as $regex) {
+            if (preg_match($regex, $path) === 1) {
                 return false;
             }
         }
