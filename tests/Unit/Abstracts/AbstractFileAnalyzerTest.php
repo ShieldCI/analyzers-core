@@ -474,6 +474,34 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertTrue($result);
     }
 
+    public function testSetExcludePatternsPreCompilesRegexPatterns(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setExcludePatterns(['*/vendor/*', '*/tests/*']);
+
+        // Pattern matching should work correctly via compiled patterns
+        $vendorFile = new \SplFileInfo($this->testDir . '/vendor/Package.php');
+        $testsFile = new \SplFileInfo($this->testDir . '/tests/Test1.php');
+        $srcFile = new \SplFileInfo($this->testDir . '/src/File1.php');
+
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic($vendorFile));
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic($testsFile));
+        $this->assertTrue($analyzer->shouldAnalyzeFilePublic($srcFile));
+    }
+
+    public function testSetExcludePatternsUpdatesCompiledPatternsOnReset(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setExcludePatterns(['*/vendor/*']);
+
+        $vendorFile = new \SplFileInfo($this->testDir . '/vendor/Package.php');
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic($vendorFile));
+
+        // Reset to empty — vendor file should now be included
+        $analyzer->setExcludePatterns([]);
+        $this->assertTrue($analyzer->shouldAnalyzeFilePublic($vendorFile));
+    }
+
     public function testGetPhpFilesReturnsEmptyArrayWhenNoPhpFiles(): void
     {
         // Create directory with no PHP files
