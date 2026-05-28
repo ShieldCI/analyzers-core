@@ -90,7 +90,11 @@ class PackageDetector
      * Filament is an open-source administration panel and form builder for
      * Laravel applications.
      *
-     * Note: The vendor name is "filamentphp", not "laravel".
+     * Note: The vendor was renamed between major versions:
+     * - Filament v3 and earlier: "filamentphp/filament"
+     * - Filament v4+: "filament/filament"
+     * Both names are checked so detection works across all supported versions.
+     *
      * This method only checks composer.lock. Use isFilamentConfigured() to verify
      * that Filament panels have been set up via artisan commands.
      *
@@ -101,7 +105,9 @@ class PackageDetector
      */
     public static function hasFilament(string $basePath): bool
     {
-        return self::hasPackage('filamentphp/filament', $basePath);
+        // v3 and earlier used the "filamentphp" vendor; v4+ renamed it to "filament"
+        return self::hasPackage('filamentphp/filament', $basePath)
+            || self::hasPackage('filament/filament', $basePath);
     }
 
     /**

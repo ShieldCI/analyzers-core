@@ -260,9 +260,19 @@ PHP;
         $this->assertFalse($result);
     }
 
+    public function test_has_filament_returns_true_for_v4_package_name(): void
+    {
+        // Filament v4 renamed the vendor from "filamentphp" to "filament"
+        $this->createComposerLock(['filament/filament']);
+
+        $result = PackageDetector::hasFilament($this->testDir);
+
+        $this->assertTrue($result);
+    }
+
     public function test_has_filament_uses_correct_vendor_name(): void
     {
-        // Ensure it's looking for filamentphp/filament, not laravel/filament
+        // Ensure it's looking for filamentphp/filament or filament/filament, not laravel/filament
         $this->createComposerLock(['laravel/filament']);
 
         $result = PackageDetector::hasFilament($this->testDir);
