@@ -173,6 +173,65 @@ class ConfigFileHelperTest extends TestCase
         $this->assertEquals(1, $line);
     }
 
+    public function testFindNestedArrayKeyLineReturnsLineForAuthoredKey(): void
+    {
+        $configFile = $this->tempDir.'/config/logging.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'default' => env('LOG_CHANNEL', 'stack'),\n    'channels' => [\n        'stack' => [\n            'driver' => 'stack',\n            'channels' => ['single'],\n        ],\n        'single' => [\n            'driver' => 'single',\n            'level' => env('LOG_LEVEL', 'debug'),\n        ],\n    ],\n];\n");
+
+        $this->assertSame(6, ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'stack'));
+        $this->assertSame(10, ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
+    }
+
+    public function testFindNestedArrayKeyLineReturnsNullForMissingKey(): void
+    {
+        $configFile = $this->tempDir.'/config/logging.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'channels' => [\n        'single' => [\n            'driver' => 'single',\n        ],\n    ],\n];\n");
+
+        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'laravel-cloud-socket'));
+    }
+
+    public function testFindNestedArrayKeyLineIgnoresStringValuesWithSameName(): void
+    {
+        // 'single' appears as a string value inside the stack channel list, but is
+        // NOT authored as its own channel sub-array — must not be treated as authored.
+        $configFile = $this->tempDir.'/config/logging.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'channels' => [\n        'stack' => [\n            'driver' => 'stack',\n            'channels' => ['single'],\n        ],\n    ],\n];\n");
+
+        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
+    }
+
+    public function testFindNestedArrayKeyLineReturnsNullWhenParentMissing(): void
+    {
+        $configFile = $this->tempDir.'/config/logging.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'default' => 'stack',\n];\n");
+
+        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
+    }
+
+    public function testFindNestedArrayKeyLineReturnsNullWhenFileNotFound(): void
+    {
+        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine('/nonexistent/file.php', 'channels', 'single'));
+    }
+
+    public function testFindNestedArrayKeyLineReturnsNullWhenReturnIsNotArray(): void
+    {
+        // File parses, but the returned expression is not an array.
+        $configFile = $this->tempDir.'/config/logging.php';
+        file_put_contents($configFile, "<?php\n\nreturn 'not-an-array';\n");
+
+        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
+    }
+
+    public function testFindNestedArrayKeyLineSkipsNonStringKeyedItems(): void
+    {
+        // Both the top-level array and the parent array contain list (non-keyed) items
+        // before the targeted keys, exercising the skip branches in both loops.
+        $configFile = $this->tempDir.'/config/logging.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'first-value',\n    'channels' => [\n        'list-item',\n        'single' => [\n            'driver' => 'single',\n        ],\n    ],\n];\n");
+
+        $this->assertSame(7, ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
+    }
+
     public function testFindKeyLineWithDoubleQuotes(): void
     {
         $configFile = $this->tempDir.'/config/test.php';

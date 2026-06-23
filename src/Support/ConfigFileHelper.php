@@ -205,6 +205,76 @@ class ConfigFileHelper
     }
 
     /**
+     * Find the line of a direct child key within a named top-level array, using an AST parse.
+     *
+     * Unlike findNestedKeyLine(), this answers "is this key authored as a sub-array in the
+     * source file?" precisely: it returns null when the key is absent (rather than falling
+     * back to the parent's line), so callers can distinguish authored entries from ones that
+     * are injected at runtime by a package/framework and never appear in the file.
+     *
+     * Example: findNestedArrayKeyLine('config/logging.php', 'channels', 'single') returns the
+     * line of `'single' => [` within `'channels' => [...]`, or null if no such channel is authored.
+     *
+     * @param  string  $filePath  Full path to the config file
+     * @param  string  $parentKey  Top-level array key to search within (e.g. 'channels')
+     * @param  string  $childKey  Direct child key to locate (e.g. a channel name)
+     * @return int|null  1-indexed line number, or null when absent / unparseable
+     */
+    public static function findNestedArrayKeyLine(string $filePath, string $parentKey, string $childKey): ?int
+    {
+        $ast = (new AstParser())->parseFile($filePath);
+
+        if ($ast === []) {
+            return null;
+        }
+
+        $nodeFinder = new NodeFinder();
+
+        /** @var Return_|null $returnNode */
+        $returnNode = $nodeFinder->findFirstInstanceOf($ast, Return_::class);
+
+        if (! $returnNode instanceof Return_ || ! $returnNode->expr instanceof Array_) {
+            return null;
+        }
+
+        $parentArray = self::findArrayItemValue($returnNode->expr, $parentKey);
+
+        if (! $parentArray instanceof Array_) {
+            return null;
+        }
+
+        foreach ($parentArray->items as $item) {
+            if (! $item instanceof ArrayItem || ! $item->key instanceof Node\Scalar\String_) {
+                continue;
+            }
+
+            if ($item->key->value === $childKey) {
+                return $item->getStartLine();
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Return the value node of the array item with the given string key, or null.
+     */
+    private static function findArrayItemValue(Array_ $array, string $key): ?Node
+    {
+        foreach ($array->items as $item) {
+            if (! $item instanceof ArrayItem || ! $item->key instanceof Node\Scalar\String_) {
+                continue;
+            }
+
+            if ($item->key->value === $key) {
+                return $item->value;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Parse a PHP config file that returns an array and extract top-level string key-value pairs.
      *
      * Handles value types: String_, LNumber, DNumber, ConstFetch (true/false/null), FuncCall (env()).
