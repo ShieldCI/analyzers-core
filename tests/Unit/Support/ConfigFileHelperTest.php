@@ -213,6 +213,25 @@ class ConfigFileHelperTest extends TestCase
         $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine('/nonexistent/file.php', 'channels', 'single'));
     }
 
+    public function testFindNestedArrayKeyLineReturnsNullWhenReturnIsNotArray(): void
+    {
+        // File parses, but the returned expression is not an array.
+        $configFile = $this->tempDir.'/config/logging.php';
+        file_put_contents($configFile, "<?php\n\nreturn 'not-an-array';\n");
+
+        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
+    }
+
+    public function testFindNestedArrayKeyLineSkipsNonStringKeyedItems(): void
+    {
+        // Both the top-level array and the parent array contain list (non-keyed) items
+        // before the targeted keys, exercising the skip branches in both loops.
+        $configFile = $this->tempDir.'/config/logging.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'first-value',\n    'channels' => [\n        'list-item',\n        'single' => [\n            'driver' => 'single',\n        ],\n    ],\n];\n");
+
+        $this->assertSame(7, ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
+    }
+
     public function testFindKeyLineWithDoubleQuotes(): void
     {
         $configFile = $this->tempDir.'/config/test.php';
