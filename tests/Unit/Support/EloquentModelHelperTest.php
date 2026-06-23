@@ -144,4 +144,36 @@ class EloquentModelHelperTest extends TestCase
         $this->assertSame(['id'], EloquentModelHelper::extractGuardedFields($property));
         $this->assertSame(['id'], EloquentModelHelper::extractGuardedFields($attribute));
     }
+
+    public function testExtractionSkipsMethodsAndUnrelatedProperties(): void
+    {
+        // The class mixes a non-target property ($table), a method, and the target
+        // $fillable so the property/has-property loops must skip non-matching members.
+        $class = $this->classFrom(<<<'PHP'
+<?php
+class User
+{
+    protected $table = 'users';
+
+    public function scopeActive($query)
+    {
+        return $query;
+    }
+
+    protected $fillable = ['name', 'email'];
+}
+PHP);
+
+        $this->assertTrue(EloquentModelHelper::hasFillable($class));
+        $this->assertSame(['name', 'email'], EloquentModelHelper::extractFillableFields($class));
+    }
+
+    public function testExtractFillableFieldsFromAttributeSkipsOtherAttributes(): void
+    {
+        // A non-Fillable attribute precedes the Fillable one, exercising the
+        // short-name mismatch skip in extractFieldsFromAttribute().
+        $class = $this->classFrom('<?php #[Guarded(["id"])] #[Fillable(["name"])] class User {}');
+
+        $this->assertSame(['name'], EloquentModelHelper::extractFillableFieldsFromAttribute($class));
+    }
 }
