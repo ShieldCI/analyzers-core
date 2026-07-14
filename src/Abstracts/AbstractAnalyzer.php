@@ -484,8 +484,13 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      */
     protected function applyEnvironmentMapping(string $rawEnv): string
     {
+        // config() is a host-provided global. It is absent outside a framework, in
+        // which case there is no mapping to apply. Unreachable in the test suite:
+        // tests/bootstrap.php defines config() for the whole process and PHP cannot
+        // undefine a function, so no test can make function_exists() return false
+        // here. Same situation as the getBasePath() fallback below.
         if (! function_exists('config')) {
-            return $rawEnv;
+            return $rawEnv; // @codeCoverageIgnore
         }
 
         $mapping = config('shieldci.environment_mapping', []);
