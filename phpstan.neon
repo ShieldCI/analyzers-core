@@ -1,3 +1,9 @@
+includes:
+    # Teaches PHPStan how PHPUnit assertions narrow types (e.g. assertNotEmpty()
+    # proves an array is non-empty), so guarded calls like min(array_keys(...))
+    # verify instead of needing suppression.
+    - vendor/phpstan/phpstan-phpunit/extension.neon
+
 parameters:
     level: 9
     paths:
@@ -6,10 +12,54 @@ parameters:
     phpVersion: 80200
     reportUnmatchedIgnoredErrors: false
 
+    # PHPDoc types are NOT runtime guarantees. This package parses arbitrary
+    # user code and reads user config, so annotated types are claims, not facts,
+    # and the defensive is_string()/is_array() guards must survive. Matches the
+    # laravel and laravel-pro configs.
+    treatPhpDocTypesAsCertain: false
+
     ignoreErrors:
         -
             message: '#Cannot access offset .* on mixed#'
             path: tests/*
         -
             message: '#Parameter .* expects .*, mixed given#'
+            path: tests/*
+
+        # HOST-GLOBAL GUARDS — DO NOT "FIX" BY DELETING THE CHECKS.
+        # This package is framework-agnostic: base_path() and config() are globals
+        # defined by whatever host application installs us, not by this package.
+        # PHPStan only believes base_path() returns string because tests/bootstrap.php
+        # declares a stub with that signature — a test-only certainty that does not
+        # hold in production. If a host defines base_path() to return a non-string,
+        # these is_string()/is_callable() guards are the only thing standing between
+        # us and a TypeError thrown from a ': string' method.
+        -
+            message: '#Call to function is_string\(\) with string will always evaluate to true#'
+            path: src/Abstracts/AbstractAnalyzer.php
+        -
+            message: '#Call to function is_callable\(\) with array\{object, .get.\} will always evaluate to true#'
+            path: src/Abstracts/AbstractAnalyzer.php
+        -
+            message: "#Strict comparison using !== between non-empty-string and '' will always evaluate to true#"
+            path: src/Abstracts/AbstractAnalyzer.php
+
+        # php-parser CROSS-VERSION GUARD — DO NOT "FIX" BY DELETING THE CHECK.
+        # We support nikic/php-parser ^4.15|^5.0. In v5, Array_::$items is
+        # ArrayItem[]; in v4 it is (ArrayItem|null)[] — items are null for skipped
+        # elements (e.g. `[, $b] = $arr`). PHPStan analyses against the installed
+        # v5 and calls the instanceof redundant, but on v4 it prevents a null
+        # dereference. The guard is load-bearing for every user still on v4.
+        -
+            message: '#Instanceof between PhpParser\\Node\\ArrayItem and PhpParser\\Node\\ArrayItem will always evaluate to true#'
+            path: src/Support/ConfigFileHelper.php
+
+        # Test-only: PHPUnit assertions on already-narrowed types are intentional
+        # defensive checks — they verify the type system is telling the truth at
+        # runtime. Same rule as laravel/phpstan.neon.
+        -
+            message: '#Call to method PHPUnit\\Framework\\Assert::(assertIsString|assertIsArray|assertIsInt|assertIsBool|assertIsFloat|assertTrue|assertFalse|assertNotNull|assertInstanceOf)\(\) with .* will always evaluate to true#'
+            path: tests/*
+        -
+            message: '#Call to method PHPUnit\\Framework\\Assert::assertInstanceOf\(\) with .* and .* will always evaluate to true#'
             path: tests/*

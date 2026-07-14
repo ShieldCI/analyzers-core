@@ -40,22 +40,30 @@ final class Issue
             if (! is_array($snippetData)) {
                 $snippetData = [];
             }
+
+            // fromArray() deserializes untrusted input (JSON reports, cached payloads),
+            // so every field is coerced rather than assumed. assert() is NOT used here:
+            // PHP strips it entirely under the production default zend.assertions=-1,
+            // which would leave this path completely unguarded where it matters most.
             $filePath = $snippetData['file'] ?? '';
             $targetLine = $snippetData['target_line'] ?? 0;
-            $lines = $snippetData['lines'] ?? [];
             $contextLines = $snippetData['context_lines'] ?? 5;
 
-            // Type assertions for PHPStan
-            assert(is_string($filePath));
-            assert(is_int($targetLine));
-            assert(is_array($lines));
-            assert(is_int($contextLines));
+            /** @var array<int, string> $lines */
+            $lines = [];
+            if (isset($snippetData['lines']) && is_array($snippetData['lines'])) {
+                foreach ($snippetData['lines'] as $lineNumber => $lineText) {
+                    if (is_int($lineNumber) && is_string($lineText)) {
+                        $lines[$lineNumber] = $lineText;
+                    }
+                }
+            }
 
             $codeSnippet = new CodeSnippet(
-                filePath: $filePath,
-                targetLine: $targetLine,
+                filePath: is_string($filePath) ? $filePath : '',
+                targetLine: is_int($targetLine) ? $targetLine : 0,
                 lines: $lines,
-                contextLines: $contextLines
+                contextLines: is_int($contextLines) ? $contextLines : 5,
             );
         }
 

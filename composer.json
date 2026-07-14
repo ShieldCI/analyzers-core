@@ -22,10 +22,11 @@
         "nikic/php-parser": "^4.15|^5.0"
     },
     "require-dev": {
-        "phpunit/phpunit": "^10.0",
+        "friendsofphp/php-cs-fixer": "^3.40",
         "mockery/mockery": "^1.6",
-        "phpstan/phpstan": "^1.10",
-        "friendsofphp/php-cs-fixer": "^3.40"
+        "phpstan/phpstan": "^2.1",
+        "phpstan/phpstan-phpunit": "^2.0",
+        "phpunit/phpunit": "^10.0"
     },
     "autoload": {
         "psr-4": {

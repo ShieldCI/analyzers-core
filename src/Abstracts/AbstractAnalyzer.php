@@ -92,11 +92,9 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
     final public function analyze(): ResultInterface
     {
         if (! $this->shouldRun()) {
-            $reason = method_exists($this, 'getSkipReason')
-                ? $this->getSkipReason()
-                : 'Analyzer is not enabled or not applicable in current context'; // @codeCoverageIgnore
-
-            return $this->skipped($reason);
+            // getSkipReason() is on AnalyzerInterface and implemented below, so it is
+            // always callable here — the old method_exists() guard was unreachable.
+            return $this->skipped($this->getSkipReason());
         }
 
         $this->startTimer();
@@ -461,15 +459,7 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
                 $rawEnv = 'production';
             }
 
-            // Apply environment mapping if configured (uses global config() helper for mapping config)
-            if (function_exists('config')) {
-                $mapping = config('shieldci.environment_mapping', []);
-                if (is_array($mapping) && isset($mapping[$rawEnv])) {
-                    return $mapping[$rawEnv];
-                }
-            }
-
-            return $rawEnv;
+            return $this->applyEnvironmentMapping($rawEnv);
         }
 
         // Priority 2: Fall back to global config() helper
@@ -482,16 +472,36 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
             }
         }
 
-        // Apply environment mapping if configured
-        if (function_exists('config')) {
-            $mapping = config('shieldci.environment_mapping', []);
-            if (is_array($mapping) && isset($mapping[$rawEnv])) {
-                return $mapping[$rawEnv];
-            }
+        return $this->applyEnvironmentMapping($rawEnv);
+    }
+
+    /**
+     * Map a raw environment name through the configured environment_mapping.
+     *
+     * The mapping comes from user config, so a value may be any type. A non-string
+     * (or empty) mapping target is ignored rather than returned, since callers rely
+     * on the declared string return.
+     */
+    protected function applyEnvironmentMapping(string $rawEnv): string
+    {
+        // config() is a host-provided global. It is absent outside a framework, in
+        // which case there is no mapping to apply. Unreachable in the test suite:
+        // tests/bootstrap.php defines config() for the whole process and PHP cannot
+        // undefine a function, so no test can make function_exists() return false
+        // here. Same situation as the getBasePath() fallback below.
+        if (! function_exists('config')) {
+            return $rawEnv; // @codeCoverageIgnore
         }
 
-        // Return raw environment (no mapping configured or not in mapping)
-        return $rawEnv;
+        $mapping = config('shieldci.environment_mapping', []);
+
+        if (! is_array($mapping) || ! isset($mapping[$rawEnv])) {
+            return $rawEnv;
+        }
+
+        $mapped = $mapping[$rawEnv];
+
+        return is_string($mapped) && $mapped !== '' ? $mapped : $rawEnv;
     }
 
     /**

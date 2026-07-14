@@ -354,7 +354,9 @@ PHP;
         // Should include target line and method signature (smart expansion may include it)
         $this->assertArrayHasKey(9, $lines); // Target line
         // Method signature should be included if smart expansion works
-        $this->assertGreaterThanOrEqual(5, min(array_keys($lines))); // Start line should be <= 5
+        $lineNumbers = array_keys($lines);
+        $this->assertNotEmpty($lineNumbers);
+        $this->assertGreaterThanOrEqual(5, min($lineNumbers)); // Start line should be <= 5
 
         unlink($file);
     }
@@ -384,7 +386,9 @@ PHP;
         // Should include target line
         $this->assertArrayHasKey(9, $lines); // Target line
         // Method signature should be included if smart expansion works
-        $this->assertGreaterThanOrEqual(5, min(array_keys($lines))); // Start line should be <= 5
+        $lineNumbers = array_keys($lines);
+        $this->assertNotEmpty($lineNumbers);
+        $this->assertGreaterThanOrEqual(5, min($lineNumbers)); // Start line should be <= 5
 
         unlink($file);
     }
@@ -414,7 +418,9 @@ PHP;
         // Should include target line
         $this->assertArrayHasKey(9, $lines); // Target line
         // Method signature should be included if smart expansion works
-        $this->assertGreaterThanOrEqual(5, min(array_keys($lines))); // Start line should be <= 5
+        $lineNumbers = array_keys($lines);
+        $this->assertNotEmpty($lineNumbers);
+        $this->assertGreaterThanOrEqual(5, min($lineNumbers)); // Start line should be <= 5
 
         unlink($file);
     }
@@ -477,7 +483,9 @@ PHP;
         // Should not include FirstClass (stopped at closing brace)
         $this->assertArrayNotHasKey(3, $lines); // FirstClass declaration
         // Should include SecondClass method signature if smart expansion works
-        $minLine = min(array_keys($lines));
+        $lineNumbers = array_keys($lines);
+        $this->assertNotEmpty($lineNumbers);
+        $minLine = min($lineNumbers);
         $this->assertGreaterThan(6, $minLine); // Should start after FirstClass ends
 
         unlink($file);
