@@ -199,6 +199,48 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertFalse($result);
     }
 
+    public function testGetPhpFilesExcludesRelativePatterns(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+        $analyzer->setPaths(['']); // Set to scan the base directory
+        $analyzer->setExcludePatterns(['vendor/*', 'tests/*']);
+
+        $files = $analyzer->getPhpFilesPublic();
+
+        $this->assertCount(2, $files); // Only src/File1.php and src/File2.php
+        foreach ($files as $file) {
+            $this->assertStringContainsString('/src/', $file);
+        }
+    }
+
+    public function testShouldAnalyzeFileExcludesRelativePatternAgainstBasePath(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+        $analyzer->setExcludePatterns(['vendor/*']);
+
+        // Top-level vendor file and a nested one: the glob's .* crosses directories
+        mkdir($this->testDir . '/vendor/sub');
+        file_put_contents($this->testDir . '/vendor/sub/Deep.php', "<?php\nclass Deep {}\n");
+
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic(new \SplFileInfo($this->testDir . '/vendor/Package.php')));
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic(new \SplFileInfo($this->testDir . '/vendor/sub/Deep.php')));
+        $this->assertTrue($analyzer->shouldAnalyzeFilePublic(new \SplFileInfo($this->testDir . '/src/File1.php')));
+    }
+
+    public function testShouldAnalyzeFileStillExcludesAbsoluteStylePatternsWithBasePath(): void
+    {
+        // Backward compatibility: patterns like '*/vendor/*' matched the absolute
+        // pathname before relative matching existed and must keep working.
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+        $analyzer->setExcludePatterns(['*/vendor/*']);
+
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic(new \SplFileInfo($this->testDir . '/vendor/Package.php')));
+        $this->assertTrue($analyzer->shouldAnalyzeFilePublic(new \SplFileInfo($this->testDir . '/src/File1.php')));
+    }
+
     public function testMatchesPatternWithSimpleGlob(): void
     {
         $analyzer = new ConcreteFileAnalyzer();
