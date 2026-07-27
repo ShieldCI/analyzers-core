@@ -144,9 +144,13 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         }
 
         $path = $file->getPathname();
+        // Exclude patterns are written relative to the base path ('vendor/*'),
+        // so match the relative path; also match the absolute pathname for
+        // patterns that relied on it ('*/vendor/*').
+        $relativePath = ltrim($this->getRelativePath($path), '/');
 
         foreach ($this->compiledExcludePatterns as $regex) {
-            if (preg_match($regex, $path) === 1) {
+            if (preg_match($regex, $relativePath) === 1 || preg_match($regex, $path) === 1) {
                 return false;
             }
         }
