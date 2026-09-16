@@ -343,13 +343,38 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertEquals('src/File.php', $result);
     }
 
-    public function testGetRelativePathWithoutBasePath(): void
+    public function testGetRelativePathWithoutBasePathUsesTheHostBasePath(): void
+    {
+        // #58: with no setBasePath() call, resolution now falls through
+        // getBasePath() to the host's base_path() - the same base every other
+        // inherited helper already used. Before the override was dropped this
+        // answered the absolute path, so shouldAnalyzeFile() and the inherited
+        // createIssueWithSnippet() disagreed on the very same instance.
+        $analyzer = new ConcreteFileAnalyzer();
+
+        $GLOBALS['__shieldci_test_base_path'] = '/host/app';
+
+        try {
+            $this->assertSame('src/File.php', $analyzer->getRelativePathPublic('/host/app/src/File.php'));
+        } finally {
+            unset($GLOBALS['__shieldci_test_base_path']);
+        }
+    }
+
+    public function testGetRelativePathWithoutBasePathLeavesPathsOutsideTheHostBaseAlone(): void
     {
         $analyzer = new ConcreteFileAnalyzer();
 
-        $result = $analyzer->getRelativePathPublic('/absolute/path/File.php');
+        $GLOBALS['__shieldci_test_base_path'] = '/host/app';
 
-        $this->assertEquals('/absolute/path/File.php', $result);
+        try {
+            $this->assertSame(
+                '/absolute/path/File.php',
+                $analyzer->getRelativePathPublic('/absolute/path/File.php')
+            );
+        } finally {
+            unset($GLOBALS['__shieldci_test_base_path']);
+        }
     }
 
     public function testGetRelativePathWhenFileNotInBasePath(): void
@@ -360,6 +385,73 @@ class AbstractFileAnalyzerTest extends TestCase
         $result = $analyzer->getRelativePathPublic('/other/path/File.php');
 
         $this->assertEquals('/other/path/File.php', $result);
+    }
+
+    public function testGetRelativePathNormalisesWindowsSeparators(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath('C:\\proj\\app');
+
+        $this->assertSame('src/File.php', $analyzer->getRelativePathPublic('C:\\proj\\app\\src\\File.php'));
+    }
+
+    public function testGetRelativePathHandlesTheMixedSeparatorsSplFileInfoProduces(): void
+    {
+        // getFilesToAnalyze() joins the scan root with a literal '/', while
+        // SplFileInfo::getPathname() joins with DIRECTORY_SEPARATOR - so this is
+        // the shape a real Windows run actually hands to getRelativePath().
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath('C:\\proj\\app');
+
+        $this->assertSame('vendor/a.php', $analyzer->getRelativePathPublic('C:/proj/app\\vendor\\a.php'));
+    }
+
+    public function testGetRelativePathHandlesATrailingBackslashInTheBasePath(): void
+    {
+        // setBasePath() rtrims '/' only, so a Windows trailing separator reaches
+        // the relativiser intact.
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath('C:\\proj\\app\\');
+
+        $this->assertSame('src/File.php', $analyzer->getRelativePathPublic('C:\\proj\\app\\src\\File.php'));
+    }
+
+    public function testShouldAnalyzeFileExcludesARelativeGlobOnWindowsPaths(): void
+    {
+        // #58 regression. setExcludePatterns(['vendor/*']) compiles to
+        // '#^vendor/.*$#', which matches neither 'vendor\a.php' nor the absolute
+        // pathname - so vendor/ was scanned on Windows, defeating #56.
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath('C:\\proj\\app');
+        $analyzer->setExcludePatterns(['vendor/*']);
+
+        $this->assertFalse(
+            $analyzer->shouldAnalyzeFilePublic(new \SplFileInfo('C:\\proj\\app\\vendor\\a.php'))
+        );
+    }
+
+    public function testShouldAnalyzeFileExcludesARelativeGlobOnPosixPaths(): void
+    {
+        // The control for the case above: this one already passed.
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath('/proj/app');
+        $analyzer->setExcludePatterns(['vendor/*']);
+
+        $this->assertFalse(
+            $analyzer->shouldAnalyzeFilePublic(new \SplFileInfo('/proj/app/vendor/a.php'))
+        );
+    }
+
+    public function testShouldAnalyzeFileKeepsWindowsPathsOutsideAnExcludedGlob(): void
+    {
+        // Guards the other direction: normalising must not over-exclude.
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath('C:\\proj\\app');
+        $analyzer->setExcludePatterns(['vendor/*']);
+
+        $this->assertTrue(
+            $analyzer->shouldAnalyzeFilePublic(new \SplFileInfo('C:\\proj\\app\\src\\a.php'))
+        );
     }
 
     public function testGetFilesToAnalyzeReturnsIterableOfFiles(): void

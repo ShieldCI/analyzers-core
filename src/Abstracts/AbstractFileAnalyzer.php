@@ -171,28 +171,18 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     }
 
     /**
-     * Get relative path from base path.
-     */
-    protected function getRelativePath(string $file): string
-    {
-        if (empty($this->basePath)) {
-            return $file;
-        }
-
-        $basePath = $this->basePath . '/';
-        if (str_starts_with($file, $basePath)) {
-            return substr($file, strlen($basePath));
-        }
-
-        return $file;
-    }
-
-    /**
      * Override getBasePath to use explicitly set $basePath property.
      *
      * FileAnalyzers allow setting a custom basePath (primarily for testing).
      * This override ensures that when basePath is explicitly set via setBasePath(),
      * it takes precedence over Laravel's base_path() helper.
+     *
+     * This is also the single lever for relative-path reporting. getRelativePath()
+     * used to be overridden here to read $this->basePath directly, which skipped this
+     * fallback chain and the separator normalisation the parent does - so with no base
+     * path set, shouldAnalyzeFile() and the inherited createIssueWithSnippet() could
+     * disagree about what "relative" meant on the same instance. Resolve through here
+     * rather than re-adding that override.
      *
      * @return string The base path (from $basePath property or parent fallback)
      */
