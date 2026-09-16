@@ -66,6 +66,21 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertEquals('/path/to/project', $property->getValue($analyzer));
     }
 
+    public function testSetBasePathRemovesTrailingBackslash(): void
+    {
+        // PathHelper::relativeTo() rtrims '/\\', this rtrimmed '/' alone - so a
+        // Windows base_path() with a trailing separator relativised correctly
+        // but still double-separated on every join built from it (#62).
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath('C:\\proj\\app\\');
+
+        $reflection = new \ReflectionClass($analyzer);
+        $property = $reflection->getProperty('basePath');
+        $property->setAccessible(true);
+
+        $this->assertEquals('C:\\proj\\app', $property->getValue($analyzer));
+    }
+
     public function testSetBasePathReturnsFluentInterface(): void
     {
         $analyzer = new ConcreteFileAnalyzer();
@@ -652,33 +667,147 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertEmpty($files);
     }
 
-    public function testGetFilesToAnalyzeDefaultsToBasePathWhenPathsEmpty(): void
+    // =========================================================================
+    // The empty-$paths default - ShieldCI/analyzers-core#62
+    //
+    // The predecessor of these tests asserted only that $this->paths had been
+    // mutated to [$basePath], then closed with assertIsArray($files). Its own
+    // comment conceded that the resulting '/app//app' "won't exist" and called
+    // that expected. It pinned the mechanism instead of the outcome, so it
+    // certified an analyzer that scanned nothing and reported a pass.
+    // =========================================================================
+
+    public function testGetPhpFilesScansTheBasePathWhenSetPathsWasNeverCalled(): void
     {
-        // Test line 96: When paths is empty, it defaults to [$this->basePath]
+        // AnalyzerManager always calls setBasePath() but only calls setPaths()
+        // when shieldci.paths.analyze is non-empty, so this is the shape every
+        // file analyzer takes in an app that leaves that config key empty.
         $analyzer = new ConcreteFileAnalyzer();
         $analyzer->setBasePath($this->testDir);
-        // Don't set paths - should default to basePath (line 96: $this->paths = [$this->basePath])
 
-        // Use reflection to verify paths is set to basePath
+        $files = $analyzer->getPhpFilesPublic();
+
+        $this->assertCount(4, $files);
+    }
+
+    public function testGetFilesToAnalyzeLeavesThePathsPropertyUntouched(): void
+    {
+        // The default used to be installed by writing it back to $this->paths.
+        // AnalyzerManager caches analyzer instances, and FatModelAnalyzer and
+        // friends branch on empty($this->paths) to install a narrower scan root,
+        // so a getter that writes is one reordering away from stealing theirs.
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+
+        iterator_to_array($analyzer->getFilesToAnalyzePublic());
+
         $reflection = new \ReflectionClass($analyzer);
         $pathsProperty = $reflection->getProperty('paths');
         $pathsProperty->setAccessible(true);
 
-        // Initially paths should be empty
-        $this->assertEmpty($pathsProperty->getValue($analyzer));
+        $this->assertSame([], $pathsProperty->getValue($analyzer));
+    }
 
-        // Call getFilesToAnalyze which triggers line 96
-        $files = iterator_to_array($analyzer->getFilesToAnalyzePublic());
+    public function testGetFilesToAnalyzeYieldsTheSameFilesOnEveryIteration(): void
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
 
-        // After calling getFilesToAnalyze, paths should be set to [basePath]
-        $paths = $pathsProperty->getValue($analyzer);
-        $this->assertEquals([$this->testDir], $paths);
+        $first = $this->pathnamesOf($analyzer->getFilesToAnalyzePublic());
+        $second = $this->pathnamesOf($analyzer->getFilesToAnalyzePublic());
 
-        // Note: When paths contains basePath and basePath is also set,
-        // the fullPath construction may create basePath/basePath which won't exist.
-        // This is expected behavior - line 96 is tested by verifying paths is set.
-        // The actual file finding depends on the path construction logic.
-        $this->assertIsArray($files);
+        $this->assertCount(5, $first); // 4 PHP files plus README.md
+        $this->assertSame($first, $second);
+    }
+
+    public function testTheEmptyPathIdiomMatchesTheDefaultScanRoot(): void
+    {
+        // setPaths(['']) is how this suite spells "scan the base directory".
+        // The default now produces the identical scan root.
+        $explicit = new ConcreteFileAnalyzer();
+        $explicit->setBasePath($this->testDir);
+        $explicit->setPaths(['']);
+
+        $default = new ConcreteFileAnalyzer();
+        $default->setBasePath($this->testDir);
+
+        $this->assertSame($this->sortedPhpFiles($explicit), $this->sortedPhpFiles($default));
+    }
+
+    public function testTheDotPathIdiomStillResolvesToTheBaseDirectory(): void
+    {
+        // setPaths(['.']) is the dominant idiom in the downstream suites, and
+        // consumers strip the resulting './' segment back off reported
+        // locations - so join() must leave it in place, not collapse it.
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+        $analyzer->setPaths(['.']);
+
+        $files = $analyzer->getPhpFilesPublic();
+        sort($files);
+
+        $this->assertSame(
+            [
+                $this->testDir . '/./src/File1.php',
+                $this->testDir . '/./src/File2.php',
+                $this->testDir . '/./tests/Test1.php',
+                $this->testDir . '/./vendor/Package.php',
+            ],
+            $files
+        );
+    }
+
+    public function testTreatsZeroAsARealBasePath(): void
+    {
+        // '0' is falsy, so getFilesToAnalyze()'s `$this->basePath ?` and
+        // getEnvironment()'s empty() both read it as "no base path at all".
+        $zeroDir = $this->testDir . '/0';
+        mkdir($zeroDir);
+        file_put_contents($zeroDir . '/Zero.php', "<?php\nclass Zero {}\n");
+        file_put_contents($zeroDir . '/.env', "APP_ENV=staging\n");
+
+        $cwd = getcwd();
+        chdir($this->testDir);
+        $GLOBALS['__shieldci_test_config'] = [];
+
+        try {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath('0');
+
+            $this->assertSame(['0/Zero.php'], $analyzer->getPhpFilesPublic());
+            $this->assertSame('staging', $analyzer->exposedGetEnvironment());
+        } finally {
+            unset($GLOBALS['__shieldci_test_config']);
+            chdir($cwd === false ? $this->testDir : $cwd);
+        }
+    }
+
+    /**
+     * @param  iterable<\SplFileInfo>  $files
+     * @return array<string>
+     */
+    private function pathnamesOf(iterable $files): array
+    {
+        $pathnames = [];
+
+        foreach ($files as $file) {
+            $pathnames[] = $file->getPathname();
+        }
+
+        sort($pathnames);
+
+        return $pathnames;
+    }
+
+    /**
+     * @return array<string>
+     */
+    private function sortedPhpFiles(ConcreteFileAnalyzer $analyzer): array
+    {
+        $files = $analyzer->getPhpFilesPublic();
+        sort($files);
+
+        return $files;
     }
 }
 

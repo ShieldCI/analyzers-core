@@ -132,7 +132,7 @@ class AbstractAnalyzerTest extends TestCase
         $path = $analyzer->exposedBuildPath('vendor');
 
         $basePath = $analyzer->exposedGetBasePath();
-        $expected = $basePath . DIRECTORY_SEPARATOR . 'vendor';
+        $expected = $basePath . '/vendor';
 
         $this->assertEquals($expected, $path);
     }
@@ -143,17 +143,50 @@ class AbstractAnalyzerTest extends TestCase
         $path = $analyzer->exposedBuildPath('vendor', 'composer', 'autoload.php');
 
         $basePath = $analyzer->exposedGetBasePath();
-        $expected = $basePath . DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR . 'composer' . DIRECTORY_SEPARATOR . 'autoload.php';
+        $expected = $basePath . '/vendor/composer/autoload.php';
 
         $this->assertEquals($expected, $path);
     }
 
-    public function testBuildPathUsesDirectorySeparator(): void
+    public function testBuildPathJoinsWithForwardSlashes(): void
     {
+        // buildPath() used to join with DIRECTORY_SEPARATOR, which is the one
+        // spelling PathHelper::relativeTo() then has to normalise back out. PHP
+        // accepts '/' in every filesystem call on Windows, so one separator
+        // survives rather than two (#62).
         $analyzer = new IssueCreatingAnalyzer();
         $path = $analyzer->exposedBuildPath('config', 'app.php');
 
-        $this->assertStringContainsString(DIRECTORY_SEPARATOR, $path);
+        $this->assertStringContainsString('config/app.php', $path);
+    }
+
+    public function testBuildPathDoesNotDoubleATrailingSeparatorOnTheBasePath(): void
+    {
+        // buildPath() concatenated straight onto getBasePath() without trimming
+        // it, so a host base_path() ending in a separator answered
+        // '/host/app//config/app.php'.
+        $GLOBALS['__shieldci_test_base_path'] = '/host/app/';
+
+        try {
+            $analyzer = new IssueCreatingAnalyzer();
+
+            $this->assertSame('/host/app/config/app.php', $analyzer->exposedBuildPath('config', 'app.php'));
+        } finally {
+            unset($GLOBALS['__shieldci_test_base_path']);
+        }
+    }
+
+    public function testBuildPathWithNoSegmentsTrimsATrailingSeparator(): void
+    {
+        $GLOBALS['__shieldci_test_base_path'] = '/host/app/';
+
+        try {
+            $analyzer = new IssueCreatingAnalyzer();
+
+            $this->assertSame('/host/app', $analyzer->exposedBuildPath());
+        } finally {
+            unset($GLOBALS['__shieldci_test_base_path']);
+        }
     }
 
     public function testSkippedHelperCreatesSkippedResult(): void

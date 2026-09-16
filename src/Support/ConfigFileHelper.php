@@ -32,17 +32,20 @@ class ConfigFileHelper
         // Remove .php extension if present
         $file = preg_replace('/\.php$/', '', $file);
 
-        // If basePath is empty, try fallback
-        if (empty($basePath) && $fallback !== null) {
+        // If basePath is empty, try fallback. Compared against '' rather than
+        // empty(), which reads a base path of '0' as no base path at all.
+        if ($basePath === '' && $fallback !== null) {
             $result = $fallback($file.'.php');
             if (is_string($result)) {
                 return $result;
             }
         }
 
-        // Construct path from basePath
-        if (! empty($basePath)) {
-            return rtrim($basePath, '/').'/config/'.$file.'.php';
+        // Construct path from basePath. PathHelper::join() rather than a local
+        // rtrim($basePath, '/'), which left a trailing backslash on a Windows
+        // base path and answered 'C:\app\/config/cache.php'.
+        if ($basePath !== '') {
+            return PathHelper::join($basePath, 'config/'.$file.'.php');
         }
 
         // Last resort: relative path
