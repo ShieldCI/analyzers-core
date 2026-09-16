@@ -7,6 +7,7 @@ namespace ShieldCI\AnalyzersCore\Abstracts;
 use ShieldCI\AnalyzersCore\Contracts\{AnalyzerInterface, ResultInterface};
 use ShieldCI\AnalyzersCore\Enums\Severity;
 use ShieldCI\AnalyzersCore\Results\AnalysisResult;
+use ShieldCI\AnalyzersCore\Support\PathHelper;
 use ShieldCI\AnalyzersCore\ValueObjects\{AnalyzerMetadata, CodeSnippet, Issue, Location};
 use Throwable;
 
@@ -541,23 +542,15 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
 
     /**
      * Get relative path from base path.
+     *
+     * Deliberately not overridden anywhere. AbstractFileAnalyzer used to carry its own
+     * copy that read $this->basePath directly and skipped separator normalisation, so
+     * file analyzers reported Windows paths this method would have reported correctly.
+     * Both now resolve through getBasePath(), which AbstractFileAnalyzer overrides when
+     * a base path was set explicitly.
      */
     protected function getRelativePath(string $file): string
     {
-        $basePath = $this->getBasePath();
-
-        if ($basePath === '' || $basePath === '.') {
-            return $file;
-        }
-
-        $basePath = rtrim($basePath, '/\\').'/';
-        $normalizedFile = str_replace('\\', '/', $file);
-        $normalizedBasePath = str_replace('\\', '/', $basePath);
-
-        if (str_starts_with($normalizedFile, $normalizedBasePath)) {
-            return substr($normalizedFile, strlen($normalizedBasePath));
-        }
-
-        return $file;
+        return PathHelper::relativeTo($file, $this->getBasePath());
     }
 }
