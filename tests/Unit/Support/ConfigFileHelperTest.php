@@ -789,4 +789,164 @@ PHP);
 
         $this->assertSame(1, ConfigFileHelper::findKeyLine($configFile, 'nonexistent'));
     }
+
+    // =========================================================================
+    // locateNestedConfigKey() - ShieldCI/laravel#367
+    // =========================================================================
+
+    public function test_locate_nested_config_key_returns_null_when_the_file_is_not_published(): void
+    {
+        $this->assertNull(
+            ConfigFileHelper::locateNestedConfigKey($this->tempDir, 'cache.php', 'stores', 'driver', 'redis')
+        );
+    }
+
+    public function test_locate_nested_config_key_returns_a_relative_path_and_the_real_line(): void
+    {
+        $this->writeCacheConfig(<<<'PHP'
+            <?php
+
+            return [
+                'default' => 'file',
+
+                'stores' => [
+                    'file' => [
+                        'driver' => 'file',
+                    ],
+
+                    'redis' => [
+                        'driver' => 'redis',
+                        'connection' => 'cache',
+                    ],
+                ],
+            ];
+            PHP);
+
+        $location = ConfigFileHelper::locateNestedConfigKey($this->tempDir, 'cache.php', 'stores', 'driver', 'redis');
+
+        $this->assertNotNull($location);
+        $this->assertSame('config/cache.php', $location->file);
+        $this->assertNotNull($location->line);
+        $this->assertStringContainsString("'driver' => 'redis'", $this->cacheConfigLine($location->line));
+    }
+
+    public function test_locate_nested_config_key_stays_inside_the_named_item(): void
+    {
+        // The store carries no 'driver' of its own. findKeyLine()'s parent scope only ends
+        // at a top-level key, so the flat search would run on into 'dynamodb' and answer
+        // with its driver line. This one stops at the store it was asked about.
+        $this->writeCacheConfig(<<<'PHP'
+            <?php
+
+            return [
+                'stores' => [
+                    'redis' => [
+                        'connection' => 'cache',
+                    ],
+
+                    'dynamodb' => [
+                        'driver' => 'dynamodb',
+                    ],
+                ],
+            ];
+            PHP);
+
+        $location = ConfigFileHelper::locateNestedConfigKey($this->tempDir, 'cache.php', 'stores', 'driver', 'redis');
+
+        $this->assertNotNull($location);
+        $this->assertNotNull($location->line);
+        $this->assertStringContainsString("'redis' =>", $this->cacheConfigLine($location->line));
+    }
+
+    public function test_locate_nested_config_key_falls_back_to_the_parent_line_when_the_item_is_absent(): void
+    {
+        $this->writeCacheConfig(<<<'PHP'
+            <?php
+
+            return [
+                'stores' => [
+                    'file' => [
+                        'driver' => 'file',
+                    ],
+                ],
+
+                'prefix' => 'shieldci',
+            ];
+            PHP);
+
+        $location = ConfigFileHelper::locateNestedConfigKey($this->tempDir, 'cache.php', 'stores', 'driver', 'redis');
+
+        $this->assertNotNull($location);
+        $this->assertNotNull($location->line);
+        $this->assertStringContainsString("'stores' =>", $this->cacheConfigLine($location->line));
+    }
+
+    public function test_locate_nested_config_key_omits_the_line_when_the_parent_key_is_absent(): void
+    {
+        $this->writeCacheConfig(<<<'PHP'
+            <?php
+
+            return [
+                'default' => 'file',
+            ];
+            PHP);
+
+        $location = ConfigFileHelper::locateNestedConfigKey($this->tempDir, 'cache.php', 'stores', 'driver', 'redis');
+
+        $this->assertNotNull($location);
+        $this->assertSame('config/cache.php', $location->file);
+        $this->assertNull($location->line);
+    }
+
+    public function test_locate_nested_config_key_accepts_a_file_name_without_the_php_extension(): void
+    {
+        $this->writeCacheConfig(<<<'PHP'
+            <?php
+
+            return [
+                'stores' => [
+                    'redis' => [
+                        'driver' => 'redis',
+                    ],
+                ],
+            ];
+            PHP);
+
+        $location = ConfigFileHelper::locateNestedConfigKey($this->tempDir, 'cache', 'stores', 'driver', 'redis');
+
+        $this->assertNotNull($location);
+        $this->assertSame('config/cache.php', $location->file);
+    }
+
+    // findNestedKeyLine()'s documented contract must not shift either: it still answers 1
+    // for both "file missing" and "parent key absent".
+
+    public function test_find_nested_key_line_still_returns_one_when_the_file_is_missing(): void
+    {
+        $this->assertSame(
+            1,
+            ConfigFileHelper::findNestedKeyLine($this->tempDir.'/config/absent.php', 'stores', 'driver', 'redis')
+        );
+    }
+
+    public function test_find_nested_key_line_still_returns_one_when_the_parent_key_is_absent(): void
+    {
+        $configFile = $this->tempDir.'/config/cache.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'default' => 'file',\n];\n");
+
+        $this->assertSame(1, ConfigFileHelper::findNestedKeyLine($configFile, 'stores', 'driver', 'redis'));
+    }
+
+    private function writeCacheConfig(string $contents): void
+    {
+        file_put_contents($this->tempDir.'/config/cache.php', $contents."\n");
+    }
+
+    private function cacheConfigLine(int $line): string
+    {
+        $lines = file($this->tempDir.'/config/cache.php', FILE_IGNORE_NEW_LINES);
+        $this->assertIsArray($lines);
+
+        return $lines[$line - 1];
+    }
 }
