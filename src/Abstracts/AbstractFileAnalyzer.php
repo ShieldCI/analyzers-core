@@ -6,6 +6,7 @@ namespace ShieldCI\AnalyzersCore\Abstracts;
 
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
+use ShieldCI\AnalyzersCore\Support\PathHelper;
 use SplFileInfo;
 
 /**
@@ -43,10 +44,16 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
 
     /**
      * Set the base path.
+     *
+     * Trims the same charlist as PathHelper, so a Windows base_path() handed in
+     * as 'C:\app\' is stored the way every consumer expects to find it. This
+     * used to rtrim '/' alone: relativisation still worked, because
+     * PathHelper::relativeTo() trims both ends itself, but every path built by
+     * concatenating onto the stored value double-separated.
      */
     public function setBasePath(string $path): static
     {
-        $this->basePath = rtrim($path, '/');
+        $this->basePath = rtrim($path, '/\\');
 
         return $this;
     }
@@ -100,16 +107,34 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     /**
      * Get files to analyze based on configured paths.
      *
+     * No configured paths means "scan the base path". That default used to be
+     * installed by writing the base path into $this->paths, which the loop below
+     * then joined the base path onto a second time - '/app' became '/app//app',
+     * which is neither a directory nor a file, so the analyzer scanned nothing
+     * and reported a pass. AnalyzerManager always calls setBasePath() but only
+     * calls setPaths() when shieldci.paths.analyze is non-empty, so every file
+     * analyzer in an app with that key empty or absent took this path silently.
+     *
+     * '' is the spelling callers already use for the same thing, and it costs
+     * nothing here because PathHelper::join() answers the base path for it.
+     *
+     * The default is no longer written back. AnalyzerManager caches analyzer
+     * instances, and FatModelAnalyzer and its siblings branch on
+     * empty($this->paths) to install a narrower scan root of their own - a
+     * getter that mutates is one reordering away from taking that away.
+     *
      * @return iterable<SplFileInfo>
      */
     protected function getFilesToAnalyze(): iterable
     {
-        if (empty($this->paths)) {
-            $this->paths = [$this->basePath];
-        }
+        // Resolve through getBasePath(), not the raw property: shouldAnalyzeFile()
+        // and the inherited getRelativePath() already do, and the scan root was
+        // the last reader left that could disagree with them (#58, #62).
+        $basePath = $this->getBasePath();
+        $paths = $this->paths === [] ? [''] : $this->paths;
 
-        foreach ($this->paths as $path) {
-            $fullPath = $this->basePath ? "{$this->basePath}/{$path}" : $path;
+        foreach ($paths as $path) {
+            $fullPath = PathHelper::join($basePath, $path);
 
             if (! is_dir($fullPath)) {
                 if (is_file($fullPath)) {
@@ -208,9 +233,14 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      */
     protected function getEnvironment(): string
     {
-        // Priority 1: Read from .env file if basePath is set (test scenarios)
-        if (! empty($this->basePath)) {
-            $envFile = $this->basePath.'/.env';
+        // Priority 1: Read from .env file if basePath is set (test scenarios).
+        // Deliberately the raw property rather than getBasePath(): this branch
+        // exists for an explicitly set base path, and resolving through the
+        // fallback would make every production analyzer prefer .env over
+        // config('app.env'). The guard compares against '' because empty() reads
+        // a base path of '0' as no base path at all.
+        if ($this->basePath !== '') {
+            $envFile = PathHelper::join($this->basePath, '.env');
             if (file_exists($envFile)) {
                 $content = file_get_contents($envFile);
                 // Use [^\s#"']+ so hyphenated names like "local-test" are captured in full

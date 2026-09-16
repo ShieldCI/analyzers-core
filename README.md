@@ -57,7 +57,7 @@ composer require shieldci/analyzers-core
    - `FileParser` - File content parsing utilities
    - `CodeHelper` - Code analysis helpers
    - `ConfigFileHelper` - Laravel configuration file utilities
-   - `PathHelper` - Base-relative paths with cross-platform separator normalization
+   - `PathHelper` - Joining and relativising against a base path, with cross-platform separator normalization
    - `MessageHelper` - Error message sanitization (redacts credentials, tokens, IPs)
    - `InlineSuppressionParser` - Parses `@shieldci-ignore` inline suppression comments
 

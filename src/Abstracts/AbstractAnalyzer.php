@@ -393,10 +393,15 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
     }
 
     /**
-     * Build a file path from segments using proper directory separator.
+     * Build a file path from segments, anchored at the application base path.
      *
-     * This helper method constructs paths in a cross-platform compatible way
-     * using DIRECTORY_SEPARATOR and ensures a valid base path.
+     * Joins through PathHelper, the same joiner getFilesToAnalyze() and
+     * ConfigFileHelper use. It used to concatenate with DIRECTORY_SEPARATOR
+     * straight onto getBasePath() without trimming it, so a host base_path()
+     * ending in a separator answered '/app//config/app.php' - which then
+     * relativised to a leading-slash '/config/app.php' in reported locations.
+     * PHP accepts '/' in every filesystem call on Windows, and it is the
+     * spelling PathHelper::relativeTo() normalises to anyway.
      *
      * Examples:
      * - $this->buildPath('vendor', 'autoload.php') → '/path/to/project/vendor/autoload.php'
@@ -408,13 +413,7 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
      */
     protected function buildPath(string ...$segments): string
     {
-        $basePath = $this->getBasePath();
-
-        if (empty($segments)) {
-            return $basePath;
-        }
-
-        return $basePath . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $segments);
+        return PathHelper::join($this->getBasePath(), implode('/', $segments));
     }
 
     /**

@@ -172,4 +172,80 @@ class PathHelperTest extends TestCase
         // The surviving implementation compares against '' exactly.
         $this->assertSame('src/File.php', PathHelper::relativeTo('0/src/File.php', '0'));
     }
+
+    // =========================================================================
+    // join() - ShieldCI/analyzers-core#62
+    //
+    // The inverse of relativeTo(), sharing its trim charlist so a base path one
+    // accepts is a base path the other accepts. It replaces the literal-'/'
+    // joins in AbstractFileAnalyzer, AbstractAnalyzer::buildPath() and
+    // ConfigFileHelper::getConfigPath().
+    // =========================================================================
+
+    public function test_join_answers_the_path_unchanged_for_an_empty_base(): void
+    {
+        $this->assertSame('src/File.php', PathHelper::join('', 'src/File.php'));
+    }
+
+    public function test_join_answers_the_base_for_an_empty_path(): void
+    {
+        // '' is how callers spell "the base path itself" - getFilesToAnalyze()
+        // defaults to it when setPaths() was never called.
+        $this->assertSame('/var/www/project', PathHelper::join('/var/www/project', ''));
+    }
+
+    public function test_join_trims_a_trailing_forward_slash_off_the_base(): void
+    {
+        $this->assertSame('/var/www/project/src', PathHelper::join('/var/www/project/', 'src'));
+    }
+
+    public function test_join_trims_a_trailing_backslash_off_the_base(): void
+    {
+        // setBasePath() used to rtrim '/' only, so a Windows base handed in as
+        // 'C:\app\' reached the join with its separator still attached.
+        $this->assertSame('C:\\Projects\\myapp/src', PathHelper::join('C:\\Projects\\myapp\\', 'src'));
+    }
+
+    public function test_join_does_not_double_a_separator_on_a_rooted_segment(): void
+    {
+        $this->assertSame('/var/www/project/src', PathHelper::join('/var/www/project', '/src'));
+    }
+
+    public function test_join_strips_a_leading_backslash_off_the_segment(): void
+    {
+        $this->assertSame('/var/www/project/src', PathHelper::join('/var/www/project', '\\src'));
+    }
+
+    public function test_join_keeps_a_base_of_only_separators_anchored_at_the_root(): void
+    {
+        // rtrim() takes a base of '/' down to nothing; answering 'src' would
+        // turn an absolute scan root into a relative one.
+        $this->assertSame('/src', PathHelper::join('/', 'src'));
+    }
+
+    public function test_join_answers_the_root_for_a_separator_base_and_an_empty_path(): void
+    {
+        $this->assertSame('/', PathHelper::join('/', ''));
+    }
+
+    public function test_join_treats_zero_as_a_real_base_path(): void
+    {
+        // Same empty()-on-a-path-string trap relativeTo() avoids: '0' is falsy.
+        $this->assertSame('0/src', PathHelper::join('0', 'src'));
+    }
+
+    public function test_join_leaves_a_dot_segment_alone(): void
+    {
+        // setPaths(['.']) is the dominant idiom in the downstream suites, and
+        // consumers strip the resulting './' prefix off reported locations.
+        // Collapsing it here would change behaviour in shieldci/laravel-pro.
+        $this->assertSame('/var/www/project/.', PathHelper::join('/var/www/project', '.'));
+    }
+
+    public function test_join_and_relative_to_are_inverses(): void
+    {
+        $joined = PathHelper::join('/var/www/project', 'src/File.php');
+
+        $this->assertSame('src/File.php', PathHelper::relativeTo($joined, '/var/www/project'));
+    }
 }

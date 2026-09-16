@@ -345,8 +345,37 @@ class ConfigFileHelperTest extends TestCase
 
     public function testGetConfigPathHandlesBasePathWithMultipleSlashes(): void
     {
+        // Pinned exactly rather than by assertStringContainsString: only the
+        // trailing separators are this helper's to collapse, and an interior
+        // '//' must survive so the answer still points at the caller's path.
         $path = ConfigFileHelper::getConfigPath('//var//www//app//', 'cache');
-        $this->assertStringContainsString('config/cache.php', $path);
+        $this->assertSame('//var//www//app/config/cache.php', $path);
+    }
+
+    public function testGetConfigPathTrimsATrailingBackslashOffTheBasePath(): void
+    {
+        // rtrim($basePath, '/') left the backslash on, so a Windows base path
+        // answered 'C:\proj\app\/config/cache.php' (#62).
+        $path = ConfigFileHelper::getConfigPath('C:\\proj\\app\\', 'cache');
+        $this->assertSame('C:\\proj\\app/config/cache.php', $path);
+    }
+
+    public function testGetConfigPathTreatsZeroAsARealBasePath(): void
+    {
+        // empty('0') is true, so a base path of '0' fell through to the
+        // last-resort relative path as though none had been given.
+        $path = ConfigFileHelper::getConfigPath('0', 'cache');
+        $this->assertSame('0/config/cache.php', $path);
+    }
+
+    public function testGetConfigPathDoesNotConsultTheFallbackForAZeroBasePath(): void
+    {
+        $fallback = function (string $file): string {
+            return '/framework/config/'.$file;
+        };
+
+        $path = ConfigFileHelper::getConfigPath('0', 'cache', $fallback);
+        $this->assertSame('0/config/cache.php', $path);
     }
 
     public function testGetConfigPathWithFallbackReturningNonString(): void
