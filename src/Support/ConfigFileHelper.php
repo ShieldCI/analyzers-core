@@ -91,6 +91,44 @@ class ConfigFileHelper
     }
 
     /**
+     * Locate a key nested inside a named item of a config array, or report no location
+     * when the file is not published.
+     *
+     * The locateConfigKey() of findNestedKeyLine(): same three-way answer, but for the
+     * "find 'driver' inside stores.redis" search rather than "find 'driver' after the
+     * first 'redis' key". The distinction matters because findKeyLine()'s parent scope
+     * only ends at a top-level key, so on a store that does not carry the key it walks
+     * into the next store and answers with its line.
+     *
+     * Argument order mirrors findNestedKeyLine() deliberately. A second ordering for the
+     * same search is how a call gets written the wrong way round.
+     *
+     * @param  string  $basePath  Absolute path to the application root
+     * @param  string  $file  Config file name, with or without the .php extension
+     * @param  string  $parentKey  Parent array key (e.g., 'stores', 'connections')
+     * @param  string  $nestedKey  Nested key to locate (e.g., 'driver')
+     * @param  string  $nestedValue  Name of the parent item to search within (e.g., 'redis')
+     */
+    public static function locateNestedConfigKey(
+        string $basePath,
+        string $file,
+        string $parentKey,
+        string $nestedKey,
+        string $nestedValue
+    ): ?Location {
+        $configFile = self::getConfigPath($basePath, $file);
+
+        if (! is_file($configFile)) {
+            return null;
+        }
+
+        return new Location(
+            self::getConfigPath('', $file),
+            self::findNestedKeyLineOrNull($configFile, $parentKey, $nestedKey, $nestedValue)
+        );
+    }
+
+    /**
      * Find the line number where a specific key is defined in a config file.
      * Uses precise patterns to avoid matches in comments.
      *
@@ -177,6 +215,9 @@ class ConfigFileHelper
      * Find the line number where a nested key is defined within a parent array.
      * For example, find 'driver' within a specific 'store' in the 'stores' array.
      *
+     * Answers 1 both when the file cannot be read and when the parent key is absent.
+     * Use locateNestedConfigKey() when those two need telling apart.
+     *
      * @param  string  $configFile  Full path to the config file
      * @param  string  $parentKey  Parent array key (e.g., 'stores', 'connections')
      * @param  string  $nestedKey  Nested key to find (e.g., 'driver')
@@ -185,10 +226,23 @@ class ConfigFileHelper
      */
     public static function findNestedKeyLine(string $configFile, string $parentKey, string $nestedKey, string $nestedValue): int
     {
+        return self::findNestedKeyLineOrNull($configFile, $parentKey, $nestedKey, $nestedValue) ?? 1;
+    }
+
+    /**
+     * Find the line of a nested key, or null when the file cannot be read or the parent
+     * key is not in it.
+     *
+     * The honest twin of findNestedKeyLine(), which collapses both onto 1. A parent array
+     * that simply lacks the named item is not one of those cases: that still answers the
+     * parent's own line, which is a real place to look.
+     */
+    private static function findNestedKeyLineOrNull(string $configFile, string $parentKey, string $nestedKey, string $nestedValue): ?int
+    {
         $lines = FileParser::getLines($configFile);
 
         if (empty($lines)) {
-            return 1;
+            return null;
         }
 
         $inParentArray = false;
@@ -258,7 +312,7 @@ class ConfigFileHelper
         }
 
         // Fallback: try to find the parent key
-        return self::findKeyLine($configFile, $parentKey);
+        return self::findKeyLineOrNull($configFile, $parentKey);
     }
 
     /**
