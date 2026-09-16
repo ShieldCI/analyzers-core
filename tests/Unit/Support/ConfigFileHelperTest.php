@@ -698,4 +698,95 @@ PHP);
         $this->assertSame(3306, $result['port']['value']);
         $this->assertSame(30.5, $result['timeout']['value']);
     }
+
+    // =========================================================================
+    // locateConfigKey() - ShieldCI/laravel#360
+    // =========================================================================
+
+    public function test_locate_config_key_returns_null_when_the_file_is_not_published(): void
+    {
+        $this->assertNull(
+            ConfigFileHelper::locateConfigKey($this->tempDir, 'database.php', 'mysql', 'connections')
+        );
+    }
+
+    public function test_locate_config_key_returns_a_relative_path_and_the_real_line(): void
+    {
+        file_put_contents(
+            $this->tempDir.'/config/database.php',
+            "<?php\n\nreturn [\n    'default' => 'mysql',\n\n    'connections' => [\n        'mysql' => [\n            'driver' => 'mysql',\n        ],\n    ],\n];\n"
+        );
+
+        $location = ConfigFileHelper::locateConfigKey($this->tempDir, 'database.php', 'mysql', 'connections');
+
+        $this->assertNotNull($location);
+        $this->assertSame('config/database.php', $location->file);
+        $this->assertNotNull($location->line);
+
+        $lines = file($this->tempDir.'/config/database.php', FILE_IGNORE_NEW_LINES);
+        $this->assertIsArray($lines);
+        $this->assertStringContainsString("'mysql' =>", $lines[$location->line - 1]);
+    }
+
+    public function test_locate_config_key_omits_the_line_when_the_key_is_absent(): void
+    {
+        file_put_contents(
+            $this->tempDir.'/config/database.php',
+            "<?php\n\nreturn [\n    'default' => 'mysql',\n];\n"
+        );
+
+        $location = ConfigFileHelper::locateConfigKey($this->tempDir, 'database.php', 'nonexistent');
+
+        $this->assertNotNull($location);
+        $this->assertSame('config/database.php', $location->file);
+        $this->assertNull($location->line);
+    }
+
+    public function test_locate_config_key_accepts_a_file_name_without_the_php_extension(): void
+    {
+        file_put_contents(
+            $this->tempDir.'/config/session.php',
+            "<?php\n\nreturn [\n    'driver' => 'file',\n];\n"
+        );
+
+        $location = ConfigFileHelper::locateConfigKey($this->tempDir, 'session', 'driver');
+
+        $this->assertNotNull($location);
+        $this->assertSame('config/session.php', $location->file);
+        $this->assertSame(4, $location->line);
+    }
+
+    public function test_locate_config_key_scopes_the_search_to_the_parent_key(): void
+    {
+        file_put_contents(
+            $this->tempDir.'/config/database.php',
+            "<?php\n\nreturn [\n    'driver' => 'top-level',\n\n    'connections' => [\n        'mysql' => [\n            'driver' => 'mysql',\n        ],\n    ],\n];\n"
+        );
+
+        $location = ConfigFileHelper::locateConfigKey($this->tempDir, 'database.php', 'driver', 'connections');
+
+        $this->assertNotNull($location);
+        $this->assertNotNull($location->line);
+
+        $lines = file($this->tempDir.'/config/database.php', FILE_IGNORE_NEW_LINES);
+        $this->assertIsArray($lines);
+        $this->assertStringContainsString("'driver' => 'mysql'", $lines[$location->line - 1]);
+    }
+
+    // findKeyLine()'s documented contract must not shift: it still answers 1 for
+    // both "file missing" and "key absent". locateConfigKey() is the way to tell
+    // those apart.
+
+    public function test_find_key_line_still_returns_one_when_the_file_is_missing(): void
+    {
+        $this->assertSame(1, ConfigFileHelper::findKeyLine($this->tempDir.'/config/absent.php', 'default'));
+    }
+
+    public function test_find_key_line_still_returns_one_when_the_key_is_absent(): void
+    {
+        $configFile = $this->tempDir.'/config/app.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'name' => 'ShieldCI',\n];\n");
+
+        $this->assertSame(1, ConfigFileHelper::findKeyLine($configFile, 'nonexistent'));
+    }
 }

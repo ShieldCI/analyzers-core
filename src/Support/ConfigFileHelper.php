@@ -12,6 +12,7 @@ use PhpParser\Node\Expr\FuncCall;
 use PhpParser\Node\Name;
 use PhpParser\Node\Stmt\Return_;
 use PhpParser\NodeFinder;
+use ShieldCI\AnalyzersCore\ValueObjects\Location;
 
 /**
  * Helper utilities for working with Laravel configuration files.
@@ -49,8 +50,52 @@ class ConfigFileHelper
     }
 
     /**
+     * Locate a key inside a config file, or report no location when the file is not published.
+     *
+     * Laravel merges the framework's own config when an application has not published its
+     * own copy, so a correct config() value never implies the file is on disk. This tells
+     * apart the three cases findKeyLine() collapses onto line 1:
+     *
+     *  - the file is not there at all           -> null
+     *  - the file is there and holds the key    -> relative path plus the real line
+     *  - the file is there without the key      -> relative path, no line
+     *
+     * The config_path() fallback that getConfigPath() accepts is deliberately not exposed
+     * here. It is only consulted for an empty base path, which the analyzer base classes
+     * cannot produce, and calling it would put a framework global into this package.
+     * Callers that genuinely need it should keep using getConfigPath() directly.
+     *
+     * @param  string  $basePath  Absolute path to the application root
+     * @param  string  $file  Config file name, with or without the .php extension
+     * @param  string  $key  The key to locate (e.g., 'default', 'mysql')
+     * @param  string|null  $parentKey  Optional parent array to search within (e.g., 'connections')
+     */
+    public static function locateConfigKey(
+        string $basePath,
+        string $file,
+        string $key,
+        ?string $parentKey = null
+    ): ?Location {
+        $configFile = self::getConfigPath($basePath, $file);
+
+        if (! is_file($configFile)) {
+            return null;
+        }
+
+        // getConfigPath() builds "<basePath>/config/<file>.php", so the relative form is
+        // the same call with no base path rather than something to strip back off.
+        return new Location(
+            self::getConfigPath('', $file),
+            self::findKeyLineOrNull($configFile, $key, $parentKey)
+        );
+    }
+
+    /**
      * Find the line number where a specific key is defined in a config file.
      * Uses precise patterns to avoid matches in comments.
+     *
+     * Answers 1 both when the file cannot be read and when the key is absent.
+     * Use locateConfigKey() when those two need telling apart.
      *
      * @param  string  $configFile  Full path to the config file
      * @param  string  $key  The key to find (e.g., 'default', 'prefix')
@@ -59,10 +104,22 @@ class ConfigFileHelper
      */
     public static function findKeyLine(string $configFile, string $key, ?string $parentKey = null): int
     {
+        return self::findKeyLineOrNull($configFile, $key, $parentKey) ?? 1;
+    }
+
+    /**
+     * Find the line of a key, or null when the file cannot be read or the key is not there.
+     *
+     * findKeyLine() collapses both of those onto 1, which callers cannot tell from a key
+     * genuinely on line 1. Keeping the honest answer here lets locateConfigKey() report a
+     * file without a line instead of inventing one.
+     */
+    private static function findKeyLineOrNull(string $configFile, string $key, ?string $parentKey = null): ?int
+    {
         $lines = FileParser::getLines($configFile);
 
         if (empty($lines)) {
-            return 1;
+            return null;
         }
 
         $inParentArray = $parentKey === null;
@@ -113,7 +170,7 @@ class ConfigFileHelper
             }
         }
 
-        return 1;
+        return null;
     }
 
     /**
