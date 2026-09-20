@@ -6,6 +6,7 @@ namespace ShieldCI\AnalyzersCore\Formatters;
 
 use ShieldCI\AnalyzersCore\Contracts\{ReporterInterface, ResultInterface};
 use ShieldCI\AnalyzersCore\Enums\Status;
+use ShieldCI\AnalyzersCore\Results\ResultCollection;
 
 /**
  * Formats analysis results for console output.
@@ -91,27 +92,20 @@ class ConsoleFormatter implements ReporterInterface
      */
     private function formatSummary(array $results): string
     {
-        $total = count($results);
-        $passed = count(array_filter($results, fn ($r) => $r->getStatus() === Status::Passed));
-        $failed = count(array_filter($results, fn ($r) => $r->getStatus() === Status::Failed));
-        $warnings = count(array_filter($results, fn ($r) => $r->getStatus() === Status::Warning));
-        $skipped = count(array_filter($results, fn ($r) => $r->getStatus() === Status::Skipped));
-        $errors = count(array_filter($results, fn ($r) => $r->getStatus() === Status::Error));
+        $collection = new ResultCollection($results);
 
-        $score = $total > 0 ? round((($passed + $skipped) / $total) * 100, 1) : 100.0;
+        $total = $collection->count();
+        $passed = count($collection->passed());
+        $failed = count($collection->failed());
+        $warnings = count($collection->warnings());
+        $skipped = count($collection->skipped());
+        $errors = count($collection->errors());
+
+        $score = $collection->score();
         $scoreColor = $score >= 80 ? 'green' : ($score >= 60 ? 'yellow' : 'red');
 
-        $totalIssues = array_reduce(
-            $results,
-            fn (int $carry, ResultInterface $r) => $carry + count($r->getIssues()),
-            0
-        );
-
-        $totalTime = array_reduce(
-            $results,
-            fn (float $carry, ResultInterface $r) => $carry + $r->getExecutionTime(),
-            0.0
-        );
+        $totalIssues = $collection->totalIssues();
+        $totalTime = $collection->totalExecutionTime();
 
         $summary = [];
         $summary[] = $this->color("Score: {$score}%", $scoreColor);

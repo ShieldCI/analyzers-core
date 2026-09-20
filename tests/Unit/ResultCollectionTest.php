@@ -172,7 +172,7 @@ class ResultCollectionTest extends TestCase
         $this->assertEquals(100.0, $score);
     }
 
-    public function testScoreIncludesSkippedInSuccess(): void
+    public function testScoreExcludesSkippedFromDenominator(): void
     {
         $collection = new ResultCollection([
             AnalysisResult::passed('analyzer-1', 'Passed'),
@@ -183,8 +183,54 @@ class ResultCollectionTest extends TestCase
 
         $score = $collection->score();
 
-        // (1 passed + 1 skipped) / 4 total = 50%
-        $this->assertEquals(50.0, $score);
+        // 1 passed / (4 total - 1 skipped) = 33.33%. A skip produced no verdict, so it
+        // neither raises nor lowers the score.
+        $this->assertEquals(33.33, $score);
+    }
+
+    public function testScoreMatchesTheLivePathForTheDocumentedExample(): void
+    {
+        $collection = new ResultCollection([
+            AnalysisResult::passed('analyzer-1', 'Passed'),
+            AnalysisResult::passed('analyzer-2', 'Passed'),
+            AnalysisResult::passed('analyzer-3', 'Passed'),
+            AnalysisResult::passed('analyzer-4', 'Passed'),
+            AnalysisResult::passed('analyzer-5', 'Passed'),
+            AnalysisResult::passed('analyzer-6', 'Passed'),
+            AnalysisResult::skipped('analyzer-7', 'Skipped'),
+            AnalysisResult::skipped('analyzer-8', 'Skipped'),
+            AnalysisResult::failed('analyzer-9', 'Failed'),
+            AnalysisResult::failed('analyzer-10', 'Failed'),
+        ]);
+
+        // 6 passed / (10 total - 2 skipped) = 75%, the number AnalysisReport::score() in
+        // shieldci/laravel uploads to the platform. The old formula answered 80 (#65).
+        $this->assertEquals(75.0, $collection->score());
+    }
+
+    public function testScoreReturns100WhenEveryAnalyzerWasSkipped(): void
+    {
+        $collection = new ResultCollection([
+            AnalysisResult::skipped('analyzer-1', 'Skipped'),
+            AnalysisResult::skipped('analyzer-2', 'Skipped'),
+            AnalysisResult::skipped('analyzer-3', 'Skipped'),
+        ]);
+
+        // Every analyzer waived empties the denominator; guard it rather than divide.
+        $this->assertEquals(100.0, $collection->score());
+    }
+
+    public function testScoreKeepsErroredAnalyzersInTheDenominator(): void
+    {
+        $collection = new ResultCollection([
+            AnalysisResult::passed('analyzer-1', 'Passed'),
+            AnalysisResult::passed('analyzer-2', 'Passed'),
+            AnalysisResult::error('analyzer-3', 'Analysis failed'),
+        ]);
+
+        // 2 passed / 3 total = 66.67%. An analyzer that could not run must not read as a
+        // pass, so it stays in the denominator - unlike a skip.
+        $this->assertEquals(66.67, $collection->score());
     }
 
     public function testTotalIssuesCountsAllIssues(): void
