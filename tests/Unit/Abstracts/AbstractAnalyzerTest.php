@@ -974,6 +974,86 @@ class AbstractAnalyzerTest extends TestCase
         $this->assertNull($issue->location);
         $this->assertEquals('Application is in maintenance mode', $issue->message);
     }
+
+    // =========================================================================
+    // Error-path metadata - ShieldCI/analyzers-core#64
+    //
+    // analyze()'s catch block is the only place this package turns a caller's
+    // exception into an uploaded payload, so these pin both values it emits.
+    //
+    // zend.exception_ignore_args is forced off for the trace tests. It is Off by
+    // default, which is why the leak was reachable at all, but a host that
+    // copied php.ini-production has it On - and there these would pass while
+    // proving nothing.
+    // =========================================================================
+
+    public function testAnalyzeRecordsAStructuredArgFreeTrace(): void
+    {
+        $result = $this->withExceptionArgs(
+            static fn (): ResultInterface => (new CredentialLeakingAnalyzer())->analyze()
+        );
+
+        $trace = $result->getMetadata()['trace'] ?? null;
+        $this->assertIsArray($trace);
+        $this->assertNotSame([], $trace);
+
+        $first = $trace[0];
+        $this->assertIsArray($first);
+        $this->assertSame(['file', 'line', 'function', 'class'], array_keys($first));
+        $this->assertSame('connect', $first['function']);
+    }
+
+    public function testAnalyzeDoesNotUploadArgumentValues(): void
+    {
+        // toArray() is what AnalysisReport serialises into the report written to
+        // disk and POSTed to /api/reports, so this is the shape that leaves the
+        // machine, not an intermediate one.
+        $result = $this->withExceptionArgs(
+            static fn (): ResultInterface => (new CredentialLeakingAnalyzer())->analyze()
+        );
+
+        $this->assertStringNotContainsString('hunter2pass', (string) json_encode($result->toArray()));
+    }
+
+    public function testAnalyzeRedactsCredentialsFromTheErrorMessage(): void
+    {
+        // The message is the half the platform actually persists - its report
+        // normaliser drops 'trace' on ingest but keeps the result message.
+        $result = (new CredentialMessageAnalyzer())->analyze();
+
+        $this->assertStringContainsString('password=***', $result->getMessage());
+        $this->assertStringNotContainsString('hunter2pass', $result->getMessage());
+    }
+
+    public function testAnalyzeCapsAVeryLongErrorMessage(): void
+    {
+        $result = (new LongMessageAnalyzer())->analyze();
+
+        $this->assertSame(
+            'Analysis failed: '.str_repeat('a', 500).'...',
+            $result->getMessage()
+        );
+    }
+
+    /**
+     * Run $run with exception arguments forced on, restoring the host setting after.
+     *
+     * @param  callable():ResultInterface  $run
+     */
+    private function withExceptionArgs(callable $run): ResultInterface
+    {
+        $original = ini_get('zend.exception_ignore_args');
+        ini_set('zend.exception_ignore_args', '0');
+
+        try {
+            return $run();
+        } finally {
+            if (is_string($original)) {
+                ini_set('zend.exception_ignore_args', $original);
+            }
+        }
+    }
+
 }
 
 // Test implementations
@@ -1694,5 +1774,67 @@ class NonCallableConfigRepository
     private function get(string $key, $default = null)
     {
         return $default;
+    }
+}
+
+class CredentialLeakingAnalyzer extends AbstractAnalyzer
+{
+    protected function metadata(): AnalyzerMetadata
+    {
+        return new AnalyzerMetadata(
+            id: 'credential-leaking-analyzer',
+            name: 'Credential Leaking Analyzer',
+            description: 'Throws from a call whose arguments carry a credential',
+            category: Category::Security,
+            severity: Severity::High
+        );
+    }
+
+    protected function runAnalysis(): ResultInterface
+    {
+        return $this->connect('mysql:host=db.internal;dbname=prod', 'root', 'hunter2pass');
+    }
+
+    private function connect(string $dsn, string $user, string $password): ResultInterface
+    {
+        throw new \RuntimeException('connection refused');
+    }
+}
+
+class CredentialMessageAnalyzer extends AbstractAnalyzer
+{
+    protected function metadata(): AnalyzerMetadata
+    {
+        return new AnalyzerMetadata(
+            id: 'credential-message-analyzer',
+            name: 'Credential Message Analyzer',
+            description: 'Throws with a credential in the exception message',
+            category: Category::Security,
+            severity: Severity::High
+        );
+    }
+
+    protected function runAnalysis(): ResultInterface
+    {
+        throw new \RuntimeException('Connection failed: password=hunter2pass');
+    }
+}
+
+class LongMessageAnalyzer extends AbstractAnalyzer
+{
+    protected function metadata(): AnalyzerMetadata
+    {
+        return new AnalyzerMetadata(
+            id: 'long-message-analyzer',
+            name: 'Long Message Analyzer',
+            description: 'Throws a message longer than the cap',
+            category: Category::Security,
+            severity: Severity::High
+        );
+    }
+
+    protected function runAnalysis(): ResultInterface
+    {
+        throw new \RuntimeException(str_repeat('a', 1000));
     }
 }

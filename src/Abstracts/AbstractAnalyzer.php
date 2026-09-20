@@ -7,7 +7,7 @@ namespace ShieldCI\AnalyzersCore\Abstracts;
 use ShieldCI\AnalyzersCore\Contracts\{AnalyzerInterface, ResultInterface};
 use ShieldCI\AnalyzersCore\Enums\Severity;
 use ShieldCI\AnalyzersCore\Results\AnalysisResult;
-use ShieldCI\AnalyzersCore\Support\PathHelper;
+use ShieldCI\AnalyzersCore\Support\{MessageHelper, PathHelper, TraceHelper};
 use ShieldCI\AnalyzersCore\ValueObjects\{AnalyzerMetadata, CodeSnippet, Issue, Location};
 use Throwable;
 
@@ -17,6 +17,16 @@ use Throwable;
  */
 abstract class AbstractAnalyzer implements AnalyzerInterface
 {
+    /**
+     * How much of a caught exception's message survives into the error result.
+     *
+     * MessageHelper defaults to 200, which suits the short recommendation strings it
+     * was written for. Analyzer exceptions - PDO, php-parser, filesystem - routinely
+     * run longer, and this message is the half the platform actually persists, so it
+     * is worth keeping readable.
+     */
+    private const ERROR_MESSAGE_LENGTH = 500;
+
     /**
      * Determine whether the analyzer should be run in CI mode.
      *
@@ -112,9 +122,19 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
                 metadata: $result->getMetadata(),
             );
         } catch (Throwable $e) {
+            // getTraceAsString() renders every frame's arguments, truncating strings at
+            // 15 characters, so a credential shorter than that rode along in full - into
+            // the JSON report written to disk and into the /api/reports body (#64).
+            // TraceHelper builds the frame list from four named keys instead, and
+            // MessageHelper redacts what a message can still carry. getBasePath() is
+            // called unguarded here, as createIssueWithSnippet() already does on the
+            // happy path; a nested try would add a branch the suite cannot reach.
             return $this->error(
-                "Analysis failed: {$e->getMessage()}",
-                ['exception' => get_class($e), 'trace' => $e->getTraceAsString()]
+                'Analysis failed: '.MessageHelper::sanitizeErrorMessage($e->getMessage(), self::ERROR_MESSAGE_LENGTH),
+                [
+                    'exception' => get_class($e),
+                    'trace' => TraceHelper::frames($e, $this->getBasePath()),
+                ]
             );
         }
     }
