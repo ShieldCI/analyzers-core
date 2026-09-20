@@ -7,7 +7,7 @@ namespace ShieldCI\AnalyzersCore\Tests\Unit\Formatters;
 use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Enums\{Severity, Status};
 use ShieldCI\AnalyzersCore\Formatters\JsonFormatter;
-use ShieldCI\AnalyzersCore\Results\AnalysisResult;
+use ShieldCI\AnalyzersCore\Results\{AnalysisResult, ResultCollection};
 use ShieldCI\AnalyzersCore\ValueObjects\{Issue, Location};
 
 class JsonFormatterTest extends TestCase
@@ -109,8 +109,8 @@ class JsonFormatterTest extends TestCase
         $output = $formatter->format($results);
         $data = json_decode($output, true);
 
-        // Score = (passed + skipped) / total * 100 = (2 + 1) / 4 * 100 = 75%
-        $this->assertEquals(75.0, $data['summary']['score']);
+        // Score = passed / (total - skipped) * 100 = 2 / (4 - 1) * 100 = 66.67%
+        $this->assertEquals(66.67, $data['summary']['score']);
     }
 
     public function testSummaryScoreIs100ForEmptyResults(): void
@@ -259,5 +259,30 @@ class JsonFormatterTest extends TestCase
 
         // Should be rounded to 4 decimal places
         $this->assertEquals(0.1235, $data['summary']['execution_time']);
+    }
+
+    public function testSummaryScoreMatchesResultCollectionScore(): void
+    {
+        $formatter = new JsonFormatter();
+        $results = [
+            new AnalysisResult('analyzer-1', Status::Passed, '', [], 0.1),
+            new AnalysisResult('analyzer-2', Status::Passed, '', [], 0.1),
+            new AnalysisResult('analyzer-3', Status::Failed, '', [], 0.1),
+            new AnalysisResult('analyzer-4', Status::Warning, '', [], 0.1),
+            new AnalysisResult('analyzer-5', Status::Skipped, '', [], 0.1),
+            new AnalysisResult('analyzer-6', Status::Error, '', [], 0.1),
+            new AnalysisResult('analyzer-7', Status::Error, '', [], 0.1),
+        ];
+
+        $output = $formatter->format($results);
+        $data = json_decode($output, true);
+
+        // One formula, one place. Re-inlining it here would answer 42.86 (the old
+        // (passed + skipped) / total) instead of 33.33, and this goes red. See #65.
+        $this->assertEquals(
+            (new ResultCollection($results))->score(),
+            $data['summary']['score']
+        );
+        $this->assertEquals(33.33, $data['summary']['score']);
     }
 }

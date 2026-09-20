@@ -159,6 +159,13 @@ echo "Total Issues: " . $collection->totalIssues() . PHP_EOL;
 echo "Execution Time: " . $collection->totalExecutionTime() . "s" . PHP_EOL;
 ```
 
+`score()` is the share of analyzers that returned a verdict and passed:
+`passed / (total - skipped)`. A **skipped** analyzer leaves the denominator entirely -
+it is a deliberate waiver that produced no verdict, so it neither raises nor lowers the
+score. An **errored** one stays in the denominator: an analyzer that could not run must
+not read as a pass. A collection that is empty, or whose analyzers were all skipped,
+scores 100. The formatters below report the same number from the same method.
+
 ### Formatting Results
 
 ```php

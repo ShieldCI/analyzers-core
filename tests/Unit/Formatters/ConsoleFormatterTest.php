@@ -7,7 +7,7 @@ namespace ShieldCI\AnalyzersCore\Tests\Unit\Formatters;
 use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Enums\{Severity, Status};
 use ShieldCI\AnalyzersCore\Formatters\ConsoleFormatter;
-use ShieldCI\AnalyzersCore\Results\AnalysisResult;
+use ShieldCI\AnalyzersCore\Results\{AnalysisResult, ResultCollection};
 use ShieldCI\AnalyzersCore\ValueObjects\{CodeSnippet, Issue, Location};
 
 class ConsoleFormatterTest extends TestCase
@@ -404,5 +404,43 @@ class ConsoleFormatterTest extends TestCase
         // Should contain severity and recommendation
         $this->assertStringContainsString('Severity:', $output);
         $this->assertStringContainsString('Recommendation:', $output);
+    }
+
+    public function testFormatExcludesSkippedFromTheScoreDenominator(): void
+    {
+        $formatter = new ConsoleFormatter(useColors: false);
+        $results = [
+            new AnalysisResult('analyzer-1', Status::Passed, '', [], 0.1),
+            new AnalysisResult('analyzer-2', Status::Skipped, '', [], 0.1),
+            new AnalysisResult('analyzer-3', Status::Failed, '', [], 0.1),
+            new AnalysisResult('analyzer-4', Status::Failed, '', [], 0.1),
+        ];
+
+        $output = $formatter->format($results);
+
+        // 1 passed / (4 total - 1 skipped) = 33.33%, not the 50% the old formula gave.
+        $this->assertStringContainsString('Score: 33.33%', $output);
+    }
+
+    public function testFormatScoreMatchesResultCollectionScore(): void
+    {
+        $formatter = new ConsoleFormatter(useColors: false);
+        $results = [
+            new AnalysisResult('analyzer-1', Status::Passed, '', [], 0.1),
+            new AnalysisResult('analyzer-2', Status::Passed, '', [], 0.1),
+            new AnalysisResult('analyzer-3', Status::Failed, '', [], 0.1),
+            new AnalysisResult('analyzer-4', Status::Warning, '', [], 0.1),
+            new AnalysisResult('analyzer-5', Status::Skipped, '', [], 0.1),
+            new AnalysisResult('analyzer-6', Status::Error, '', [], 0.1),
+            new AnalysisResult('analyzer-7', Status::Error, '', [], 0.1),
+        ];
+
+        $score = (new ResultCollection($results))->score();
+        $output = $formatter->format($results);
+
+        // One formula, one precision. The old inline version answered 42.9 here - wrong
+        // rule and one decimal place where the other two use two. See #65.
+        $this->assertStringContainsString("Score: {$score}%", $output);
+        $this->assertStringContainsString('Score: 33.33%', $output);
     }
 }

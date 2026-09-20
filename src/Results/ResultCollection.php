@@ -110,17 +110,26 @@ final class ResultCollection implements Countable, IteratorAggregate
     }
 
     /**
-     * Calculate overall score (0-100).
+     * Calculate overall score (0-100): the share of analyzers that returned a verdict
+     * and passed.
+     *
+     * Skipped analyzers leave the denominator entirely - a skip is a deliberate waiver
+     * that produced no verdict, so it can neither raise nor lower the score. Errored
+     * analyzers stay in it: an analyzer that could not run must not read as a pass. An
+     * empty collection and an all-skipped one both score 100.
+     *
+     * Deliberately treats Skipped differently from Status::isSuccess(), which asks
+     * whether anything failed rather than what share of verdicts passed.
      */
     public function score(): float
     {
-        if ($this->count() === 0) {
+        $denominator = $this->count() - count($this->skipped());
+
+        if ($denominator === 0) {
             return 100.0;
         }
 
-        $passed = count($this->passed()) + count($this->skipped());
-
-        return round(($passed / $this->count()) * 100, 2);
+        return round((count($this->passed()) / $denominator) * 100, 2);
     }
 
     /**

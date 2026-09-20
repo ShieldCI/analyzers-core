@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ShieldCI\AnalyzersCore\Formatters;
 
 use ShieldCI\AnalyzersCore\Contracts\{ReporterInterface, ResultInterface};
+use ShieldCI\AnalyzersCore\Results\ResultCollection;
 
 /**
  * Formats analysis results as JSON.
@@ -47,40 +48,18 @@ class JsonFormatter implements ReporterInterface
      */
     private function generateSummary(array $results): array
     {
-        $passed = 0;
-        $failed = 0;
-        $warnings = 0;
-        $skipped = 0;
-        $errors = 0;
-        $totalIssues = 0;
-        $totalExecutionTime = 0.0;
-
-        foreach ($results as $result) {
-            match ($result->getStatus()->value) {
-                'passed' => $passed++,
-                'failed' => $failed++,
-                'warning' => $warnings++,
-                'skipped' => $skipped++,
-                'error' => $errors++,
-            };
-
-            $totalIssues += count($result->getIssues());
-            $totalExecutionTime += $result->getExecutionTime();
-        }
-
-        $total = count($results);
-        $score = $total > 0 ? round((($passed + $skipped) / $total) * 100, 2) : 100.0;
+        $collection = new ResultCollection($results);
 
         return [
-            'total' => $total,
-            'passed' => $passed,
-            'failed' => $failed,
-            'warnings' => $warnings,
-            'skipped' => $skipped,
-            'errors' => $errors,
-            'total_issues' => $totalIssues,
-            'score' => $score,
-            'execution_time' => round($totalExecutionTime, 4),
+            'total' => $collection->count(),
+            'passed' => count($collection->passed()),
+            'failed' => count($collection->failed()),
+            'warnings' => count($collection->warnings()),
+            'skipped' => count($collection->skipped()),
+            'errors' => count($collection->errors()),
+            'total_issues' => $collection->totalIssues(),
+            'score' => $collection->score(),
+            'execution_time' => round($collection->totalExecutionTime(), 4),
         ];
     }
 }
