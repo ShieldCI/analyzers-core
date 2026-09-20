@@ -491,7 +491,7 @@ use ShieldCI\AnalyzersCore\Support\MessageHelper;
 $safe = MessageHelper::sanitizeErrorMessage(
     'Connection failed: password=s3cr3t host=10.0.0.5'
 );
-// → 'Connection failed: password=[REDACTED] host=[INTERNAL_IP]'
+// → 'Connection failed: password=*** host=***.*.*.*'
 
 // Use in analyzer recommendations:
 $issues[] = $this->createIssue(
@@ -506,11 +506,73 @@ $issues[] = $this->createIssue(
 
 | Pattern | Replacement |
 |---|---|
-| `password=…`, `passwd=…`, `pwd=…` | `[REDACTED]` |
-| `api_key=…`, `apikey=…`, `secret=…` | `[REDACTED]` |
-| `Bearer <token>` | `Bearer [REDACTED]` |
-| `AKIA…` (AWS access key) | `[REDACTED]` |
-| `10.x.x.x`, `172.16–31.x.x`, `192.168.x.x` | `[INTERNAL_IP]` |
+| `password=…`, `passwd=…`, `pwd=…`, `pass=…` | `password=***` |
+| `api_key=…`, `auth_token=…` | `api_key=***` |
+| `secret=…`, `client_secret=…`, `private_key=…` | `secret=***` |
+| `token=…` | `token=***` |
+| `Bearer <token>` | `bearer ***` (the keyword is lowercased) |
+| `AKIA…` (AWS access key) | `AKIA***` |
+| `scheme://user:pass@host` | `scheme://***:***@host` |
+| `10.x.x.x`, `172.16–31.x.x`, `192.168.x.x` | `***.*.*.*` |
+
+This is a denylist over free-form text, so treat it as defence in depth rather than a guarantee:
+it matches on a *key* (`password=`), so a bare positional value in a message is not recognised.
+The private-IP rule is deliberately broad and will rewrite any matching dotted quad — a message
+reading `MySQL 10.5.8.1 is not supported` comes back as `MySQL ***.*.*.* is not supported`.
+
+Where the data is structured rather than free-form, prefer dropping the sensitive fields outright.
+`TraceHelper::frames()` below is the worked example.
+
+### Error Result Metadata
+
+When an analyzer throws, `AbstractAnalyzer::analyze()` catches it and returns a `Status::Error`
+result instead of letting the exception escape. Two metadata keys describe what happened:
+
+```php
+$result = $analyzer->analyze();
+
+$result->getStatus();   // Status::Error
+$result->getMessage();  // 'Analysis failed: <redacted exception message>'
+
+$result->getMetadata();
+// [
+//     'exception' => 'RuntimeException',
+//     'trace' => [
+//         ['file' => 'app/Db.php', 'line' => 42, 'function' => 'connect', 'class' => 'App\\Db'],
+//         ['file' => 'app/MyAnalyzer.php', 'line' => 18, 'function' => 'runAnalysis', 'class' => 'App\\MyAnalyzer'],
+//     ],
+// ]
+```
+
+`trace` is built by `TraceHelper::frames()`, which keeps exactly those four keys per frame:
+
+- **No `args`.** PHP's `getTraceAsString()` renders every frame's arguments, truncating strings at
+  15 characters — so a credential shorter than that appeared in full. This value is written to the
+  JSON report and uploaded to the platform, so nothing caller-supplied may ride along.
+- **No `object`.** A raw frame also carries the live receiver. `getTraceAsString()` never rendered
+  it, which makes it easy to forget, but `json_encode()` would serialise its public properties.
+- **Base-relative paths**, matching how `Issue` locations are reported. A frame outside the base
+  path keeps its original absolute spelling.
+- **At most `TraceHelper::MAX_FRAMES` (20) frames**, so the payload is bounded.
+
+The message is passed through `MessageHelper::sanitizeErrorMessage()` with a 500-character cap.
+
+`TraceHelper` is usable directly wherever you catch something you intend to report:
+
+```php
+<?php
+
+use ShieldCI\AnalyzersCore\Support\TraceHelper;
+
+try {
+    $this->connect($dsn, $user, $password);
+} catch (Throwable $e) {
+    $frames = TraceHelper::frames($e, base_path());
+
+    // Or keep fewer frames still:
+    $shallow = TraceHelper::frames($e, base_path(), 5);
+}
+```
 
 ### Parsing Inline Suppressions
 
