@@ -214,6 +214,54 @@ $resolvedAst = $parser->resolveNames($ast, ['replaceNodes' => false]);
 $fqcn = $someNameNode->getAttribute('resolvedName')?->toString(); // e.g. 'Illuminate\Database\Eloquent\Model'
 ```
 
+#### Finding out what could not be parsed
+
+`parseFile()` and `parseCode()` return an empty array when a file cannot be parsed, which
+is indistinguishable from a file that parsed cleanly and contained nothing of interest. The
+parser records each such file so a run can report them rather than passing them silently:
+
+```php
+<?php
+
+use ShieldCI\AnalyzersCore\Enums\ParseFailureCause;
+use ShieldCI\AnalyzersCore\Support\AstParser;
+
+$parser = new AstParser();
+
+$parser->resetFailures();          // once per run
+$parser->parseFile('/app/Broken.php');
+
+foreach ($parser->failures() as $failure) {
+    $failure->path;     // '/app/Broken.php', or null if parseCode() got no origin
+    $failure->line;     // 6, or null when the parser reported no usable line
+    $failure->message;  // the parser's own message, or why the bytes were unreadable
+
+    if ($failure->cause === ParseFailureCause::UnsupportedSyntax) {
+        // Valid PHP here, but the pinned parser is older than the runtime.
+    }
+}
+```
+
+The cause distinguishes who has to fix it:
+
+| Cause | Meaning | Fixed by |
+| --- | --- | --- |
+| `SyntaxError` | No PHP runtime would accept this file either | the author, repairing the code |
+| `UnsupportedSyntax` | The running PHP accepts it; the pinned parser cannot read it | upgrading the toolchain |
+| `Unreadable` | The file never reached a parser; its bytes could not be read | fixing the path or permissions |
+
+Each file is recorded once, however many times it is parsed. `resetFailures()` is
+deliberately separate from `clearCache()`: the AST cache is drained frequently to bound
+memory, so a log tied to it would only ever hold the most recent caller's failures.
+
+When parsing generated code, pass the real source path as the origin and a translator for
+the line. The translator runs only if the parse fails, since the failing line is not known
+until then:
+
+```php
+$parser->parseCode($compiled, '/resources/views/page.blade.php', fn (int $line) => $lineMap[$line] ?? $line);
+```
+
 ### Using Code Helpers
 
 ```php
