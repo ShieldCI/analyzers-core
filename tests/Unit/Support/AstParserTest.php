@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace ShieldCI\AnalyzersCore\Tests\Unit\Support;
 
 use PhpParser\Node\{Expr, Stmt};
+use PhpParser\{ParserFactory, PhpVersion};
 use PHPUnit\Framework\TestCase;
+use ShieldCI\AnalyzersCore\Enums\ParseFailureCause;
 use ShieldCI\AnalyzersCore\Support\AstParser;
 
 class AstParserTest extends TestCase
@@ -64,6 +66,7 @@ class AstParserTest extends TestCase
 
         $this->assertIsArray($ast);
         $this->assertEmpty($ast);
+        $this->assertCount(1, $this->parser->failures());
     }
 
     public function testParseCodeReturnsEmptyArrayForEmptyCode(): void
@@ -72,6 +75,7 @@ class AstParserTest extends TestCase
 
         $this->assertIsArray($ast);
         $this->assertEmpty($ast);
+        $this->assertSame([], $this->parser->failures());
     }
 
     public function testParseFileReturnsAstFromFile(): void
@@ -367,9 +371,8 @@ class AstParserTest extends TestCase
 
     public function testParseFileReturnsEmptyArrayWhenFileGetContentsFails(): void
     {
-        // Test line 36: return [] when file_get_contents returns false
-        // This is hard to simulate directly, but we can test with a directory
-        // (file_get_contents on a directory returns false)
+        // A directory never reaches file_get_contents(): is_file() rejects it
+        // first, so this exercises the not-a-file arm of the guard.
         $dir = $this->testDir . '/subdir';
         mkdir($dir);
 
@@ -377,6 +380,11 @@ class AstParserTest extends TestCase
 
         $this->assertIsArray($ast);
         $this->assertEmpty($ast);
+        $this->assertSame(
+            ParseFailureCause::Unreadable,
+            $this->parser->failures()[0]->cause
+        );
+        $this->assertSame('Path is not a file.', $this->parser->failures()[0]->message);
     }
 
     public function testFindMethodCallsHandlesNonIdentifierMethodNames(): void
@@ -643,5 +651,239 @@ PHP;
         $second = $this->parser->parseFile($file);
         // New content has 3 statements; old had 1
         $this->assertGreaterThan(count($first), count($second));
+    }
+
+    // --- Recorded parse failures ---
+
+    public function testFailuresIsEmptyForAFreshParser(): void
+    {
+        $this->assertSame([], $this->parser->failures());
+    }
+
+    public function testASuccessfulParseRecordsNothing(): void
+    {
+        $file = $this->testDir . '/good.php';
+        file_put_contents($file, '<?php class Good {}');
+
+        $this->assertNotEmpty($this->parser->parseFile($file));
+        $this->assertSame([], $this->parser->failures());
+    }
+
+    public function testEmptySourceIsNotAFailure(): void
+    {
+        $file = $this->testDir . '/empty.php';
+        file_put_contents($file, '');
+
+        $this->assertSame([], $this->parser->parseFile($file));
+        $this->assertSame([], $this->parser->failures());
+    }
+
+    public function testReportsAGenuineSyntaxErrorWithTheParsersOwnMessageAndLine(): void
+    {
+        $file = $this->testDir . '/BrokenController.php';
+        file_put_contents($file, "<?php\n\nclass BrokenController\n{\n    public function index(\n}\n");
+
+        $this->parser->parseFile($file);
+
+        $failures = $this->parser->failures();
+        $this->assertCount(1, $failures);
+        $this->assertSame($file, $failures[0]->path);
+        $this->assertSame(6, $failures[0]->line);
+        $this->assertStringContainsString('Syntax error', $failures[0]->message);
+        $this->assertSame(ParseFailureCause::SyntaxError, $failures[0]->cause);
+    }
+
+    public function testClassifiesSyntaxThePinnedParserCannotUnderstandSeparately(): void
+    {
+        // An enum is valid PHP on every runtime this package supports (8.1 is the
+        // floor) and invalid to a parser pinned to 8.0, which is exactly the shape
+        // of "the pinned parser is older than the runtime".
+        //
+        // Do NOT swap this for a newer construct such as `readonly class`: an 8.2
+        // feature is rejected by the 8.1 runtime too, so both opinions would agree
+        // and this would classify as SyntaxError on the 8.1 CI leg only.
+        $parser = new AstParser((new ParserFactory())->createForVersion(PhpVersion::fromString('8.0')));
+
+        $parser->parseCode(
+            "<?php\n\nnamespace App\\Enums;\n\nenum Suit: string\n{\n    case Hearts = 'H';\n}\n",
+            '/app/Enums/Suit.php'
+        );
+
+        $failures = $parser->failures();
+        $this->assertCount(1, $failures);
+        $this->assertSame(ParseFailureCause::UnsupportedSyntax, $failures[0]->cause);
+    }
+
+    public function testTheSameFileIsAGenuineSyntaxErrorToEveryParserVersion(): void
+    {
+        // Guards the discriminator against simply echoing the pinned parser's
+        // opinion: with the same 8.0 parser as the test above, code no PHP runtime
+        // accepts is still reported as a genuine syntax error.
+        $parser = new AstParser((new ParserFactory())->createForVersion(PhpVersion::fromString('8.0')));
+
+        $parser->parseCode("<?php\n\nclass Broken\n{\n    public function index(\n}\n", '/app/Broken.php');
+
+        $failures = $parser->failures();
+        $this->assertCount(1, $failures);
+        $this->assertSame(ParseFailureCause::SyntaxError, $failures[0]->cause);
+    }
+
+    public function testRecordsAFailureWithNoPathWhenParseCodeIsGivenNoOrigin(): void
+    {
+        $this->parser->parseCode('<?php class Broken {');
+
+        $failures = $this->parser->failures();
+        $this->assertCount(1, $failures);
+        $this->assertNull($failures[0]->path);
+        $this->assertSame(ParseFailureCause::SyntaxError, $failures[0]->cause);
+    }
+
+    public function testRecordsTheOriginItWasGiven(): void
+    {
+        $this->parser->parseCode('<?php class Broken {', '/app/Origin.php');
+
+        $this->assertSame('/app/Origin.php', $this->parser->failures()[0]->path);
+    }
+
+    public function testRecordsAMissingFileAsUnreadable(): void
+    {
+        $this->parser->parseFile($this->testDir . '/absent.php');
+
+        $failures = $this->parser->failures();
+        $this->assertCount(1, $failures);
+        $this->assertSame($this->testDir . '/absent.php', $failures[0]->path);
+        $this->assertNull($failures[0]->line);
+        $this->assertSame('File does not exist.', $failures[0]->message);
+        $this->assertSame(ParseFailureCause::Unreadable, $failures[0]->cause);
+    }
+
+    public function testRecordsAFileItIsNotAllowedToReadAsUnreadable(): void
+    {
+        $file = $this->testDir . '/locked.php';
+        file_put_contents($file, '<?php $x = 42;');
+        chmod($file, 0000);
+
+        $this->parser->parseFile($file);
+
+        $failures = $this->parser->failures();
+        $this->assertCount(1, $failures);
+        $this->assertSame('File is not readable.', $failures[0]->message);
+        $this->assertSame(ParseFailureCause::Unreadable, $failures[0]->cause);
+
+        chmod($file, 0644);
+    }
+
+    public function testRecordsTheSameFileOnlyOnceAcrossRepeatedParses(): void
+    {
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, "<?php\nclass B\n{\n    public function i(\n}\n");
+
+        $this->parser->parseFile($file);
+        $this->parser->parseFile($file);
+
+        $this->assertCount(1, $this->parser->failures());
+    }
+
+    public function testRecordsTheSameFileOnlyOnceAcrossClearCache(): void
+    {
+        // Consumers call clearCache() once per analyzer, so the same broken file is
+        // re-parsed dozens of times in a single run. Without dedup one file would
+        // produce one record per analyzer.
+        $file = $this->testDir . '/Broken2.php';
+        file_put_contents($file, "<?php\nclass B\n{\n    public function i(\n}\n");
+
+        for ($i = 0; $i < 5; $i++) {
+            $this->parser->parseFile($file);
+            $this->parser->clearCache();
+        }
+
+        $this->assertCount(1, $this->parser->failures());
+    }
+
+    public function testDistinctFilesAreRecordedSeparately(): void
+    {
+        $first = $this->testDir . '/One.php';
+        $second = $this->testDir . '/Two.php';
+        file_put_contents($first, '<?php class One {');
+        file_put_contents($second, '<?php class Two {');
+
+        $this->parser->parseFile($first);
+        $this->parser->parseFile($second);
+
+        $failures = $this->parser->failures();
+        $this->assertCount(2, $failures);
+        $this->assertSame([$first, $second], array_column($failures, 'path'));
+    }
+
+    public function testResetFailuresEmptiesTheLog(): void
+    {
+        $this->parser->parseCode('<?php class Broken {', '/app/Broken.php');
+        $this->assertCount(1, $this->parser->failures());
+
+        $this->parser->resetFailures();
+
+        $this->assertSame([], $this->parser->failures());
+    }
+
+    public function testClearCacheLeavesRecordedFailuresAlone(): void
+    {
+        // The failure log is run-scoped; the AST cache is per-analyzer. Draining one
+        // must not drain the other.
+        $this->parser->parseCode('<?php class Broken {', '/app/Broken.php');
+
+        $this->parser->clearCache();
+
+        $this->assertCount(1, $this->parser->failures());
+    }
+
+    public function testTranslatesTheReportedLineWhenATranslatorIsGiven(): void
+    {
+        // A caller parsing generated code (a compiled template) knows the real source
+        // path but cannot know which line will fail until the parse happens.
+        $this->parser->parseCode(
+            "<?php\nclass B { public function i( }\n",
+            '/resources/views/x.blade.php',
+            fn (int $line) => $line * 100
+        );
+
+        $this->assertSame(200, $this->parser->failures()[0]->line);
+    }
+
+    public function testReportsNoLineWhenTheTranslatorCannotMapIt(): void
+    {
+        // A translator is caller-supplied code; a lineMap miss returning 0 must not
+        // surface as "line 0" in a report.
+        $this->parser->parseCode(
+            "<?php\nclass B { public function i( }\n",
+            '/resources/views/x.blade.php',
+            fn (int $line) => 0
+        );
+
+        $this->assertNull($this->parser->failures()[0]->line);
+    }
+
+    public function testDoesNotCallTheLineTranslatorOnASuccessfulParse(): void
+    {
+        $called = false;
+
+        $this->parser->parseCode(
+            "<?php\n\$a = 1;\n",
+            '/resources/views/ok.blade.php',
+            function (int $line) use (&$called) {
+                $called = true;
+
+                return $line;
+            }
+        );
+
+        $this->assertFalse($called);
+        $this->assertSame([], $this->parser->failures());
+    }
+
+    public function testAcceptsAnInjectedParser(): void
+    {
+        $parser = new AstParser((new ParserFactory())->createForVersion(PhpVersion::fromString('8.0')));
+
+        $this->assertNotEmpty($parser->parseCode('<?php $x = 1;'));
     }
 }
