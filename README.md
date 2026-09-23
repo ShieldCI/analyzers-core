@@ -254,6 +254,20 @@ Each file is recorded once, however many times it is parsed. `resetFailures()` i
 deliberately separate from `clearCache()`: the AST cache is drained frequently to bound
 memory, so a log tied to it would only ever hold the most recent caller's failures.
 
+A caller that covered the file another way can withdraw its own record:
+
+```php
+$ast = $parser->parseFile($file);
+
+if ($ast === [] && $this->analysedAnotherWay($file)) {
+    $parser->forgetFailure($file); // true if there was a record to withdraw
+}
+```
+
+Spell the path as `parseFile()` was given it, or as `parseCode()` was given its origin —
+records are keyed on that string and neither side normalises. Withdrawal corrects one parse
+attempt rather than the file: a later attempt that fails records the path again.
+
 When parsing generated code, pass the real source path as the origin and a translator for
 the line. The translator runs only if the parse fails, since the failing line is not known
 until then:

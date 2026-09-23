@@ -71,6 +71,30 @@ class AstParser implements ParserInterface
     }
 
     /**
+     * Withdraw the failure recorded under a path, for a caller that covered the file
+     * another way.
+     *
+     * Spell $path as parseFile() was given it, or as parseCode() was given its origin:
+     * records are keyed on that string and neither side normalises. A parseCode() failure
+     * with no origin names no path, and only resetFailures() clears it.
+     *
+     * Corrects one parse attempt rather than the file: a later attempt that fails records
+     * the path again.
+     *
+     * @return bool Whether a failure was recorded under $path.
+     */
+    public function forgetFailure(string $path): bool
+    {
+        if (! isset($this->failures[$path])) {
+            return false;
+        }
+
+        unset($this->failures[$path]);
+
+        return true;
+    }
+
+    /**
      * @return array<Node>
      */
     public function parseFile(string $filePath): array

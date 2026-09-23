@@ -886,4 +886,103 @@ PHP;
 
         $this->assertNotEmpty($parser->parseCode('<?php $x = 1;'));
     }
+
+    // --- Withdrawing a recorded failure ---
+
+    public function testForgetFailureRemovesTheRecordForThatPath(): void
+    {
+        $this->parser->parseCode('<?php class Broken {', '/app/Broken.php');
+        $this->assertCount(1, $this->parser->failures());
+
+        $this->assertTrue($this->parser->forgetFailure('/app/Broken.php'));
+
+        $this->assertSame([], $this->parser->failures());
+    }
+
+    public function testForgetFailureReportsWhetherThereWasAnythingToForget(): void
+    {
+        $this->assertFalse($this->parser->forgetFailure('/app/NeverParsed.php'));
+
+        $this->parser->parseCode('<?php class Broken {', '/app/Broken.php');
+
+        $this->assertTrue($this->parser->forgetFailure('/app/Broken.php'));
+        $this->assertFalse($this->parser->forgetFailure('/app/Broken.php'));
+    }
+
+    public function testForgetFailureLeavesEveryOtherRecordAlone(): void
+    {
+        $this->parser->parseCode('<?php class One {', '/app/One.php');
+        $this->parser->parseCode('<?php class Two {', '/app/Two.php');
+        $this->parser->parseCode('<?php class Three {', '/app/Three.php');
+
+        $this->parser->forgetFailure('/app/Two.php');
+
+        $this->assertSame(
+            ['/app/One.php', '/app/Three.php'],
+            array_column($this->parser->failures(), 'path')
+        );
+    }
+
+    public function testForgetsAFailureParseFileRecordedForAnUnreadablePath(): void
+    {
+        $absent = $this->testDir . '/absent.php';
+
+        $this->parser->parseFile($absent);
+
+        $this->assertTrue($this->parser->forgetFailure($absent));
+        $this->assertSame([], $this->parser->failures());
+    }
+
+    public function testAForgottenUnreadablePathIsRecordedAgainOnTheNextParse(): void
+    {
+        // Nothing caches an unreadable path, so the next attempt reaches the parser.
+        $absent = $this->testDir . '/absent.php';
+
+        $this->parser->parseFile($absent);
+        $this->parser->forgetFailure($absent);
+        $this->parser->parseFile($absent);
+
+        $this->assertCount(1, $this->parser->failures());
+    }
+
+    public function testAForgottenSyntaxErrorIsRecordedAgainOnlyOnceTheCacheIsCleared(): void
+    {
+        // parseFile() caches the empty AST from a file it could not parse, so a re-parse
+        // never reaches the parser until the cache is drained — done once per analyzer.
+        $file = $this->testDir . '/Broken3.php';
+        file_put_contents($file, "<?php\nclass B\n{\n    public function i(\n}\n");
+
+        $this->parser->parseFile($file);
+        $this->parser->forgetFailure($file);
+
+        $this->parser->parseFile($file);
+        $this->assertSame([], $this->parser->failures());
+
+        $this->parser->clearCache();
+        $this->parser->parseFile($file);
+
+        $this->assertCount(1, $this->parser->failures());
+    }
+
+    public function testAFailureParsedWithNoOriginCannotBeForgottenByPath(): void
+    {
+        // With no origin the record is keyed on a hash of the code, which names no path.
+        $this->parser->parseCode('<?php class Broken {');
+
+        $this->assertNull($this->parser->failures()[0]->path);
+        $this->assertFalse($this->parser->forgetFailure(''));
+        $this->assertCount(1, $this->parser->failures());
+    }
+
+    public function testForgetFailureMatchesThePathSpellingItWasGiven(): void
+    {
+        // Normalising here alone would silently miss every key the other side wrote.
+        $file = $this->testDir . '/Broken4.php';
+        file_put_contents($file, "<?php\nclass B\n{\n    public function i(\n}\n");
+
+        $this->parser->parseFile($file);
+
+        $this->assertFalse($this->parser->forgetFailure($this->testDir . '/sub/../Broken4.php'));
+        $this->assertCount(1, $this->parser->failures());
+    }
 }
