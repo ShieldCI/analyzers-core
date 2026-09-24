@@ -87,8 +87,8 @@ class AstParser implements ParserInterface
      * second way reports false rather than matching.
      *
      * This is the precondition a caller with a fallback wants. An empty AST is not: an
-     * empty or comment-only file parses successfully to no statements and records nothing,
-     * so branching on the AST alone runs the fallback over every such file in a project.
+     * empty file parses successfully to no statements and records nothing, so branching on
+     * the AST alone runs the fallback over every empty file in a project.
      */
     public function hasFailure(string $path): bool
     {

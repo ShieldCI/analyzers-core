@@ -262,11 +262,11 @@ if ($parser->hasFailure($file) && $this->recoveredAnotherWay($file)) {
 }
 ```
 
-Ask `hasFailure()` rather than testing the AST. An empty or comment-only file parses
-successfully to no statements and records nothing, so branching on `$ast === []` runs the
-fallback over every such file in a project. Spell the path as `parseFile()` was given it, or
-as `parseCode()` was given its origin — records are keyed on that string and neither side
-normalises, so a second spelling reports `false` rather than matching.
+Ask `hasFailure()` rather than testing the AST. An empty file parses successfully to no
+statements and records nothing, so branching on `$ast === []` runs the fallback over every
+empty file in a project. Spell the path as `parseFile()` was given it, or as `parseCode()`
+was given its origin — records are keyed on that string and neither side normalises, so a
+second spelling reports `false` rather than matching.
 
 The failure itself stands. The log is keyed per file and shared by every caller, so the
 record under a path may belong to a different caller that really did skip the file; and an
