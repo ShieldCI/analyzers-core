@@ -254,19 +254,26 @@ Each file is recorded once, however many times it is parsed. `resetFailures()` i
 deliberately separate from `clearCache()`: the AST cache is drained frequently to bound
 memory, so a log tied to it would only ever hold the most recent caller's failures.
 
-A caller that covered the file another way can withdraw its own record:
+A caller that recovered usable syntax from a file it could not parse can say so:
 
 ```php
-$ast = $parser->parseFile($file);
-
-if ($ast === [] && $this->analysedAnotherWay($file)) {
-    $parser->forgetFailure($file); // true if there was a record to withdraw
+if ($parser->hasFailure($file) && $this->recoveredAnotherWay($file)) {
+    $parser->recordRecovery($file); // true if there was a failure to annotate
 }
 ```
 
-Spell the path as `parseFile()` was given it, or as `parseCode()` was given its origin —
-records are keyed on that string and neither side normalises. Withdrawal corrects one parse
-attempt rather than the file: a later attempt that fails records the path again.
+Ask `hasFailure()` rather than testing the AST. An empty or comment-only file parses
+successfully to no statements and records nothing, so branching on `$ast === []` runs the
+fallback over every such file in a project. Spell the path as `parseFile()` was given it, or
+as `parseCode()` was given its origin — records are keyed on that string and neither side
+normalises, so a second spelling reports `false` rather than matching.
+
+The failure itself stands. The log is keyed per file and shared by every caller, so the
+record under a path may belong to a different caller that really did skip the file; and an
+error-recovering parser returns the statements it could rebuild and drops the broken region,
+so the file is not fully analysed even for the caller that recovered it. Removing the record
+would trade a false skip for a false pass. `recoveries()` returns the annotated paths, always
+a subset of `failures()`, so a reporter can say "would not parse, partially recovered".
 
 When parsing generated code, pass the real source path as the origin and a translator for
 the line. The translator runs only if the parse fails, since the failing line is not known

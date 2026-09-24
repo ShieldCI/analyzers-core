@@ -32,6 +32,14 @@ class AstParser implements ParserInterface
     private array $failures = [];
 
     /**
+     * Paths a caller recovered usable syntax from after the parse failed, keyed the same
+     * way as $failures so the two line up. Run-scoped with the failure log.
+     *
+     * @var array<string, true>
+     */
+    private array $recoveries = [];
+
+    /**
      * @param  Parser|null  $parser  Defaults to the newest version the installed parser
      *                                supports. Injectable so a caller can pin a version,
      *                                which is the only way to exercise UnsupportedSyntax.
@@ -68,30 +76,60 @@ class AstParser implements ParserInterface
     public function resetFailures(): void
     {
         $this->failures = [];
+        $this->recoveries = [];
     }
 
     /**
-     * Withdraw the failure recorded under a path, for a caller that covered the file
-     * another way.
+     * Whether a failure is recorded under $path.
      *
      * Spell $path as parseFile() was given it, or as parseCode() was given its origin:
-     * records are keyed on that string and neither side normalises. A parseCode() failure
-     * with no origin names no path, and only resetFailures() clears it.
+     * records are keyed on that string and neither side normalises, so a path spelled a
+     * second way reports false rather than matching.
      *
-     * Corrects one parse attempt rather than the file: a later attempt that fails records
-     * the path again.
-     *
-     * @return bool Whether a failure was recorded under $path.
+     * This is the precondition a caller with a fallback wants. An empty AST is not: an
+     * empty or comment-only file parses successfully to no statements and records nothing,
+     * so branching on the AST alone runs the fallback over every such file in a project.
      */
-    public function forgetFailure(string $path): bool
+    public function hasFailure(string $path): bool
+    {
+        return isset($this->failures[$path]);
+    }
+
+    /**
+     * Note that a caller recovered usable syntax from a file that would not parse.
+     *
+     * Deliberately additive: the failure stands. Removing it would destroy a true fact —
+     * the file did not parse — and the log cannot support the claim that would replace it.
+     * It is keyed per file and shared by every caller, while record() keeps the first
+     * sighting, so the entry under $path may belong to a different caller that really did
+     * skip the file. Recovery is partial in any case: an error-recovering parser returns
+     * the statements it could rebuild and drops the broken region, so the file is not
+     * fully analysed even for the caller that recovered it.
+     *
+     * Holding both lets a reporter say "would not parse, partially recovered" instead of
+     * choosing between a false skip and a false pass.
+     *
+     * @return bool Whether there was a failure under $path to annotate.
+     */
+    public function recordRecovery(string $path): bool
     {
         if (! isset($this->failures[$path])) {
             return false;
         }
 
-        unset($this->failures[$path]);
+        $this->recoveries[$path] = true;
 
         return true;
+    }
+
+    /**
+     * Paths some caller recovered usable syntax from. Always a subset of failures().
+     *
+     * @return list<string>
+     */
+    public function recoveries(): array
+    {
+        return array_keys($this->recoveries);
     }
 
     /**
