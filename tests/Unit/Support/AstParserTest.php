@@ -653,6 +653,54 @@ PHP;
         $this->assertGreaterThan(count($first), count($second));
     }
 
+    // --- Parser version contract ---
+
+    /**
+     * The installed nikic/php-parser must understand the PHP this suite runs on.
+     *
+     * Nothing else here can see this. AstParser defaults to the parser's newest
+     * supported version, and classify() asks the running PHP for a second opinion,
+     * so a parser older than the runtime never fails loudly — every file using
+     * current syntax quietly becomes a ParseFailure with cause UnsupportedSyntax
+     * instead of an AST, and every analyzer built on this package stops seeing
+     * those files without saying so. The UnsupportedSyntax tests below pin their
+     * own parser version deliberately, and nothing here hands the default parser
+     * syntax newer than PHP 8.1, so a floor set too low goes unnoticed without
+     * this check.
+     *
+     * This is the regression guard for #72, where composer.json declared a parser
+     * range the package could not run on, and no CI leg ever installed the floor
+     * to find out. Raising the floor is the fix when this fails; do not delete it,
+     * and do not pin a version here — comparing the installed parser against the
+     * live runtime is the whole point.
+     */
+    public function testTheInstalledParserUnderstandsTheRunningPhpVersion(): void
+    {
+        $newest = PhpVersion::getNewestSupported();
+        $host = PhpVersion::getHostVersion();
+
+        $this->assertTrue(
+            $newest->newerOrEqual($host),
+            sprintf(
+                'nikic/php-parser understands PHP %s at newest, but this suite is running on PHP %s. '
+                . 'Files using syntax the parser does not know are recorded as a ParseFailure with '
+                . 'cause UnsupportedSyntax rather than parsed. Raise the nikic/php-parser floor in '
+                . 'composer.json.',
+                self::readableVersion($newest),
+                self::readableVersion($host)
+            )
+        );
+    }
+
+    /**
+     * Render a PhpVersion as "8.4". Its only public accessor is the PHP_VERSION_ID
+     * integer, and "80400" in a failure message makes the reader do the arithmetic.
+     */
+    private static function readableVersion(PhpVersion $version): string
+    {
+        return sprintf('%d.%d', intdiv($version->id, 10000), intdiv($version->id % 10000, 100));
+    }
+
     // --- Recorded parse failures ---
 
     public function testFailuresIsEmptyForAFreshParser(): void

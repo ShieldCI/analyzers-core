@@ -35,7 +35,7 @@ jobs:
           coverage: xdebug
 
       - name: Install Composer dependencies
-        run: composer install --prefer-dist --no-interaction --no-progress
+        run: composer update --prefer-dist --no-interaction --no-progress
 
       - name: Run PHPStan
         run: vendor/bin/phpstan --error-format=github
@@ -51,3 +51,60 @@ jobs:
           flags: unittests
           name: codecov-umbrella
           fail_ci_if_error: true
+
+  # The declared nikic/php-parser floor, actually installed.
+  #
+  # Nothing else here installs it. composer.lock is gitignored, so every other leg
+  # resolves the graph at its newest versions — which is how composer.json could
+  # claim ^4.15|^5.0 from the first commit while the source already used 5.0-only
+  # symbols. The floor was never installed once, on any leg. If this job goes red
+  # the constraint is wrong: fix composer.json, do not relax the job. See #72.
+  lowest-parser:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two corners: the oldest PHP we claim and the newest. The newest row
+        # is the one that earns its keep — AstParser defaults to the parser's
+        # newest supported version, so a floor below the runtime does not throw,
+        # it turns every file using current syntax into an UnsupportedSyntax
+        # ParseFailure. Only this row can catch a floor too low for the matrix.
+        php: ['8.1', '8.5']
+
+    name: php-parser floor / PHP ${{ matrix.php }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, xml, ctype, json, dom, curl, libxml, zip, pcntl
+          coverage: none
+
+      # Two commands, and both are needed. A partial `composer update <package>`
+      # requires a lock file to know what to hold still, and the first command is
+      # what writes one. It also pins the dev toolchain to the same versions the
+      # `test` job uses, so this leg cannot go red over an unrelated floor.
+      - name: Install with nikic/php-parser at its declared floor
+        run: |
+          composer update --prefer-dist --no-interaction --no-progress
+          composer update nikic/php-parser --prefer-lowest --prefer-stable --no-interaction --no-progress
+
+      - name: Report the resolved php-parser version
+        run: composer show nikic/php-parser | head -n 3
+
+      # PHPStan catches signature drift here — a method or property the floor does
+      # not have. It does NOT catch a missing *class*: phpstan.phar carries its own
+      # php-parser, and classes absent from the installed copy still resolve from
+      # that bundle, so Node\ArrayItem and Node\Scalar\InterpolatedString come back
+      # clean even when vendor/ cannot supply them. Measured, not assumed — the
+      # suite below is what catches those.
+      - name: Run PHPStan
+        run: vendor/bin/phpstan --error-format=github
+
+      - name: Run tests
+        run: vendor/bin/phpunit --no-coverage
