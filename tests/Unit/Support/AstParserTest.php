@@ -655,6 +655,30 @@ PHP;
 
     // --- Parser version contract ---
 
+    public function testCompatibilityReportsTheDefaultParserAgainstTheRunningRuntime(): void
+    {
+        $compatibility = AstParser::compatibility();
+
+        $this->assertSame(PhpVersion::getNewestSupported()->id, $compatibility->parserVersionId);
+        $this->assertSame(PhpVersion::getHostVersion()->id, $compatibility->runtimeVersionId);
+    }
+
+    /**
+     * compatibility() describes the parser the package would build for itself, not the
+     * one any particular instance holds. Injecting an older parser is how a caller
+     * deliberately exercises UnsupportedSyntax, so it must not register as a broken
+     * toolchain -- otherwise every UnsupportedSyntax test here would start reporting one.
+     */
+    public function testCompatibilityIgnoresAParserSomebodyInjected(): void
+    {
+        new AstParser((new ParserFactory())->createForVersion(PhpVersion::fromString('8.0')));
+
+        $this->assertSame(
+            PhpVersion::getNewestSupported()->id,
+            AstParser::compatibility()->parserVersionId
+        );
+    }
+
     /**
      * The installed nikic/php-parser must understand the PHP this suite runs on.
      *
@@ -678,14 +702,22 @@ PHP;
      * declared floor is too low for a PHP row the matrix runs: raise it. Anywhere
      * the parser resolved at newest — the test leg, a laptop — it means no released
      * php-parser understands this runtime yet, and no floor helps until one ships.
+     *
+     * Its comparison now lives in ParserCompatibility::isSupported() rather than inline
+     * here, which is the point of #74 -- one definition, asserted on by the package that
+     * ships it. That does mean this test can no longer catch a bug in the comparison
+     * itself, so two others hold the pieces it gave up: ParserCompatibilityTest pins
+     * isSupported() against literal version ids, including the older-parser case no CI leg
+     * here can produce, and testCompatibilityReportsTheDefaultParserAgainstTheRunningRuntime
+     * pins which version lands in which constructor slot. Swap those two arguments and this
+     * guard still passes while asserting nothing. Do not delete either as trivial.
      */
     public function testTheInstalledParserUnderstandsTheRunningPhpVersion(): void
     {
-        $newest = PhpVersion::getNewestSupported();
-        $host = PhpVersion::getHostVersion();
+        $compatibility = AstParser::compatibility();
 
         $this->assertTrue(
-            $newest->newerOrEqual($host),
+            $compatibility->isSupported(),
             sprintf(
                 'nikic/php-parser understands PHP %s at newest, but this suite is running on PHP %s. '
                 . 'Files using syntax the parser does not know are recorded as a ParseFailure with '
@@ -693,19 +725,10 @@ PHP;
                 . 'supports that runtime, raise the floor in composer.json to it; if none does '
                 . 'yet, the parser has not caught up with this PHP and no floor helps until one '
                 . 'ships.',
-                self::readableVersion($newest),
-                self::readableVersion($host)
+                $compatibility->parserVersion(),
+                $compatibility->runtimeVersion()
             )
         );
-    }
-
-    /**
-     * Render a PhpVersion as "8.4". Its only public accessor is the PHP_VERSION_ID
-     * integer, and "80400" in a failure message makes the reader do the arithmetic.
-     */
-    private static function readableVersion(PhpVersion $version): string
-    {
-        return sprintf('%d.%d', intdiv($version->id, 10000), intdiv($version->id % 10000, 100));
     }
 
     // --- Recorded parse failures ---

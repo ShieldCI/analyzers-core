@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Support;
 
-use PhpParser\{Error, Node, NodeFinder, NodeTraverser, Parser, ParserFactory};
+use PhpParser\{Error, Node, NodeFinder, NodeTraverser, Parser, ParserFactory, PhpVersion};
 use PhpParser\Node\{Expr, Stmt};
 use PhpParser\NodeVisitor\NameResolver;
 use ShieldCI\AnalyzersCore\Contracts\ParserInterface;
 use ShieldCI\AnalyzersCore\Enums\ParseFailureCause;
-use ShieldCI\AnalyzersCore\ValueObjects\ParseFailure;
+use ShieldCI\AnalyzersCore\ValueObjects\{ParseFailure, ParserCompatibility};
 
 /**
  * AST parser using nikic/php-parser.
@@ -53,6 +53,31 @@ class AstParser implements ParserInterface
     public function clearCache(): void
     {
         $this->astCache = [];
+    }
+
+    /**
+     * Whether the parser this class builds by default can read the PHP it is running on.
+     *
+     * Static and derived, because it describes the installed library rather than any
+     * instance: __construct() pins createForNewestSupportedVersion(), so the answer is the
+     * same for every AstParser that did not have one injected, and the three throwaway
+     * parsers built elsewhere in this package would surface an instance flag to nobody.
+     *
+     * It therefore says nothing about a parser a caller injected. That is deliberate --
+     * injection exists so a caller can pin a version, which is the only way to exercise
+     * UnsupportedSyntax -- so a pinned parser older than the runtime is a choice, not a
+     * misconfiguration, and reporting it would make every such test emit a false alarm.
+     *
+     * No message and no warning: what to say about this belongs to the consuming package,
+     * for the same reason ParseFailureCause carries no label(). E_USER_WARNING in
+     * particular would collide with failOnWarning in consumers' own suites.
+     */
+    public static function compatibility(): ParserCompatibility
+    {
+        return new ParserCompatibility(
+            PhpVersion::getNewestSupported()->id,
+            PhpVersion::getHostVersion()->id,
+        );
     }
 
     /**
