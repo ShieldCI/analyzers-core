@@ -19,6 +19,9 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
+        # Adding a row here? The `lowest-parser` job below tracks the newest entry
+        # of this list, and its own matrix is a separate list. The drift check in
+        # that job fails the build if you change one and not the other.
         php: ['8.1', '8.2', '8.3', '8.4', '8.5']
 
     name: PHP ${{ matrix.php }}
@@ -70,6 +73,9 @@ jobs:
         # newest supported version, so a floor below the runtime does not throw,
         # it turns every file using current syntax into an UnsupportedSyntax
         # ParseFailure. Only this row can catch a floor too low for the matrix.
+        #
+        # This list duplicates the corners of the `test` matrix, so the drift
+        # check below asserts the two agree instead of trusting this comment.
         php: ['8.1', '8.5']
 
     name: php-parser floor / PHP ${{ matrix.php }}
@@ -85,17 +91,68 @@ jobs:
           extensions: mbstring, xml, ctype, json, dom, curl, libxml, zip, pcntl
           coverage: none
 
+      # Adding a PHP row to the `test` matrix and forgetting this job's matrix is
+      # how #72 comes back green: the `test` leg resolves php-parser at newest and
+      # cannot see a floor too low for the new runtime, and this leg would still be
+      # running the old one. Runs before the install so it fails in seconds.
+      - name: Check this job covers the newest PHP in the test matrix
+        run: |
+          php -r '
+            $yaml = file_get_contents(".github/workflows/tests.yml");
+            preg_match_all("/^\s+php: \[(.+)\]\s*$/m", $yaml, $m);
+            if (count($m[1]) !== 2) {
+                fwrite(STDERR, sprintf("::error::tests.yml: expected exactly two php matrix lists, found %d. Update this check alongside the matrices.\n", count($m[1])));
+                exit(1);
+            }
+            $split = fn (string $row): array => array_map(
+                fn (string $v): string => trim($v, " \x27\""),
+                explode(",", $row)
+            );
+            [$tested, $floor] = array_map($split, $m[1]);
+            usort($tested, "version_compare");
+            $newest = end($tested);
+            if (! in_array($newest, $floor, true)) {
+                fwrite(STDERR, sprintf("::error::The test matrix runs PHP %s but this job runs [%s]. A php-parser floor too low for %s turns every file into an UnsupportedSyntax ParseFailure without failing the test job, so only this job can catch it. Add %s to this matrix.\n", $newest, implode(", ", $floor), $newest, $newest));
+                exit(1);
+            }
+            printf("Floor matrix covers the newest tested PHP (%s).\n", $newest);
+          '
+
       # Two commands, and both are needed. A partial `composer update <package>`
-      # requires a lock file to know what to hold still, and the first command is
-      # what writes one. It also pins the dev toolchain to the same versions the
-      # `test` job uses, so this leg cannot go red over an unrelated floor.
+      # needs a lock file to know what to hold still, and the first command is what
+      # writes one — with --no-install, because the vendor tree it would otherwise
+      # build is partly discarded by the second command anyway.
+      #
+      # This does NOT pin the dev toolchain to the versions the `test` job used:
+      # composer.lock is gitignored, so each job resolves independently at whatever
+      # is newest when it starts. Expect some toolchain skew between the two.
       - name: Install with nikic/php-parser at its declared floor
         run: |
-          composer update --prefer-dist --no-interaction --no-progress
-          composer update nikic/php-parser --prefer-lowest --prefer-stable --no-interaction --no-progress
+          composer update --no-install --no-interaction --no-progress
+          composer update nikic/php-parser --prefer-lowest --prefer-stable --prefer-dist --no-interaction --no-progress
 
-      - name: Report the resolved php-parser version
-        run: composer show nikic/php-parser | head -n 3
+      # The floor is only tested if resolution actually landed on it. Anything else
+      # in the graph can hold php-parser above the declared floor — phpunit/php-code-
+      # coverage already requires ^5.1.0 — and the day one does, --prefer-lowest
+      # installs that higher version, this leg goes green, and the declared floor is
+      # installed by nothing. That is exactly #72, one constraint later.
+      - name: Check php-parser resolved to the declared floor
+        run: |
+          php -r '
+            $constraint = json_decode(file_get_contents("composer.json"), true)["require"]["nikic/php-parser"];
+            if (preg_match("/^\^(\d+\.\d+)(?:\.\d+)?$/", $constraint, $m) !== 1) {
+                fwrite(STDERR, sprintf("::error::Cannot derive a floor from the constraint %s. Update this check alongside the constraint.\n", $constraint));
+                exit(1);
+            }
+            $floor = $m[1];
+            $resolved = ltrim(json_decode(shell_exec("composer show nikic/php-parser --format=json"), true)["versions"][0], "v");
+            printf("Declared floor: ^%s   Installed: %s\n", $floor, $resolved);
+            if (! str_starts_with($resolved, $floor . ".")) {
+                fwrite(STDERR, sprintf("::error::--prefer-lowest installed nikic/php-parser %s, not the declared floor %s.x. Something else in the graph holds php-parser above the declared floor, so ^%s is installed by no CI leg — the gap that produced #72. Raise the constraint to what actually resolves, or pin the dependency holding it up.\n", $resolved, $floor, $floor));
+                exit(1);
+            }
+            printf("Resolution landed on the declared floor.\n");
+          '
 
       # PHPStan catches signature drift here — a method or property the floor does
       # not have. It does NOT catch a missing *class*: phpstan.phar carries its own
