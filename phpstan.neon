@@ -44,16 +44,6 @@ parameters:
             message: "#Strict comparison using !== between non-empty-string and '' will always evaluate to true#"
             path: src/Abstracts/AbstractAnalyzer.php
 
-        # php-parser CROSS-VERSION GUARD — DO NOT "FIX" BY DELETING THE CHECK.
-        # We support nikic/php-parser ^4.15|^5.0. In v5, Array_::$items is
-        # ArrayItem[]; in v4 it is (ArrayItem|null)[] — items are null for skipped
-        # elements (e.g. `[, $b] = $arr`). PHPStan analyses against the installed
-        # v5 and calls the instanceof redundant, but on v4 it prevents a null
-        # dereference. The guard is load-bearing for every user still on v4.
-        -
-            message: '#Instanceof between PhpParser\\Node\\ArrayItem and PhpParser\\Node\\ArrayItem will always evaluate to true#'
-            path: src/Support/ConfigFileHelper.php
-
         # Test-only: PHPUnit assertions on already-narrowed types are intentional
         # defensive checks — they verify the type system is telling the truth at
         # runtime. Same rule as laravel/phpstan.neon.

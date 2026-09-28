@@ -20,6 +20,8 @@ Shared foundation for building static analysis tools. Includes abstract analyzer
 ## Requirements
 
 - PHP 8.1 or higher
+- nikic/php-parser 5.6.x or any later 5.x (`^5.6`) — 5.6 is the first release able to parse
+  PHP 8.5, the newest version this package is tested against
 - Composer
 
 ## Installation
