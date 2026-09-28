@@ -670,9 +670,14 @@ PHP;
      *
      * This is the regression guard for #72, where composer.json declared a parser
      * range the package could not run on, and no CI leg ever installed the floor
-     * to find out. Raising the floor is the fix when this fails; do not delete it,
-     * and do not pin a version here — comparing the installed parser against the
-     * live runtime is the whole point.
+     * to find out. Do not delete it, and do not pin a version here — comparing the
+     * installed parser against the live runtime is the whole point.
+     *
+     * Two situations fail this, and they have different fixes. On the php-parser
+     * floor CI leg the parser is pinned low deliberately, so a failure means the
+     * declared floor is too low for a PHP row the matrix runs: raise it. Anywhere
+     * the parser resolved at newest — the test leg, a laptop — it means no released
+     * php-parser understands this runtime yet, and no floor helps until one ships.
      */
     public function testTheInstalledParserUnderstandsTheRunningPhpVersion(): void
     {
@@ -684,8 +689,10 @@ PHP;
             sprintf(
                 'nikic/php-parser understands PHP %s at newest, but this suite is running on PHP %s. '
                 . 'Files using syntax the parser does not know are recorded as a ParseFailure with '
-                . 'cause UnsupportedSyntax rather than parsed. Raise the nikic/php-parser floor in '
-                . 'composer.json.',
+                . 'cause UnsupportedSyntax rather than parsed. If a released nikic/php-parser '
+                . 'supports that runtime, raise the floor in composer.json to it; if none does '
+                . 'yet, the parser has not caught up with this PHP and no floor helps until one '
+                . 'ships.',
                 self::readableVersion($newest),
                 self::readableVersion($host)
             )
