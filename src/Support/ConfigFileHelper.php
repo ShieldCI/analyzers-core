@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace ShieldCI\AnalyzersCore\Support;
 
 use PhpParser\Node;
-use PhpParser\Node\ArrayItem;
 use PhpParser\Node\Expr\Array_;
 use PhpParser\Node\Expr\ConstFetch;
 use PhpParser\Node\Expr\FuncCall;
@@ -358,7 +357,7 @@ class ConfigFileHelper
         }
 
         foreach ($parentArray->items as $item) {
-            if (! $item instanceof ArrayItem || ! $item->key instanceof Node\Scalar\String_) {
+            if (! $item->key instanceof Node\Scalar\String_) {
                 continue;
             }
 
@@ -376,7 +375,7 @@ class ConfigFileHelper
     private static function findArrayItemValue(Array_ $array, string $key): ?Node
     {
         foreach ($array->items as $item) {
-            if (! $item instanceof ArrayItem || ! $item->key instanceof Node\Scalar\String_) {
+            if (! $item->key instanceof Node\Scalar\String_) {
                 continue;
             }
 
@@ -417,10 +416,6 @@ class ConfigFileHelper
         $result = [];
 
         foreach ($returnNode->expr->items as $item) {
-            if (! $item instanceof ArrayItem) {
-                continue; // @codeCoverageIgnore
-            }
-
             if (! $item->key instanceof Node\Scalar\String_) {
                 continue;
             }
