@@ -124,12 +124,22 @@ class PackageDetector
      * This method checks both app/Providers/Filament/ and app/Providers/ directories,
      * detects panel provider classes, and verifies at least one is registered.
      *
+     * False is returned both for an application without Filament and for one whose panel
+     * provider would not parse. Pass $parser to tell the two apart: any failure is recorded
+     * on the parser you supply. That visibility is partial by design -- a file is only
+     * parsed once it contains both 'extends' and 'PanelProvider', so a broken provider
+     * missing either string is rejected before a parser ever sees it.
+     *
      * @param  string  $basePath  Application base path
+     * @param  AstParser|null  $parser  The parser to record any failure on. Defaults to a
+     *                                   throwaway one, whose log nobody can read -- which is
+     *                                   the whole reason this parameter exists. Optional so
+     *                                   existing callers keep working untouched.
      * @return bool True if Filament is installed, configured, and registered
      *
      * @see https://filamentphp.com/docs/4.x/panels/installation
      */
-    public static function isFilamentConfigured(string $basePath): bool
+    public static function isFilamentConfigured(string $basePath, ?AstParser $parser = null): bool
     {
         // Must be installed first
         if (! self::hasFilament($basePath)) {
@@ -164,7 +174,7 @@ class PackageDetector
 
             // Check if any file contains a class extending Filament\Panel\PanelProvider
             foreach ($files as $file) {
-                $panelProviderClass = self::getPanelProviderClassName($file, $searchPath, $providersBaseDir);
+                $panelProviderClass = self::getPanelProviderClassName($file, $searchPath, $providersBaseDir, $parser);
                 if ($panelProviderClass !== null) {
                     $foundPanelProviders[] = $panelProviderClass;
                 }
@@ -185,10 +195,17 @@ class PackageDetector
      * @param  string  $filePath  Path to PHP file
      * @param  string  $searchPath  Directory being searched
      * @param  string  $providersBaseDir  Base providers directory
+     * @param  AstParser|null  $parser  Parser to record a failure on; null builds a throwaway.
+     *                                   Required rather than defaulted because the only caller
+     *                                   always has the nullable to hand.
      * @return string|null Fully qualified class name if file contains PanelProvider, null otherwise
      */
-    private static function getPanelProviderClassName(string $filePath, string $searchPath, string $providersBaseDir): ?string
-    {
+    private static function getPanelProviderClassName(
+        string $filePath,
+        string $searchPath,
+        string $providersBaseDir,
+        ?AstParser $parser,
+    ): ?string {
         $content = file_get_contents($filePath);
 
         if ($content === false) {
@@ -202,7 +219,7 @@ class PackageDetector
 
         // Parse with AST for accurate detection
         try {
-            $parser = new AstParser();
+            $parser ??= new AstParser();
             $ast = $parser->parseFile($filePath);
             $classes = $parser->findClasses($ast);
 

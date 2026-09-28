@@ -328,14 +328,26 @@ class ConfigFileHelper
      * Example: findNestedArrayKeyLine('config/logging.php', 'channels', 'single') returns the
      * line of `'single' => [` within `'channels' => [...]`, or null if no such channel is authored.
      *
+     * Null is returned both for a key that is genuinely absent and for a file that would
+     * not parse. Pass $parser to tell the two apart afterwards: the failure is recorded on
+     * the parser you supply, so $parser->hasFailure($filePath) answers which happened.
+     *
      * @param  string  $filePath  Full path to the config file
      * @param  string  $parentKey  Top-level array key to search within (e.g. 'channels')
      * @param  string  $childKey  Direct child key to locate (e.g. a channel name)
+     * @param  AstParser|null  $parser  The parser to record any failure on. Defaults to a
+     *                                   throwaway one, whose log nobody can read -- which is
+     *                                   the whole reason this parameter exists. Optional so
+     *                                   existing callers keep working untouched.
      * @return int|null  1-indexed line number, or null when absent / unparseable
      */
-    public static function findNestedArrayKeyLine(string $filePath, string $parentKey, string $childKey): ?int
-    {
-        $ast = (new AstParser())->parseFile($filePath);
+    public static function findNestedArrayKeyLine(
+        string $filePath,
+        string $parentKey,
+        string $childKey,
+        ?AstParser $parser = null,
+    ): ?int {
+        $ast = ($parser ?? new AstParser())->parseFile($filePath);
 
         if ($ast === []) {
             return null;
@@ -394,11 +406,19 @@ class ConfigFileHelper
      * When a value is an env() call, isEnvCall is set to true and the default argument (if any)
      * is captured in envDefault.
      *
+     * An empty array is returned both for a config that defines no string keys and for a
+     * file that would not parse. Pass $parser to tell the two apart: the failure is recorded
+     * on the parser you supply, so $parser->hasFailure($filePath) answers which happened.
+     *
+     * @param  AstParser|null  $parser  The parser to record any failure on. Defaults to a
+     *                                   throwaway one, whose log nobody can read -- which is
+     *                                   the whole reason this parameter exists. Optional so
+     *                                   existing callers keep working untouched.
      * @return array<string, array{value: mixed, line: int, isEnvCall: bool, envDefault: mixed, envHasDefault: bool}>
      */
-    public static function parseConfigArray(string $filePath): array
+    public static function parseConfigArray(string $filePath, ?AstParser $parser = null): array
     {
-        $ast = (new AstParser())->parseFile($filePath);
+        $ast = ($parser ?? new AstParser())->parseFile($filePath);
 
         if ($ast === []) {
             return [];

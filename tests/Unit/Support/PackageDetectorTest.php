@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace ShieldCI\AnalyzersCore\Tests\Unit\Support;
 
 use PHPUnit\Framework\TestCase;
+use ShieldCI\AnalyzersCore\Enums\ParseFailureCause;
+use ShieldCI\AnalyzersCore\Support\AstParser;
 use ShieldCI\AnalyzersCore\Support\PackageDetector;
 
 class PackageDetectorTest extends TestCase
@@ -1113,5 +1115,75 @@ PHP;
         $result = PackageDetector::hasNova($this->testDir);
 
         $this->assertFalse($result);
+    }
+
+    // --- Reaching the parse failures panel provider discovery would otherwise discard ---
+
+    /**
+     * A panel provider that will not parse makes isFilamentConfigured() answer false, which
+     * is the same answer it gives for an application that never configured Filament. The
+     * injected parser is what separates the two.
+     *
+     * The fixture has to contain both 'extends' and 'PanelProvider' as literal strings: a
+     * cheap str_contains() gate rejects the file before any parsing otherwise, and a broken
+     * file that fails that gate is never seen by the parser at all. Failure visibility here
+     * is therefore partial by design -- do not read failures() as exhaustive for this method.
+     */
+    public function test_is_filament_configured_records_a_broken_provider_on_an_injected_parser(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        $providerFile = $filamentDir.'/AdminPanelProvider.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Filament\Panel\PanelProvider;
+
+class AdminPanelProvider extends PanelProvider
+{
+    public function panel(
+}
+PHP);
+
+        $parser = new AstParser();
+
+        $this->assertFalse(PackageDetector::isFilamentConfigured($this->testDir, $parser));
+
+        $this->assertTrue($parser->hasFailure($providerFile));
+        $this->assertSame(ParseFailureCause::SyntaxError, $parser->failures()[0]->cause);
+    }
+
+    /**
+     * A provider that parses leaves the injected parser's log empty, so the parameter does
+     * not turn every healthy application into a reported failure.
+     */
+    public function test_an_injected_parser_records_nothing_for_a_provider_that_parses(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        file_put_contents($filamentDir.'/AdminPanelProvider.php', <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Filament\Panel\PanelProvider;
+
+class AdminPanelProvider extends PanelProvider
+{
+}
+PHP);
+
+        $parser = new AstParser();
+        PackageDetector::isFilamentConfigured($this->testDir, $parser);
+
+        $this->assertSame([], $parser->failures());
     }
 }

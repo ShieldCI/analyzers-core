@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace ShieldCI\AnalyzersCore\Tests\Unit\Support;
 
 use PHPUnit\Framework\TestCase;
+use ShieldCI\AnalyzersCore\Enums\ParseFailureCause;
+use ShieldCI\AnalyzersCore\Support\AstParser;
 use ShieldCI\AnalyzersCore\Support\ConfigFileHelper;
 
 class ConfigFileHelperTest extends TestCase
@@ -977,5 +979,78 @@ PHP);
         $this->assertIsArray($lines);
 
         return $lines[$line - 1];
+    }
+
+    // --- Reaching the parse failures these methods would otherwise discard ---
+
+    /**
+     * Without an injected parser both methods build a throwaway one, so the ParseFailure
+     * they record dies with it and an unparseable config is indistinguishable from a config
+     * that simply does not define the key. These tests pin the parameter that lets a caller
+     * keep the evidence. They do not move the coverage number -- `$parser ?? new AstParser()`
+     * is a single line, and phpunit.xml enables line coverage, not path coverage -- so do
+     * not delete them as redundant with the null-parser tests above.
+     */
+    public function test_parse_config_array_records_the_failure_on_an_injected_parser(): void
+    {
+        $configFile = $this->tempDir.'/config/broken.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'driver' => 'single',\n");
+
+        $parser = new AstParser();
+
+        $this->assertSame([], ConfigFileHelper::parseConfigArray($configFile, $parser));
+
+        $failures = $parser->failures();
+        $this->assertCount(1, $failures);
+        $this->assertSame($configFile, $failures[0]->path);
+        $this->assertSame(ParseFailureCause::SyntaxError, $failures[0]->cause);
+        $this->assertTrue($parser->hasFailure($configFile));
+    }
+
+    public function test_find_nested_array_key_line_records_the_failure_on_an_injected_parser(): void
+    {
+        $configFile = $this->tempDir.'/config/broken_logging.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'channels' => [\n        'single' => [\n");
+
+        $parser = new AstParser();
+
+        $this->assertNull(
+            ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single', $parser)
+        );
+
+        $this->assertTrue($parser->hasFailure($configFile));
+        $this->assertSame(ParseFailureCause::SyntaxError, $parser->failures()[0]->cause);
+    }
+
+    /**
+     * A path that was never readable never reaches a parser, but it is still a file the
+     * caller was pointed at and got nothing back for, so it is still recorded.
+     */
+    public function test_parse_config_array_records_an_unreadable_path_on_an_injected_parser(): void
+    {
+        $missing = $this->tempDir.'/config/absent.php';
+        $parser = new AstParser();
+
+        $this->assertSame([], ConfigFileHelper::parseConfigArray($missing, $parser));
+
+        $failures = $parser->failures();
+        $this->assertCount(1, $failures);
+        $this->assertSame(ParseFailureCause::Unreadable, $failures[0]->cause);
+    }
+
+    /**
+     * A config that parses cleanly leaves the injected parser's log empty. Guards against
+     * the parameter turning every call into a reported failure.
+     */
+    public function test_an_injected_parser_records_nothing_for_a_config_that_parses(): void
+    {
+        $configFile = $this->tempDir.'/config/fine.php';
+        file_put_contents($configFile, "<?php\n\nreturn [\n    'driver' => 'single',\n];\n");
+
+        $parser = new AstParser();
+        $config = ConfigFileHelper::parseConfigArray($configFile, $parser);
+
+        $this->assertArrayHasKey('driver', $config);
+        $this->assertSame([], $parser->failures());
     }
 }
