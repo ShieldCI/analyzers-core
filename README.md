@@ -49,6 +49,8 @@ composer require shieldci/analyzers-core
    - `Issue` - Represents a specific issue found
    - `CodeSnippet` - Represents a code snippet with context lines
    - `AnalyzerMetadata` - Metadata about an analyzer
+   - `ParseFailure` - A file that was handed to the parser but never produced an AST
+   - `ParserCompatibility` - Whether the default parser understands the running PHP
 
 4. **Results**
    - `AnalysisResult` - Result of running a single analyzer
@@ -62,6 +64,9 @@ composer require shieldci/analyzers-core
    - `PathHelper` - Joining and relativising against a base path, with cross-platform separator normalization
    - `MessageHelper` - Error message sanitization (redacts credentials, tokens, IPs)
    - `InlineSuppressionParser` - Parses `@shieldci-ignore` inline suppression comments
+   - `PackageDetector` - Detects installed Laravel packages from composer.lock
+   - `PlatformDetector` - Detects the hosting platform a run is executing on
+   - `TraceHelper` - Formats exception traces with credentials redacted
 
 6. **Formatters**
    - `JsonFormatter` - Format results as JSON
@@ -284,6 +289,64 @@ until then:
 ```php
 $parser->parseCode($compiled, '/resources/views/page.blade.php', fn (int $line) => $lineMap[$line] ?? $line);
 ```
+
+#### Reaching failures from the config and package helpers
+
+`ConfigFileHelper::parseConfigArray()`, `ConfigFileHelper::findNestedArrayKeyLine()` and
+`PackageDetector::isFilamentConfigured()` parse too. By default each builds its own parser and
+discards it, so the failure it records reaches nobody and an unparseable file is reported the
+same as an absent key. Pass your own parser to keep the evidence:
+
+```php
+$parser = new AstParser();
+
+$config = ConfigFileHelper::parseConfigArray($configPath, $parser);
+
+if ($parser->hasFailure($configPath)) {
+    // The config could not be parsed. Without the parser argument this is
+    // indistinguishable from a config file that defines no keys.
+}
+```
+
+The parameter is optional and last, so existing calls keep working. Note that
+`isFilamentConfigured()` only parses a file once it contains both `extends` and
+`PanelProvider`, so its failure reporting is partial by design.
+
+#### Is the parser older than the PHP you are running?
+
+`AstParser` targets the newest PHP the installed nikic/php-parser supports. When a project runs
+on a *newer* PHP than that, nothing throws — every file using current syntax quietly becomes a
+`ParseFailure` with cause `UnsupportedSyntax` instead of an AST, and a whole project can be
+reported clean because nothing in it was read. `UnsupportedSyntax` only says so once a file has
+tripped it, one entry per file, for what is really a single toolchain problem.
+
+Ask directly instead:
+
+```php
+use ShieldCI\AnalyzersCore\Support\AstParser;
+
+$compatibility = AstParser::compatibility();
+
+if (! $compatibility->isSupported()) {
+    // "php-parser understands 8.5, but this is running on 8.6"
+    printf(
+        'php-parser understands %s, but this is running on %s',
+        $compatibility->parserVersion(),
+        $compatibility->runtimeVersion()
+    );
+}
+
+$compatibility->toArray();
+// ['supported' => false, 'parser_version' => '8.5', 'runtime_version' => '8.6']
+```
+
+Check it once per run and report it beside the failure list — the fix is a toolchain upgrade
+(`composer update nikic/php-parser`), not a code change, so it belongs next to the run rather
+than blamed on a file.
+
+This is data with no message, like `ParseFailureCause`: what to say about it is the consuming
+package's decision. It is `static` and describes the parser this package builds **by default** —
+a parser you injected yourself is a deliberate choice, so it is never reported as a mismatch.
 
 ### Using Code Helpers
 
@@ -698,7 +761,8 @@ $query = $db->raw($input);
 
 ## Enums
 
-ShieldCI Analyzers Core provides three powerful enums with rich helper methods for better developer experience.
+ShieldCI Analyzers Core provides four enums with rich helper methods for better developer experience.
+The fourth, `ParseFailureCause`, is covered above under [Finding out what could not be parsed](#finding-out-what-could-not-be-parsed).
 
 ### Status
 
