@@ -39,6 +39,7 @@ composer require shieldci/analyzers-core
    - `ResultInterface` - Contract for analysis results
    - `ReporterInterface` - Contract for result formatters
    - `ParserInterface` - Contract for code parsers
+   - `RecordingParserInterface` - A parser that also keeps a readable log of what it could not parse
 
 2. **Abstract Base Classes**
    - `AbstractAnalyzer` - Base class with timing, error handling, and helper methods
@@ -60,13 +61,15 @@ composer require shieldci/analyzers-core
    - `AstParser` - AST parsing using nikic/php-parser
    - `FileParser` - File content parsing utilities
    - `CodeHelper` - Code analysis helpers
-   - `ConfigFileHelper` - Laravel configuration file utilities
+   - `ConfigFileHelper` - Laravel configuration file path and line lookups (no AST)
+   - `ConfigFileParser` - Reads config files via AST, over a parser you keep
    - `PathHelper` - Joining and relativising against a base path, with cross-platform separator normalization
    - `MessageHelper` - Error message sanitization (redacts credentials, tokens, IPs)
    - `InlineSuppressionParser` - Parses `@shieldci-ignore` inline suppression comments
    - `PackageDetector` - Detects installed Laravel packages from composer.lock
+   - `FilamentPanelDetector` - Detects a registered Filament panel provider, over a parser you keep
    - `PlatformDetector` - Detects the hosting platform a run is executing on
-   - `TraceHelper` - Formats exception traces with credentials redacted
+   - `TraceHelper` - Summarises exception traces as argument-free frames with relativised paths
 
 6. **Formatters**
    - `JsonFormatter` - Format results as JSON
@@ -292,25 +295,48 @@ $parser->parseCode($compiled, '/resources/views/page.blade.php', fn (int $line) 
 
 #### Reaching failures from the config and package helpers
 
-`ConfigFileHelper::parseConfigArray()`, `ConfigFileHelper::findNestedArrayKeyLine()` and
-`PackageDetector::isFilamentConfigured()` parse too. By default each builds its own parser and
-discards it, so the failure it records reaches nobody and an unparseable file is reported the
-same as an absent key. Pass your own parser to keep the evidence:
+Three helpers in this package read an AST, and all three answer with an absence: no such key,
+no such nested key, no registered panel provider. A file that would not parse produces the same
+absence, so a caller that cannot tell them apart reports a broken config as a config that simply
+does not set the thing.
+
+Each lives on a class you construct with a parser, and afterwards that parser is the record:
 
 ```php
 $parser = new AstParser();
 
-$config = ConfigFileHelper::parseConfigArray($configPath, $parser);
+$config = (new ConfigFileParser($parser))->parseArray($configPath);
 
 if ($parser->hasFailure($configPath)) {
-    // The config could not be parsed. Without the parser argument this is
-    // indistinguishable from a config file that defines no keys.
+    // The config could not be parsed -- not "defines no keys".
 }
 ```
 
-The parameter is optional and last, so existing calls keep working. Note that
-`isFilamentConfigured()` only parses a file once it contains both `extends` and
-`PanelProvider`, so its failure reporting is partial by design.
+| Instead of | Use |
+| --- | --- |
+| `ConfigFileHelper::parseConfigArray($path)` | `(new ConfigFileParser($parser))->parseArray($path)` |
+| `ConfigFileHelper::findNestedArrayKeyLine($path, $parent, $child)` | `(new ConfigFileParser($parser))->findNestedArrayKeyLine($path, $parent, $child)` |
+| `PackageDetector::isFilamentConfigured($basePath)` | `(new FilamentPanelDetector($parser))->isConfigured($basePath)` |
+
+The three statics still exist and still behave exactly as they did, so released callers keep
+working. They are `@deprecated` and will go in 3.0.0: each builds its own parser and drops it,
+which is the behaviour this section exists to replace.
+
+Both classes take a `RecordingParserInterface`, not an `AstParser`, so you can pass the parser
+your application already holds — including one resolved from a container.
+
+Two things worth knowing:
+
+- **`isConfigured()` reports failures only partially, by design.** A file is parsed only once it
+  contains both `extends` and `PanelProvider`. A provider broken badly enough to lose either
+  string is rejected before the parser sees it, and leaves no record.
+- **A parser you keep, keeps what it read.** `AstParser` caches each file's AST, so a parser
+  threaded through a whole run holds every AST that run touched. That is the point — it is what
+  makes the log readable — but it is also memory. `clearCache()` drops the ASTs, and
+  `resetFailures()` drops the failure and recovery logs. They are separate on purpose: the cache
+  is usually drained per analyzer to bound memory, while the log is run-scoped and belongs to
+  whatever orchestrates the run.
+
 
 #### Is the parser older than the PHP you are running?
 
@@ -542,14 +568,24 @@ $lineNumber = ConfigFileHelper::findNestedKeyLine(
 
 ### Parsing Config Arrays
 
-`ConfigFileHelper::parseConfigArray()` parses a PHP config file that returns an array and extracts the top-level key–value pairs via AST — no regex, no fragile text matching.
+`ConfigFileParser::parseArray()` parses a PHP config file that returns an array and extracts the top-level key–value pairs via AST — no regex, no fragile text matching.
+
+An empty result means both "defines no string keys" and "would not parse". Hold on to the parser
+you construct it with and the two stop looking alike — see
+[Reaching failures from the config and package helpers](#reaching-failures-from-the-config-and-package-helpers).
 
 ```php
 <?php
 
-use ShieldCI\AnalyzersCore\Support\ConfigFileHelper;
+use ShieldCI\AnalyzersCore\Support\AstParser;
+use ShieldCI\AnalyzersCore\Support\ConfigFileParser;
 
-$entries = ConfigFileHelper::parseConfigArray('/path/to/config/session.php');
+$parser = new AstParser();
+$entries = (new ConfigFileParser($parser))->parseArray('/path/to/config/session.php');
+
+if ($entries === [] && $parser->hasFailure('/path/to/config/session.php')) {
+    // Unreadable, not empty. Do not report "no keys set".
+}
 
 // Each entry has: value, line, isEnvCall, envDefault, envHasDefault
 foreach ($entries as $key => $entry) {
@@ -570,7 +606,7 @@ foreach ($entries as $key => $entry) {
 **Example — checking session cookie security:**
 
 ```php
-$session = ConfigFileHelper::parseConfigArray($configPath);
+$session = (new ConfigFileParser($parser))->parseArray($configPath);
 
 // Resolve the effective value (literal or env() default)
 $secure = $session['secure']['isEnvCall']
