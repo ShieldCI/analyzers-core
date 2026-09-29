@@ -542,4 +542,31 @@ class CodeHelperTest extends TestCase
         $this->assertCount(1, $params);
         $this->assertEquals('...$args', $params[0]);
     }
+
+    public function testExtractNamespaceReturnsTheDeclaredNamespace(): void
+    {
+        $this->assertSame(
+            'App\\Providers\\Filament',
+            CodeHelper::extractNamespace("<?php\n\nnamespace App\\Providers\\Filament;\n\nclass X {}\n")
+        );
+    }
+
+    public function testExtractNamespaceReturnsNullWhenNoneIsDeclared(): void
+    {
+        $this->assertNull(CodeHelper::extractNamespace("<?php\n\nclass X {}\n"));
+    }
+
+    /**
+     * The reason this is not FileParser::extractNamespace(): that pattern matches everything up
+     * to the semicolon, so the comment below yields "to Foo". Requiring namespace-legal
+     * characters skips it and finds the real declaration. Swapping the two is a silent
+     * regression, not a simplification.
+     */
+    public function testExtractNamespaceSkipsTheWordNamespaceInAComment(): void
+    {
+        $code = "<?php\n\n// TODO: change namespace to Foo;\nnamespace App\\Real;\n";
+
+        $this->assertSame('App\\Real', CodeHelper::extractNamespace($code));
+    }
+
 }

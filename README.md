@@ -39,6 +39,7 @@ composer require shieldci/analyzers-core
    - `ResultInterface` - Contract for analysis results
    - `ReporterInterface` - Contract for result formatters
    - `ParserInterface` - Contract for code parsers
+   - `RecordingParserInterface` - A parser that also keeps a readable log of what it could not parse
 
 2. **Abstract Base Classes**
    - `AbstractAnalyzer` - Base class with timing, error handling, and helper methods
@@ -49,6 +50,8 @@ composer require shieldci/analyzers-core
    - `Issue` - Represents a specific issue found
    - `CodeSnippet` - Represents a code snippet with context lines
    - `AnalyzerMetadata` - Metadata about an analyzer
+   - `ParseFailure` - A file that was handed to the parser but never produced an AST
+   - `ParserCompatibility` - Whether the default parser understands the running PHP
 
 4. **Results**
    - `AnalysisResult` - Result of running a single analyzer
@@ -58,10 +61,15 @@ composer require shieldci/analyzers-core
    - `AstParser` - AST parsing using nikic/php-parser
    - `FileParser` - File content parsing utilities
    - `CodeHelper` - Code analysis helpers
-   - `ConfigFileHelper` - Laravel configuration file utilities
+   - `ConfigFileHelper` - Laravel configuration file path and line lookups (no AST)
+   - `ConfigFileParser` - Reads config files via AST, over a parser you keep
    - `PathHelper` - Joining and relativising against a base path, with cross-platform separator normalization
    - `MessageHelper` - Error message sanitization (redacts credentials, tokens, IPs)
    - `InlineSuppressionParser` - Parses `@shieldci-ignore` inline suppression comments
+   - `PackageDetector` - Detects installed Laravel packages from composer.lock
+   - `FilamentPanelDetector` - Detects a registered Filament panel provider, over a parser you keep
+   - `PlatformDetector` - Detects the hosting platform a run is executing on
+   - `TraceHelper` - Summarises exception traces as argument-free frames with relativised paths
 
 6. **Formatters**
    - `JsonFormatter` - Format results as JSON
@@ -285,6 +293,87 @@ until then:
 $parser->parseCode($compiled, '/resources/views/page.blade.php', fn (int $line) => $lineMap[$line] ?? $line);
 ```
 
+#### Reaching failures from the config and package helpers
+
+Three helpers in this package read an AST, and all three answer with an absence: no such key,
+no such nested key, no registered panel provider. A file that would not parse produces the same
+absence, so a caller that cannot tell them apart reports a broken config as a config that simply
+does not set the thing.
+
+Each lives on a class you construct with a parser, and afterwards that parser is the record:
+
+```php
+$parser = new AstParser();
+
+$config = (new ConfigFileParser($parser))->parseArray($configPath);
+
+if ($parser->hasFailure($configPath)) {
+    // The config could not be parsed -- not "defines no keys".
+}
+```
+
+| Instead of | Use |
+| --- | --- |
+| `ConfigFileHelper::parseConfigArray($path)` | `(new ConfigFileParser($parser))->parseArray($path)` |
+| `ConfigFileHelper::findNestedArrayKeyLine($path, $parent, $child)` | `(new ConfigFileParser($parser))->findNestedArrayKeyLine($path, $parent, $child)` |
+| `PackageDetector::isFilamentConfigured($basePath)` | `(new FilamentPanelDetector($parser))->isConfigured($basePath)` |
+
+The three statics still exist and still behave exactly as they did, so released callers keep
+working. They are `@deprecated` and will go in 3.0.0: each builds its own parser and drops it,
+which is the behaviour this section exists to replace.
+
+Both classes take a `RecordingParserInterface`, not an `AstParser`, so you can pass the parser
+your application already holds — including one resolved from a container.
+
+Two things worth knowing:
+
+- **`isConfigured()` reports failures only partially, by design.** A file is parsed only once it
+  contains both `extends` and `PanelProvider`. A provider broken badly enough to lose either
+  string is rejected before the parser sees it, and leaves no record.
+- **A parser you keep, keeps what it read.** `AstParser` caches each file's AST, so a parser
+  threaded through a whole run holds every AST that run touched. That is the point — it is what
+  makes the log readable — but it is also memory. `clearCache()` drops the ASTs, and
+  `resetFailures()` drops the failure and recovery logs. They are separate on purpose: the cache
+  is usually drained per analyzer to bound memory, while the log is run-scoped and belongs to
+  whatever orchestrates the run.
+
+
+#### Is the parser older than the PHP you are running?
+
+`AstParser` targets the newest PHP the installed nikic/php-parser supports. When a project runs
+on a *newer* PHP than that, nothing throws — every file using current syntax quietly becomes a
+`ParseFailure` with cause `UnsupportedSyntax` instead of an AST, and a whole project can be
+reported clean because nothing in it was read. `UnsupportedSyntax` only says so once a file has
+tripped it, one entry per file, for what is really a single toolchain problem.
+
+Ask directly instead:
+
+```php
+use ShieldCI\AnalyzersCore\Support\AstParser;
+
+$compatibility = AstParser::compatibility();
+
+if (! $compatibility->isSupported()) {
+    // "php-parser understands 8.5, but this is running on 8.6"
+    printf(
+        'php-parser understands %s, but this is running on %s',
+        $compatibility->parserVersion(),
+        $compatibility->runtimeVersion()
+    );
+}
+
+$compatibility->toArray();
+// ['supported' => false, 'parser_version' => '8.5', 'runtime_version' => '8.6']
+```
+
+Check it once per run and report it beside the failure list — the fix is a toolchain upgrade
+(`composer update nikic/php-parser`), not a code change, so it belongs next to the run rather
+than blamed on a file.
+
+This is data with no message, like `ParseFailureCause`: what to say about it is the consuming
+package's decision. It is `static` and describes the parser this package builds **by default** —
+a parser you injected yourself is a deliberate choice, so it is never reported as a mismatch.
+
 ### Using Code Helpers
 
 ```php
@@ -479,14 +568,24 @@ $lineNumber = ConfigFileHelper::findNestedKeyLine(
 
 ### Parsing Config Arrays
 
-`ConfigFileHelper::parseConfigArray()` parses a PHP config file that returns an array and extracts the top-level key–value pairs via AST — no regex, no fragile text matching.
+`ConfigFileParser::parseArray()` parses a PHP config file that returns an array and extracts the top-level key–value pairs via AST — no regex, no fragile text matching.
+
+An empty result means both "defines no string keys" and "would not parse". Hold on to the parser
+you construct it with and the two stop looking alike — see
+[Reaching failures from the config and package helpers](#reaching-failures-from-the-config-and-package-helpers).
 
 ```php
 <?php
 
-use ShieldCI\AnalyzersCore\Support\ConfigFileHelper;
+use ShieldCI\AnalyzersCore\Support\AstParser;
+use ShieldCI\AnalyzersCore\Support\ConfigFileParser;
 
-$entries = ConfigFileHelper::parseConfigArray('/path/to/config/session.php');
+$parser = new AstParser();
+$entries = (new ConfigFileParser($parser))->parseArray('/path/to/config/session.php');
+
+if ($entries === [] && $parser->hasFailure('/path/to/config/session.php')) {
+    // Unreadable, not empty. Do not report "no keys set".
+}
 
 // Each entry has: value, line, isEnvCall, envDefault, envHasDefault
 foreach ($entries as $key => $entry) {
@@ -507,7 +606,7 @@ foreach ($entries as $key => $entry) {
 **Example — checking session cookie security:**
 
 ```php
-$session = ConfigFileHelper::parseConfigArray($configPath);
+$session = (new ConfigFileParser($parser))->parseArray($configPath);
 
 // Resolve the effective value (literal or env() default)
 $secure = $session['secure']['isEnvCall']
@@ -698,7 +797,8 @@ $query = $db->raw($input);
 
 ## Enums
 
-ShieldCI Analyzers Core provides three powerful enums with rich helper methods for better developer experience.
+ShieldCI Analyzers Core provides four enums with rich helper methods for better developer experience.
+The fourth, `ParseFailureCause`, is covered above under [Finding out what could not be parsed](#finding-out-what-could-not-be-parsed).
 
 ### Status
 

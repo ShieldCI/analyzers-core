@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace ShieldCI\AnalyzersCore\Tests\Unit\Support;
 
 use PHPUnit\Framework\TestCase;
+use ShieldCI\AnalyzersCore\Support\AstParser;
 use ShieldCI\AnalyzersCore\Support\ConfigFileHelper;
+use ShieldCI\AnalyzersCore\Support\ConfigFileParser;
 
 class ConfigFileHelperTest extends TestCase
 {
@@ -171,65 +173,6 @@ class ConfigFileHelperTest extends TestCase
     {
         $line = ConfigFileHelper::findNestedKeyLine('/nonexistent/file.php', 'stores', 'driver', 'redis');
         $this->assertEquals(1, $line);
-    }
-
-    public function testFindNestedArrayKeyLineReturnsLineForAuthoredKey(): void
-    {
-        $configFile = $this->tempDir.'/config/logging.php';
-        file_put_contents($configFile, "<?php\n\nreturn [\n    'default' => env('LOG_CHANNEL', 'stack'),\n    'channels' => [\n        'stack' => [\n            'driver' => 'stack',\n            'channels' => ['single'],\n        ],\n        'single' => [\n            'driver' => 'single',\n            'level' => env('LOG_LEVEL', 'debug'),\n        ],\n    ],\n];\n");
-
-        $this->assertSame(6, ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'stack'));
-        $this->assertSame(10, ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
-    }
-
-    public function testFindNestedArrayKeyLineReturnsNullForMissingKey(): void
-    {
-        $configFile = $this->tempDir.'/config/logging.php';
-        file_put_contents($configFile, "<?php\n\nreturn [\n    'channels' => [\n        'single' => [\n            'driver' => 'single',\n        ],\n    ],\n];\n");
-
-        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'laravel-cloud-socket'));
-    }
-
-    public function testFindNestedArrayKeyLineIgnoresStringValuesWithSameName(): void
-    {
-        // 'single' appears as a string value inside the stack channel list, but is
-        // NOT authored as its own channel sub-array — must not be treated as authored.
-        $configFile = $this->tempDir.'/config/logging.php';
-        file_put_contents($configFile, "<?php\n\nreturn [\n    'channels' => [\n        'stack' => [\n            'driver' => 'stack',\n            'channels' => ['single'],\n        ],\n    ],\n];\n");
-
-        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
-    }
-
-    public function testFindNestedArrayKeyLineReturnsNullWhenParentMissing(): void
-    {
-        $configFile = $this->tempDir.'/config/logging.php';
-        file_put_contents($configFile, "<?php\n\nreturn [\n    'default' => 'stack',\n];\n");
-
-        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
-    }
-
-    public function testFindNestedArrayKeyLineReturnsNullWhenFileNotFound(): void
-    {
-        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine('/nonexistent/file.php', 'channels', 'single'));
-    }
-
-    public function testFindNestedArrayKeyLineReturnsNullWhenReturnIsNotArray(): void
-    {
-        // File parses, but the returned expression is not an array.
-        $configFile = $this->tempDir.'/config/logging.php';
-        file_put_contents($configFile, "<?php\n\nreturn 'not-an-array';\n");
-
-        $this->assertNull(ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
-    }
-
-    public function testFindNestedArrayKeyLineSkipsNonStringKeyedItems(): void
-    {
-        // Both the top-level array and the parent array contain list (non-keyed) items
-        // before the targeted keys, exercising the skip branches in both loops.
-        $configFile = $this->tempDir.'/config/logging.php';
-        file_put_contents($configFile, "<?php\n\nreturn [\n    'first-value',\n    'channels' => [\n        'list-item',\n        'single' => [\n            'driver' => 'single',\n        ],\n    ],\n];\n");
-
-        $this->assertSame(7, ConfigFileHelper::findNestedArrayKeyLine($configFile, 'channels', 'single'));
     }
 
     public function testFindKeyLineWithDoubleQuotes(): void
@@ -547,187 +490,6 @@ PHP;
 
     // --- parseConfigArray ---
 
-    public function testParseConfigArrayExtractsStringValues(): void
-    {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, <<<'PHP'
-<?php
-return [
-    'name' => 'MyApp',
-    'url' => 'https://example.com',
-];
-PHP);
-
-        $result = ConfigFileHelper::parseConfigArray($file);
-
-        $this->assertArrayHasKey('name', $result);
-        $this->assertSame('MyApp', $result['name']['value']);
-        $this->assertFalse($result['name']['isEnvCall']);
-        $this->assertSame('https://example.com', $result['url']['value']);
-    }
-
-    public function testParseConfigArrayExtractsBoolAndNull(): void
-    {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, <<<'PHP'
-<?php
-return [
-    'debug' => false,
-    'maintenance' => true,
-    'secret' => null,
-];
-PHP);
-
-        $result = ConfigFileHelper::parseConfigArray($file);
-
-        $this->assertFalse($result['debug']['value']);
-        $this->assertTrue($result['maintenance']['value']);
-        $this->assertNull($result['secret']['value']);
-    }
-
-    public function testParseConfigArrayDetectsEnvCallWithoutDefault(): void
-    {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, <<<'PHP'
-<?php
-return [
-    'key' => env('APP_KEY'),
-];
-PHP);
-
-        $result = ConfigFileHelper::parseConfigArray($file);
-
-        $this->assertTrue($result['key']['isEnvCall']);
-        $this->assertNull($result['key']['value']);
-        $this->assertFalse($result['key']['envHasDefault']);
-        $this->assertNull($result['key']['envDefault']);
-    }
-
-    public function testParseConfigArrayDetectsEnvCallWithDefault(): void
-    {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, <<<'PHP'
-<?php
-return [
-    'debug' => env('APP_DEBUG', false),
-    'name' => env('APP_NAME', 'Laravel'),
-];
-PHP);
-
-        $result = ConfigFileHelper::parseConfigArray($file);
-
-        $this->assertTrue($result['debug']['isEnvCall']);
-        $this->assertTrue($result['debug']['envHasDefault']);
-        $this->assertFalse($result['debug']['envDefault']);
-        $this->assertTrue($result['name']['isEnvCall']);
-        $this->assertTrue($result['name']['envHasDefault']);
-        $this->assertSame('Laravel', $result['name']['envDefault']);
-    }
-
-    public function testParseConfigArrayRecordsLineNumbers(): void
-    {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, <<<'PHP'
-<?php
-return [
-    'name' => 'App',
-    'debug' => false,
-    'key' => env('APP_KEY'),
-];
-PHP);
-
-        $result = ConfigFileHelper::parseConfigArray($file);
-
-        $this->assertSame(3, $result['name']['line']);
-        $this->assertSame(4, $result['debug']['line']);
-        $this->assertSame(5, $result['key']['line']);
-    }
-
-    public function testParseConfigArrayReturnsEmptyForNonExistentFile(): void
-    {
-        $result = ConfigFileHelper::parseConfigArray('/non/existent/config.php');
-
-        $this->assertSame([], $result);
-    }
-
-    public function testParseConfigArrayReturnsEmptyForFileWithoutReturn(): void
-    {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, '<?php echo "no return";');
-
-        $result = ConfigFileHelper::parseConfigArray($file);
-
-        $this->assertSame([], $result);
-    }
-
-    public function testParseConfigArraySkipsNonStringKeys(): void
-    {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, <<<'PHP'
-<?php
-return [
-    'valid' => 'yes',
-    0 => 'numeric key skipped',
-];
-PHP);
-
-        $result = ConfigFileHelper::parseConfigArray($file);
-
-        $this->assertArrayHasKey('valid', $result);
-        $this->assertCount(1, $result);
-    }
-
-    public function testParseConfigArrayExtractsPhpConstantAsString(): void
-    {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, <<<'PHP'
-<?php
-return [
-    'max' => PHP_INT_MAX,
-];
-PHP);
-
-        $result = ConfigFileHelper::parseConfigArray($file);
-
-        $this->assertArrayHasKey('max', $result);
-        $this->assertSame('PHP_INT_MAX', $result['max']['value']);
-        $this->assertFalse($result['max']['isEnvCall']);
-    }
-
-    public function testParseConfigArrayReturnsNullForComplexValues(): void
-    {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, <<<'PHP'
-<?php
-return [
-    'connections' => ['sqlite', 'mysql'],
-];
-PHP);
-
-        $result = ConfigFileHelper::parseConfigArray($file);
-
-        $this->assertArrayHasKey('connections', $result);
-        $this->assertNull($result['connections']['value']);
-        $this->assertFalse($result['connections']['isEnvCall']);
-    }
-
-    public function testParseConfigArrayExtractsIntegerValues(): void
-    {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, <<<'PHP'
-<?php
-return [
-    'port' => 3306,
-    'timeout' => 30.5,
-];
-PHP);
-
-        $result = ConfigFileHelper::parseConfigArray($file);
-
-        $this->assertSame(3306, $result['port']['value']);
-        $this->assertSame(30.5, $result['timeout']['value']);
-    }
-
     // =========================================================================
     // locateConfigKey() - ShieldCI/laravel#360
     // =========================================================================
@@ -978,4 +740,54 @@ PHP);
 
         return $lines[$line - 1];
     }
+
+    // --- Reaching the parse failures these methods would otherwise discard ---
+
+
+    /**
+     * The two AST methods now live on ConfigFileParser; what is left here is a deprecated
+     * delegate kept so released callers keep working. These pin the delegate to the instance it
+     * forwards to, rather than restating the parsing behaviour ConfigFileParserTest already
+     * covers -- if the two ever disagree, the deprecation has silently become a behaviour
+     * change.
+     */
+    public function test_the_deprecated_parse_config_array_matches_the_instance_it_delegates_to(): void
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, "<?php\n\nreturn [\n    'name' => 'Laravel',\n    'debug' => true,\n];\n");
+
+        $this->assertSame(
+            (new ConfigFileParser(new AstParser()))->parseArray($file),
+            ConfigFileHelper::parseConfigArray($file)
+        );
+    }
+
+    public function test_the_deprecated_find_nested_array_key_line_matches_the_instance_it_delegates_to(): void
+    {
+        $file = $this->tempDir.'/config/logging.php';
+        file_put_contents($file, "<?php\n\nreturn [\n    'channels' => [\n        'single' => [\n            'driver' => 'single',\n        ],\n    ],\n];\n");
+
+        $this->assertSame(
+            (new ConfigFileParser(new AstParser()))->findNestedArrayKeyLine($file, 'channels', 'single'),
+            ConfigFileHelper::findNestedArrayKeyLine($file, 'channels', 'single')
+        );
+    }
+
+    /**
+     * The reason the delegate is deprecated rather than simply kept: it builds its own parser,
+     * so there is nowhere for a caller to read the failure from, and a config that would not
+     * parse is reported identically to one that defines no keys.
+     */
+    public function test_the_deprecated_delegate_cannot_tell_an_unparseable_config_from_an_empty_one(): void
+    {
+        $broken = $this->tempDir.'/config/broken.php';
+        file_put_contents($broken, "<?php\n\nreturn [\n    'name' => \n];\n");
+
+        $empty = $this->tempDir.'/config/empty.php';
+        file_put_contents($empty, "<?php\n\nreturn [];\n");
+
+        $this->assertSame([], ConfigFileHelper::parseConfigArray($broken));
+        $this->assertSame([], ConfigFileHelper::parseConfigArray($empty));
+    }
+
 }

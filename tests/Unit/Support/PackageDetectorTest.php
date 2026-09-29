@@ -5,138 +5,25 @@ declare(strict_types=1);
 namespace ShieldCI\AnalyzersCore\Tests\Unit\Support;
 
 use PHPUnit\Framework\TestCase;
+use ShieldCI\AnalyzersCore\Support\AstParser;
+use ShieldCI\AnalyzersCore\Support\FilamentPanelDetector;
 use ShieldCI\AnalyzersCore\Support\PackageDetector;
+use ShieldCI\AnalyzersCore\Tests\Support\CreatesTestApplication;
 
 class PackageDetectorTest extends TestCase
 {
-    private string $testDir = '';
+    use CreatesTestApplication;
 
     protected function setUp(): void
     {
         parent::setUp();
-        $this->testDir = sys_get_temp_dir().'/shield-ci-package-test-'.uniqid();
-        mkdir($this->testDir);
+        $this->setUpTestApplication();
     }
 
     protected function tearDown(): void
     {
+        $this->tearDownTestApplication();
         parent::tearDown();
-
-        // Clear package detector cache
-        PackageDetector::clearCache();
-
-        // Clean up test directory
-        if (is_dir($this->testDir)) {
-            $this->removeDirectory($this->testDir);
-        }
-    }
-
-    private function removeDirectory(string $dir): void
-    {
-        if (! is_dir($dir)) {
-            return;
-        }
-
-        $items = array_diff(scandir($dir) ?: [], ['.', '..']);
-        foreach ($items as $item) {
-            $path = $dir.DIRECTORY_SEPARATOR.$item;
-            if (is_dir($path)) {
-                $this->removeDirectory($path);
-            } else {
-                unlink($path);
-            }
-        }
-        rmdir($dir);
-    }
-
-    /**
-     * Create a composer.lock file with specified packages.
-     *
-     * @param  array<string>  $packages
-     */
-    private function createComposerLock(array $packages): void
-    {
-        $packageEntries = [];
-        foreach ($packages as $packageName) {
-            $packageEntries[] = <<<JSON
-        {
-            "name": "{$packageName}",
-            "version": "1.0.0",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/example/repo.git",
-                "reference": "abc123"
-            }
-        }
-JSON;
-        }
-
-        $lockContent = <<<JSON
-{
-    "packages": [
-{$this->indentLines(implode(",\n", $packageEntries), 2)}
-    ],
-    "packages-dev": []
-}
-JSON;
-
-        file_put_contents($this->testDir.DIRECTORY_SEPARATOR.'composer.lock', $lockContent);
-    }
-
-    private function indentLines(string $content, int $spaces): string
-    {
-        $indent = str_repeat(' ', $spaces);
-        $lines = explode("\n", $content);
-
-        return implode("\n", array_map(fn ($line) => $indent.$line, $lines));
-    }
-
-    /**
-     * Register a service provider in bootstrap/providers.php (Laravel 11+).
-     *
-     * @param  string  $providerClass  Fully qualified class name
-     */
-    private function registerProviderInBootstrap(string $providerClass): void
-    {
-        $bootstrapDir = $this->testDir.'/bootstrap';
-        if (! is_dir($bootstrapDir)) {
-            mkdir($bootstrapDir, 0755, true);
-        }
-
-        $providersFile = $bootstrapDir.'/providers.php';
-        $content = <<<PHP
-<?php
-
-return [
-    {$providerClass}::class,
-];
-PHP;
-        file_put_contents($providersFile, $content);
-    }
-
-    /**
-     * Register a service provider in config/app.php (Laravel 10-).
-     *
-     * @param  string  $providerClass  Fully qualified class name
-     */
-    private function registerProviderInConfigApp(string $providerClass): void
-    {
-        $configDir = $this->testDir.'/config';
-        if (! is_dir($configDir)) {
-            mkdir($configDir, 0755, true);
-        }
-
-        $configFile = $configDir.'/app.php';
-        $content = <<<PHP
-<?php
-
-return [
-    'providers' => [
-        {$providerClass}::class,
-    ],
-];
-PHP;
-        file_put_contents($configFile, $content);
     }
 
     // =================================================================
@@ -283,316 +170,6 @@ PHP;
     // =================================================================
     // Tests for isFilamentConfigured()
     // =================================================================
-
-    public function test_is_filament_configured_returns_false_when_package_not_installed(): void
-    {
-        $this->createComposerLock(['laravel/framework']);
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertFalse($result);
-    }
-
-    public function test_is_filament_configured_returns_false_when_no_panel_providers(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertFalse($result);
-    }
-
-    public function test_is_filament_configured_detects_admin_panel_provider_in_filament_dir(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        // Create app/Providers/Filament/AdminPanelProvider.php
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        $providerCode = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-use Filament\Panel\PanelProvider;
-
-class AdminPanelProvider extends PanelProvider
-{
-    public function panel(): Panel
-    {
-        return Panel::make('admin')
-            ->default();
-    }
-}
-PHP;
-        file_put_contents($filamentDir.'/AdminPanelProvider.php', $providerCode);
-
-        // Register in bootstrap/providers.php (Laravel 11)
-        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertTrue($result);
-    }
-
-    public function test_is_filament_configured_detects_custom_panel_provider_in_providers_dir(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        // Create app/Providers/MyCustomPanelProvider.php (directly in Providers, not Filament subdir)
-        $providersDir = $this->testDir.'/app/Providers';
-        mkdir($providersDir, 0755, true);
-
-        $providerCode = <<<'PHP'
-<?php
-
-namespace App\Providers;
-
-use Filament\Panel\PanelProvider;
-
-class MyCustomPanelProvider extends PanelProvider
-{
-    public function panel(): Panel
-    {
-        return Panel::make('custom');
-    }
-}
-PHP;
-        file_put_contents($providersDir.'/MyCustomPanelProvider.php', $providerCode);
-
-        // Register in config/app.php (Laravel 10)
-        $this->registerProviderInConfigApp('App\\Providers\\MyCustomPanelProvider');
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertTrue($result);
-    }
-
-    public function test_is_filament_configured_detects_panel_provider_with_fully_qualified_name(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        // Use fully qualified class name with leading backslash
-        $providerCode = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-class AppPanelProvider extends \Filament\Panel\PanelProvider
-{
-    public function panel(): Panel
-    {
-        return Panel::make('app');
-    }
-}
-PHP;
-        file_put_contents($filamentDir.'/AppPanelProvider.php', $providerCode);
-
-        // Register provider
-        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AppPanelProvider');
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertTrue($result);
-    }
-
-    public function test_is_filament_configured_detects_panel_provider_with_use_statement(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        // Use statement imports PanelProvider, then just use the short name
-        $providerCode = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-use Filament\Panel\PanelProvider;
-use Filament\Panel\Panel;
-
-class DashboardProvider extends PanelProvider
-{
-    public function panel(): Panel
-    {
-        return Panel::make('dashboard');
-    }
-}
-PHP;
-        file_put_contents($filamentDir.'/DashboardProvider.php', $providerCode);
-
-        // Register provider
-        $this->registerProviderInBootstrap('App\\Providers\\Filament\\DashboardProvider');
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertTrue($result);
-    }
-
-    public function test_is_filament_configured_returns_false_when_provider_does_not_extend_panel_provider(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        // Create a provider that extends ServiceProvider, not PanelProvider
-        $providerCode = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-use Illuminate\Support\ServiceProvider;
-
-class FilamentServiceProvider extends ServiceProvider
-{
-    public function boot(): void
-    {
-        //
-    }
-}
-PHP;
-        file_put_contents($filamentDir.'/FilamentServiceProvider.php', $providerCode);
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertFalse($result);
-    }
-
-    public function test_is_filament_configured_ignores_non_provider_files(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        // Create a non-provider file
-        $helperCode = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-class FilamentHelper
-{
-    public static function configure(): void
-    {
-        // Just a helper, not a provider
-    }
-}
-PHP;
-        file_put_contents($filamentDir.'/FilamentHelper.php', $helperCode);
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertFalse($result);
-    }
-
-    public function test_is_filament_configured_handles_multiple_panel_providers(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        // Create multiple panel providers
-        $adminProvider = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-use Filament\Panel\PanelProvider;
-
-class AdminPanelProvider extends PanelProvider
-{
-    //
-}
-PHP;
-        file_put_contents($filamentDir.'/AdminPanelProvider.php', $adminProvider);
-
-        $appProvider = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-use Filament\Panel\PanelProvider;
-
-class AppPanelProvider extends PanelProvider
-{
-    //
-}
-PHP;
-        file_put_contents($filamentDir.'/AppPanelProvider.php', $appProvider);
-
-        // Register one of them (should be sufficient)
-        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertTrue($result);
-    }
-
-    public function test_is_filament_configured_returns_false_when_provider_not_registered(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        // Create panel provider but DON'T register it
-        $providerCode = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-use Filament\Panel\PanelProvider;
-
-class AdminPanelProvider extends PanelProvider
-{
-    //
-}
-PHP;
-        file_put_contents($filamentDir.'/AdminPanelProvider.php', $providerCode);
-
-        // Note: Not calling registerProviderInBootstrap or registerProviderInConfigApp
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertFalse($result);
-    }
-
-    public function test_is_filament_configured_detects_registration_in_config_app(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        $providerCode = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-use Filament\Panel\PanelProvider;
-
-class AdminPanelProvider extends PanelProvider
-{
-    //
-}
-PHP;
-        file_put_contents($filamentDir.'/AdminPanelProvider.php', $providerCode);
-
-        // Register in config/app.php (Laravel 10 style)
-        $this->registerProviderInConfigApp('App\\Providers\\Filament\\AdminPanelProvider');
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertTrue($result);
-    }
 
     // =================================================================
     // Tests for hasTelescope()
@@ -986,76 +563,6 @@ JSON;
         $this->assertTrue($result);
     }
 
-    public function test_is_filament_configured_skips_class_without_extends(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        // Create a PHP file that contains 'extends' and 'PanelProvider' as strings
-        // (passes the quick string check) but the actual class has no extends clause
-        // This triggers line 205: $class->extends === null
-        $providerCode = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-// The words "extends" and "PanelProvider" appear in this comment
-class StandaloneClass
-{
-    public function description(): string
-    {
-        return 'This class extends nothing and is not a PanelProvider';
-    }
-}
-PHP;
-        file_put_contents($filamentDir.'/StandaloneClass.php', $providerCode);
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertFalse($result);
-    }
-
-    public function test_is_filament_configured_returns_false_when_provider_not_in_bootstrap(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        // Create a valid PanelProvider class
-        $providerCode = <<<'PHP'
-<?php
-
-namespace App\Providers\Filament;
-
-use Filament\Panel\PanelProvider;
-
-class AdminPanelProvider extends PanelProvider
-{
-    //
-}
-PHP;
-        file_put_contents($filamentDir.'/AdminPanelProvider.php', $providerCode);
-
-        // Register a DIFFERENT provider — isAnyProviderInContent() returns false (line 321)
-        $bootstrapDir = $this->testDir.'/bootstrap';
-        mkdir($bootstrapDir, 0755, true);
-        $content = <<<'PHP'
-<?php
-
-return [
-    App\Providers\AppServiceProvider::class,
-];
-PHP;
-        file_put_contents($bootstrapDir.'/providers.php', $content);
-
-        $result = PackageDetector::isFilamentConfigured($this->testDir);
-
-        $this->assertFalse($result);
-    }
-
     public function test_get_composer_lock_content_handles_unreadable_file(): void
     {
         // Create composer.lock and make it unreadable (lines 480, 482)
@@ -1078,33 +585,6 @@ PHP;
         chmod($lockPath, 0644);
     }
 
-    public function test_get_panel_provider_handles_unreadable_file(): void
-    {
-        $this->createComposerLock(['filamentphp/filament']);
-
-        $filamentDir = $this->testDir.'/app/Providers/Filament';
-        mkdir($filamentDir, 0755, true);
-
-        // Create a provider file with correct content but make it unreadable (line 189)
-        $providerFile = $filamentDir.'/AdminPanelProvider.php';
-        file_put_contents($providerFile, "<?php\nnamespace App\\Providers\\Filament;\nuse Filament\\Panel\\PanelProvider;\nclass AdminPanelProvider extends PanelProvider {}");
-        chmod($providerFile, 0000);
-
-        // Suppress expected PHP warning from file_get_contents on unreadable file
-        $previousHandler = set_error_handler(fn () => true);
-
-        try {
-            $result = PackageDetector::isFilamentConfigured($this->testDir);
-        } finally {
-            restore_error_handler();
-        }
-
-        $this->assertFalse($result);
-
-        // Restore permissions for cleanup
-        chmod($providerFile, 0644);
-    }
-
     public function test_does_not_match_substring_of_package_name(): void
     {
         $this->createComposerLock(['my-vendor/laravel-nova-tools']);
@@ -1114,4 +594,42 @@ PHP;
 
         $this->assertFalse($result);
     }
+
+    // --- Reaching the parse failures panel provider discovery would otherwise discard ---
+
+
+    /**
+     * The Filament panel scan now lives on FilamentPanelDetector; what is left here is a
+     * deprecated delegate kept so released callers keep working. This pins the delegate to the
+     * instance it forwards to rather than restating the scan, which FilamentPanelDetectorTest
+     * covers -- if the two ever disagree, the deprecation has become a behaviour change.
+     */
+    public function test_the_deprecated_is_filament_configured_matches_the_instance_it_delegates_to(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        file_put_contents($filamentDir.'/AdminPanelProvider.php', <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Filament\Panel\PanelProvider;
+
+class AdminPanelProvider extends PanelProvider
+{
+}
+PHP);
+
+        $this->registerProviderInBootstrap('App\Providers\Filament\AdminPanelProvider');
+
+        $this->assertSame(
+            (new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir),
+            PackageDetector::isFilamentConfigured($this->testDir)
+        );
+        $this->assertTrue(PackageDetector::isFilamentConfigured($this->testDir));
+    }
+
 }
