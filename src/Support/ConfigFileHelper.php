@@ -4,13 +4,6 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Support;
 
-use PhpParser\Node;
-use PhpParser\Node\Expr\Array_;
-use PhpParser\Node\Expr\ConstFetch;
-use PhpParser\Node\Expr\FuncCall;
-use PhpParser\Node\Name;
-use PhpParser\Node\Stmt\Return_;
-use PhpParser\NodeFinder;
 use ShieldCI\AnalyzersCore\ValueObjects\Location;
 
 /**
@@ -320,186 +313,32 @@ class ConfigFileHelper
     /**
      * Find the line of a direct child key within a named top-level array, using an AST parse.
      *
-     * Unlike findNestedKeyLine(), this answers "is this key authored as a sub-array in the
-     * source file?" precisely: it returns null when the key is absent (rather than falling
-     * back to the parent's line), so callers can distinguish authored entries from ones that
-     * are injected at runtime by a package/framework and never appear in the file.
-     *
-     * Example: findNestedArrayKeyLine('config/logging.php', 'channels', 'single') returns the
-     * line of `'single' => [` within `'channels' => [...]`, or null if no such channel is authored.
-     *
-     * Null is returned both for a key that is genuinely absent and for a file that would
-     * not parse. Pass $parser to tell the two apart afterwards: the failure is recorded on
-     * the parser you supply, so $parser->hasFailure($filePath) answers which happened.
+     * @deprecated 2.8.0 Builds a throwaway parser, so a file that would not parse is
+     *                   indistinguishable from a key that is absent. Use
+     *                   ConfigFileParser::findNestedArrayKeyLine() with a parser you keep.
      *
      * @param  string  $filePath  Full path to the config file
      * @param  string  $parentKey  Top-level array key to search within (e.g. 'channels')
      * @param  string  $childKey  Direct child key to locate (e.g. a channel name)
-     * @param  AstParser|null  $parser  The parser to record any failure on. Defaults to a
-     *                                   throwaway one, whose log nobody can read -- which is
-     *                                   the whole reason this parameter exists. Optional so
-     *                                   existing callers keep working untouched.
-     * @return int|null  1-indexed line number, or null when absent / unparseable
+     * @return int|null 1-indexed line number, or null when absent / unparseable
      */
-    public static function findNestedArrayKeyLine(
-        string $filePath,
-        string $parentKey,
-        string $childKey,
-        ?AstParser $parser = null,
-    ): ?int {
-        $ast = ($parser ?? new AstParser())->parseFile($filePath);
-
-        if ($ast === []) {
-            return null;
-        }
-
-        $nodeFinder = new NodeFinder();
-
-        /** @var Return_|null $returnNode */
-        $returnNode = $nodeFinder->findFirstInstanceOf($ast, Return_::class);
-
-        if (! $returnNode instanceof Return_ || ! $returnNode->expr instanceof Array_) {
-            return null;
-        }
-
-        $parentArray = self::findArrayItemValue($returnNode->expr, $parentKey);
-
-        if (! $parentArray instanceof Array_) {
-            return null;
-        }
-
-        foreach ($parentArray->items as $item) {
-            if (! $item->key instanceof Node\Scalar\String_) {
-                continue;
-            }
-
-            if ($item->key->value === $childKey) {
-                return $item->getStartLine();
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Return the value node of the array item with the given string key, or null.
-     */
-    private static function findArrayItemValue(Array_ $array, string $key): ?Node
+    public static function findNestedArrayKeyLine(string $filePath, string $parentKey, string $childKey): ?int
     {
-        foreach ($array->items as $item) {
-            if (! $item->key instanceof Node\Scalar\String_) {
-                continue;
-            }
-
-            if ($item->key->value === $key) {
-                return $item->value;
-            }
-        }
-
-        return null;
+        return (new ConfigFileParser(new AstParser()))
+            ->findNestedArrayKeyLine($filePath, $parentKey, $childKey);
     }
 
     /**
      * Parse a PHP config file that returns an array and extract top-level string key-value pairs.
      *
-     * Handles value types: String_, LNumber, DNumber, ConstFetch (true/false/null), FuncCall (env()).
-     * When a value is an env() call, isEnvCall is set to true and the default argument (if any)
-     * is captured in envDefault.
+     * @deprecated 2.8.0 Builds a throwaway parser, so a file that would not parse is
+     *                   indistinguishable from a config that defines no keys. Use
+     *                   ConfigFileParser::parseArray() with a parser you keep.
      *
-     * An empty array is returned both for a config that defines no string keys and for a
-     * file that would not parse. Pass $parser to tell the two apart: the failure is recorded
-     * on the parser you supply, so $parser->hasFailure($filePath) answers which happened.
-     *
-     * @param  AstParser|null  $parser  The parser to record any failure on. Defaults to a
-     *                                   throwaway one, whose log nobody can read -- which is
-     *                                   the whole reason this parameter exists. Optional so
-     *                                   existing callers keep working untouched.
      * @return array<string, array{value: mixed, line: int, isEnvCall: bool, envDefault: mixed, envHasDefault: bool}>
      */
-    public static function parseConfigArray(string $filePath, ?AstParser $parser = null): array
+    public static function parseConfigArray(string $filePath): array
     {
-        $ast = ($parser ?? new AstParser())->parseFile($filePath);
-
-        if ($ast === []) {
-            return [];
-        }
-
-        $nodeFinder = new NodeFinder();
-
-        /** @var Return_|null $returnNode */
-        $returnNode = $nodeFinder->findFirstInstanceOf($ast, Return_::class);
-
-        if (! $returnNode instanceof Return_ || ! $returnNode->expr instanceof Array_) {
-            return [];
-        }
-
-        $result = [];
-
-        foreach ($returnNode->expr->items as $item) {
-            if (! $item->key instanceof Node\Scalar\String_) {
-                continue;
-            }
-
-            $key = $item->key->value;
-            $line = $item->getStartLine();
-            $isEnvCall = false;
-            $envDefault = null;
-            $envHasDefault = false;
-            $value = self::extractNodeValue($item->value);
-
-            if ($item->value instanceof FuncCall
-                && $item->value->name instanceof Name
-                && $item->value->name->toString() === 'env'
-            ) {
-                $isEnvCall = true;
-                $value = null;
-
-                if (isset($item->value->args[1])) {
-                    $arg = $item->value->args[1];
-                    if ($arg instanceof \PhpParser\Node\Arg) {
-                        $envHasDefault = true;
-                        $envDefault = self::extractNodeValue($arg->value);
-                    }
-                }
-            }
-
-            $result[$key] = [
-                'value' => $value,
-                'line' => $line,
-                'isEnvCall' => $isEnvCall,
-                'envDefault' => $envDefault,
-                'envHasDefault' => $envHasDefault,
-            ];
-        }
-
-        return $result;
-    }
-
-    /**
-     * Extract a typed PHP value from an AST node.
-     *
-     * Returns actual PHP scalars (string, int, float, bool, null) for simple
-     * literal nodes. Returns null for complex expressions.
-     */
-    private static function extractNodeValue(Node $node): mixed
-    {
-        if ($node instanceof Node\Scalar\String_) {
-            return $node->value;
-        }
-
-        if ($node instanceof Node\Scalar\LNumber || $node instanceof Node\Scalar\DNumber) {
-            return $node->value;
-        }
-
-        if ($node instanceof ConstFetch) {
-            return match (strtolower($node->name->toString())) {
-                'true' => true,
-                'false' => false,
-                'null' => null,
-                default => $node->name->toString(),
-            };
-        }
-
-        return null;
+        return (new ConfigFileParser(new AstParser()))->parseArray($filePath);
     }
 }

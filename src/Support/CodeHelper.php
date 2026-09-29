@@ -84,6 +84,27 @@ class CodeHelper
     }
 
     /**
+     * Extract the namespace a file declares, or null when it declares none.
+     *
+     * Deliberately stricter than FileParser::extractNamespace(), which matches everything up to
+     * the semicolon: on a line like `// change namespace to Foo;` that pattern yields "to Foo",
+     * whereas requiring namespace-legal characters skips the comment and finds the real
+     * declaration further down. The two are not interchangeable -- swapping this for that one
+     * is a silent regression, not a simplification.
+     *
+     * Takes code rather than a path, following the rest of this class, so a caller that already
+     * has the file contents in hand does not read it a second time.
+     */
+    public static function extractNamespace(string $code): ?string
+    {
+        if (preg_match('/namespace\s+([a-zA-Z0-9_\\\\]+)\s*;/', $code, $matches) === 1) {
+            return $matches[1];
+        }
+
+        return null;
+    }
+
+    /**
      * Extract string literals from code.
      *
      * @return array<string>
