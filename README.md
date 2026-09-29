@@ -325,11 +325,15 @@ which is the behaviour this section exists to replace.
 Both classes take a `RecordingParserInterface`, not an `AstParser`, so you can pass the parser
 your application already holds — including one resolved from a container.
 
-Two things worth knowing:
+Three things worth knowing:
 
-- **`isConfigured()` reports failures only partially, by design.** A file is parsed only once it
-  contains both `extends` and `PanelProvider`. A provider broken badly enough to lose either
-  string is rejected before the parser sees it, and leaves no record.
+- **`isConfigured()` recovers a provider that will not parse.** A file the parser could not read
+  has its class name taken straight out of the source, so a broken provider does not silently
+  become "no Filament here". The failure record stands and the path is added to `recoveries()`,
+  so `true` with a non-empty `recoveries()` means "configured, and one of those files is broken".
+- **It reports failures only partially, by design.** A file is parsed only once it contains both
+  `extends` and `PanelProvider`. A provider broken badly enough to lose either string is rejected
+  before the parser sees it, and leaves no record.
 - **A parser you keep, keeps what it read.** `AstParser` caches each file's AST, so a parser
   threaded through a whole run holds every AST that run touched. That is the point — it is what
   makes the log readable — but it is also memory. `clearCache()` drops the ASTs, and

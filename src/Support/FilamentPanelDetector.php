@@ -10,16 +10,24 @@ use ShieldCI\AnalyzersCore\Contracts\RecordingParserInterface;
 /**
  * Whether an application has Filament installed, a panel provider written, and it registered.
  *
- * All three have to hold, and false says only "not all three". A provider that would not parse
- * lands on the same false as an application that never had Filament, which is why the parser is
- * a constructor dependency rather than a trailing argument: after the call, the parser you
- * passed distinguishes them.
+ * All three have to hold, and false says only "not all three". A provider that does not parse is
+ * not one of the three: its class name is read straight out of the source instead, because
+ * reporting "no panel provider" for an application that plainly has one skips every check gated
+ * on this, on a panel that may be unprotected.
+ *
+ * The verdict is recovered that way, not the file, which is why the parser is a constructor
+ * dependency rather than a trailing argument: after the call, the parser you passed says how the
+ * answer was reached.
  *
  *     $parser = new AstParser();
  *
- *     if (! (new FilamentPanelDetector($parser))->isConfigured($basePath)) {
- *         $broken = $parser->failures();   // empty => genuinely not configured
- *     }
+ *     $configured = (new FilamentPanelDetector($parser))->isConfigured($basePath);
+ *
+ *     $parser->failures();     // empty => every provider file was read
+ *     $parser->recoveries();   // non-empty => a provider was identified by regex, not by AST
+ *
+ * So true with a non-empty recoveries() means "configured, and one of those files is broken" --
+ * worth reporting on its own, and not something the verdict alone can say.
  *
  * That visibility is partial by design and the limit is worth stating plainly: a file is only
  * parsed once it contains both 'extends' and 'PanelProvider', so a provider broken badly enough
@@ -122,26 +130,52 @@ final class FilamentPanelDetector
                     $extendsName === 'Filament\\Panel\\PanelProvider' ||
                     $extendsName === '\\Filament\\Panel\\PanelProvider') {
 
+                    // An error-recovering parser rebuilds what it can, drops the broken region
+                    // and logs the file anyway, so a usable class here may have come out of a
+                    // file that would not parse. That is a recovery too. A no-op otherwise.
+                    $this->parser->recordRecovery($filePath);
+
                     return self::qualify(CodeHelper::extractNamespace($content), $class->name->name);
                 }
             }
 
-            return null;
+            // Nothing recorded against the file: "no panel provider here" is a real answer, and
+            // the recovery below must not run over every ordinary file in app/Providers. Ask the
+            // log rather than the AST -- an empty file parses successfully to no statements and
+            // records nothing, so an empty AST does not mean the file went unread.
+            if (! $this->parser->hasFailure($filePath)) {
+                return null;
+            }
         } catch (\Throwable) {
             // AstParser records rather than throws, so this is unreachable through it. The
-            // parameter is an interface, though, and a consumer's own implementation may throw
-            // -- at which point a best-effort regex beats reporting "no panel provider" for an
-            // application that plainly has one.
-            if (preg_match('/extends\s+(?:\\\\?Filament\\\\Panel\\\\)?PanelProvider/', $content) !== 1) {
-                return null;
-            }
-
-            if (preg_match('/class\s+(\w+)\s+extends/', $content, $matches) !== 1) {
-                return null;
-            }
-
-            return self::qualify(CodeHelper::extractNamespace($content), $matches[1]);
+            // parameter is an interface, though, and a consumer's own implementation may throw --
+            // which lands on the same recovery as a recorded failure.
         }
+
+        return $this->recoverPanelProviderFromSource($filePath, $content);
+    }
+
+    /**
+     * Read a panel provider's class name straight out of the source, for a file the parser could
+     * not turn into one.
+     *
+     * Best effort, and better than the alternative: reporting "no panel provider" for an
+     * application that plainly has one skips every check gated on it, on a panel that may be
+     * unprotected. The match is anchored to the class that extends PanelProvider rather than to
+     * the first class in the file that extends anything, so a file holding both names the right
+     * one. An anonymous class has no name to capture and is given up on.
+     */
+    private function recoverPanelProviderFromSource(string $filePath, string $content): ?string
+    {
+        if (preg_match('/class\s+(\w+)\s+extends\s+(?:\\\\?Filament\\\\Panel\\\\)?PanelProvider\b/', $content, $matches) !== 1) {
+            return null;
+        }
+
+        // The verdict is recovered, not the file: the failure record stands, and this says the
+        // class name came from a regex rather than an AST.
+        $this->parser->recordRecovery($filePath);
+
+        return self::qualify(CodeHelper::extractNamespace($content), $matches[1]);
     }
 
     /**

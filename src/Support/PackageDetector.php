@@ -113,9 +113,10 @@ class PackageDetector
     /**
      * Check if Filament is configured with panel providers.
      *
-     * @deprecated 2.8.0 Builds a throwaway parser, so an application whose panel provider
-     *                   would not parse is indistinguishable from one without Filament. Use
-     *                   FilamentPanelDetector::isConfigured() with a parser you keep.
+     * @deprecated 2.8.0 Builds a throwaway parser and drops it, so the verdict arrives with no
+     *                   way to ask whether a provider file failed to parse and had its class
+     *                   name recovered from source. Use FilamentPanelDetector::isConfigured()
+     *                   with a parser you keep, then read failures() and recoveries().
      *
      * @param  string  $basePath  Application base path
      * @return bool True if Filament is installed, configured, and registered

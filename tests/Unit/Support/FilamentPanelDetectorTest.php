@@ -443,6 +443,10 @@ PHP;
      * cheap str_contains() gate rejects the file before any parsing otherwise, and a broken
      * file that fails that gate is never seen by the parser at all. Failure visibility here
      * is therefore partial by design -- do not read failures() as exhaustive for this method.
+     *
+     * The verdict below does not turn on the parse. A provider that does not parse still has
+     * its class name recovered from the source; this one is unconfigured because nothing
+     * registers it, and the recovery is recorded all the same.
      */
     public function test_is_filament_configured_records_a_broken_provider_on_an_injected_parser(): void
     {
@@ -467,10 +471,14 @@ PHP);
 
         $parser = new AstParser();
 
+        // False because nothing registers it, not because it would not parse: the class name is
+        // recovered from the source either way. Register it and this is true -- see
+        // test_recovers_a_registered_panel_provider_that_does_not_parse().
         $this->assertFalse((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
 
         $this->assertTrue($parser->hasFailure($providerFile));
         $this->assertSame(ParseFailureCause::SyntaxError, $parser->failures()[0]->cause);
+        $this->assertSame([$providerFile], $parser->recoveries());
     }
 
     /**
@@ -646,4 +654,162 @@ PHP);
         $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
     }
 
+    /**
+     * The bug behind #76, stated as behaviour: an application that has Filament, has written a
+     * panel provider, and has registered it is configured -- and stays configured when that
+     * provider stops parsing. Reporting false here is the same answer given for an application
+     * that never had Filament, so every check gated on it is skipped on a panel that may be
+     * unprotected.
+     *
+     * The verdict is recovered, not the file. The failure record stands, and recoveries() says
+     * the class name came from a regex rather than an AST, so a reporter can tell the two apart.
+     */
+    public function test_recovers_a_registered_panel_provider_that_does_not_parse(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        $providerFile = $filamentDir.'/AdminPanelProvider.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Filament\Panel\PanelProvider;
+
+class AdminPanelProvider extends PanelProvider
+{
+    public function panel(
+}
+PHP);
+
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+        $parser = new AstParser();
+
+        $this->assertTrue((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+
+        $this->assertTrue($parser->hasFailure($providerFile));
+        $this->assertSame([$providerFile], $parser->recoveries());
+        $this->assertSame([$providerFile], array_column($parser->failures(), 'path'));
+    }
+
+    /**
+     * The fallback is gated on a recorded failure, not on an empty AST. A file that parses
+     * cleanly and simply is not a panel provider must not reach the regex -- gate on the AST
+     * instead and every empty file in app/Providers gets one, because an empty file parses
+     * successfully to no statements and records nothing.
+     */
+    public function test_does_not_run_the_fallback_over_a_file_that_parsed(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $providersDir = $this->testDir.'/app/Providers';
+        mkdir($providersDir, 0755, true);
+
+        // Trips the cheap str_contains() gate on both words, parses fine, is not a panel provider.
+        file_put_contents($providersDir.'/AppServiceProvider.php', <<<'PHP'
+<?php
+
+namespace App\Providers;
+
+use Illuminate\Support\ServiceProvider;
+
+// Nothing to do with PanelProvider, despite the word appearing here.
+class AppServiceProvider extends ServiceProvider
+{
+}
+PHP);
+
+        $parser = new AstParser();
+
+        $this->assertFalse((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+        $this->assertSame([], $parser->failures());
+        $this->assertSame([], $parser->recoveries());
+    }
+
+    /**
+     * The recovery names the class that extends PanelProvider, not merely the first class in the
+     * file that extends anything. Both live here, the wrong one first, and only the anchored
+     * match tells them apart.
+     */
+    public function test_the_fallback_names_the_class_that_actually_extends_panel_provider(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $providersDir = $this->testDir.'/app/Providers';
+        mkdir($providersDir, 0755, true);
+
+        $providerFile = $providersDir.'/Panels.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers;
+
+use Filament\Panel\PanelProvider;
+use Illuminate\Support\ServiceProvider;
+
+class SupportServiceProvider extends ServiceProvider
+{
+}
+
+class AdminPanelProvider extends PanelProvider
+{
+    public function panel(
+}
+PHP);
+
+        $this->registerProviderInBootstrap('App\\Providers\\AdminPanelProvider');
+
+        $parser = new AstParser();
+
+        $this->assertTrue((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+        $this->assertSame([$providerFile], $parser->recoveries());
+    }
+
+    /**
+     * An error-recovering parser rebuilds what it can and logs the file anyway, so it can hand
+     * back a usable class from a file it also reported as a failure. That AST is better evidence
+     * than a regex and is used as-is -- but it came out of a file that would not parse, so it is
+     * still a recovery and the log has to say so.
+     *
+     * The two paths would otherwise be indistinguishable, since both end in recordRecovery(). So
+     * the class the parser rebuilt is deliberately named differently from the one the regex would
+     * read off the file, and only the rebuilt name is registered: true is reachable only if the
+     * AST won.
+     */
+    public function test_records_a_recovery_when_the_parser_supplies_a_partial_ast(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        $providerFile = $filamentDir.'/AdminPanelProvider.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Filament\Panel\PanelProvider;
+
+class RegexWouldSayThis extends PanelProvider
+{
+    public function panel(
+}
+PHP);
+
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AstSaysThis');
+
+        // What an error-recovering parser returns: the class it rebuilt, plus a logged failure.
+        // Unwrapped by the namespace so it is a top-level node, which is all the fake filters.
+        $rebuilt = (new AstParser())->parseCode("<?php\nclass AstSaysThis extends PanelProvider {}\n");
+
+        $parser = new FakeRecordingParser(null, $rebuilt, [$providerFile]);
+
+        $this->assertTrue((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+        $this->assertSame([$providerFile], $parser->recoveries());
+    }
 }
