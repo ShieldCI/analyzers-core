@@ -73,6 +73,55 @@ class ParserCompatibilityTest extends TestCase
         $this->assertSame('9.0', $compatibility->runtimeVersion());
     }
 
+    /**
+     * A real PHP_VERSION_ID carries the patch, and issue #74 asked for exactly that, so this is
+     * the argument a caller is most likely to hand over. Without normalisation 80500 vs 80503
+     * is a mismatch, and both sides render as "8.5", so the report would be unreadable as well
+     * as wrong.
+     */
+    public function testDiscardsThePatchComponentOfARealPhpVersionId(): void
+    {
+        $compatibility = new ParserCompatibility(80500, 80503);
+
+        $this->assertSame(80500, $compatibility->runtimeVersionId);
+        $this->assertTrue($compatibility->isSupported());
+    }
+
+    public function testDiscardsThePatchComponentOnBothSides(): void
+    {
+        $compatibility = new ParserCompatibility(80417, 80426);
+
+        $this->assertSame(80400, $compatibility->parserVersionId);
+        $this->assertSame(80400, $compatibility->runtimeVersionId);
+        $this->assertSame('8.4', $compatibility->parserVersion());
+    }
+
+    /**
+     * Normalising must not borrow from the minor once it reaches two digits: 81003 is PHP
+     * 8.10.3 and has to land on 81000, not on 81000's neighbour via a fixed-offset truncation.
+     */
+    public function testDiscardsThePatchComponentOfADoubleDigitMinor(): void
+    {
+        $compatibility = new ParserCompatibility(81003, 81000);
+
+        $this->assertSame(81000, $compatibility->parserVersionId);
+        $this->assertSame('8.10', $compatibility->parserVersion());
+        $this->assertTrue($compatibility->isSupported());
+    }
+
+    /**
+     * A genuine mismatch must survive normalisation -- discarding the patch must not round a
+     * real version gap away.
+     */
+    public function testAGenuineMismatchSurvivesNormalisation(): void
+    {
+        $compatibility = new ParserCompatibility(80417, 80503);
+
+        $this->assertFalse($compatibility->isSupported());
+        $this->assertSame('8.4', $compatibility->parserVersion());
+        $this->assertSame('8.5', $compatibility->runtimeVersion());
+    }
+
     public function testIsImmutable(): void
     {
         $compatibility = new ParserCompatibility(80500, 80500);

@@ -30,22 +30,44 @@ namespace ShieldCI\AnalyzersCore\ValueObjects;
  */
 final class ParserCompatibility
 {
+    /** The newest PHP the installed parser understands, patch component discarded. */
+    public readonly int $parserVersionId;
+
+    /** The PHP actually executing, patch component discarded. */
+    public readonly int $runtimeVersionId;
+
     /**
-     * Both ids are in PHP_VERSION_ID form (major * 10000 + minor * 100).
+     * Both ids are in PHP_VERSION_ID form (major * 10000 + minor * 100), patch always zero.
      *
-     * The patch component is always zero. PhpVersion::fromComponents() is the only way either
-     * id is built, and both getNewestSupported() and getHostVersion() feed it a major and a
-     * minor only -- so PHP 8.4.26 arrives here as 80400. That is load-bearing rather than
-     * incidental: were the runtime id a true PHP_VERSION_ID, 80426 would compare as newer
-     * than a parser's 80400 and every patch release would report a false mismatch.
+     * That is load-bearing rather than incidental, and it is enforced here rather than merely
+     * expected of callers. A true PHP_VERSION_ID carries the patch: PHP 8.4.26 is 80426, which
+     * compares as newer than a parser's 80400, so every patch release would report a false
+     * mismatch and render as "php-parser understands 8.4, but this is running on 8.4".
+     *
+     * AstParser::compatibility() cannot trip that -- PhpVersion::fromComponents() feeds it a
+     * major and a minor only -- but this is public API, and issue #74 asked for PHP_VERSION_ID
+     * by name, so it is the first thing a caller building this object by hand reaches for.
+     * Normalising costs one intdiv and removes the whole class of bug.
      *
      * @param  int  $parserVersionId  The newest PHP the installed parser understands.
      * @param  int  $runtimeVersionId  The PHP actually executing.
      */
-    public function __construct(
-        public readonly int $parserVersionId,
-        public readonly int $runtimeVersionId,
-    ) {
+    public function __construct(int $parserVersionId, int $runtimeVersionId)
+    {
+        $this->parserVersionId = self::discardPatch($parserVersionId);
+        $this->runtimeVersionId = self::discardPatch($runtimeVersionId);
+    }
+
+    /**
+     * Drop the patch component of a PHP_VERSION_ID, leaving major and minor.
+     *
+     * Arithmetic rather than a string operation for the same reason render() is: the minor
+     * occupies two digits once it reaches ten, so 81003 (PHP 8.10.3) must become 81000 and
+     * not 81003 truncated at some fixed offset.
+     */
+    private static function discardPatch(int $versionId): int
+    {
+        return intdiv($versionId, 100) * 100;
     }
 
     /**
@@ -56,6 +78,15 @@ final class ParserCompatibility
      * understands syntax this PHP would reject, which costs nothing, because a file using that
      * syntax is rejected by the runtime's own second opinion in AstParser::classify() and
      * reported as the genuine syntax error it is for this user.
+     *
+     * Necessary but not sufficient, and the gap is worth naming. php-parser documents
+     * getNewestSupported() as "the newest PHP version supported by this library. Support for
+     * this version may be partial, if it is still under development." So while a release is
+     * landing support for the PHP it claims, a runtime on that version reads as level here and
+     * answers true, and files using the parts not yet implemented still become ParseFailure
+     * with cause UnsupportedSyntax. This catches a parser that is behind by a whole version,
+     * which is the #72 condition and the one no other signal in the package can see. It does
+     * not catch one that is nominally level and incomplete; nothing available to us can.
      */
     public function isSupported(): bool
     {
