@@ -664,18 +664,41 @@ PHP;
     }
 
     /**
-     * compatibility() describes the parser the package would build for itself, not the
-     * one any particular instance holds. Injecting an older parser is how a caller
-     * deliberately exercises UnsupportedSyntax, so it must not register as a broken
-     * toolchain -- otherwise every UnsupportedSyntax test here would start reporting one.
+     * compatibility() describes the parser the package would build for itself, not the one any
+     * particular instance holds. Injecting an older parser is how a caller deliberately
+     * exercises UnsupportedSyntax, so it must not register as a broken toolchain -- otherwise
+     * every UnsupportedSyntax test here would start reporting one.
+     *
+     * Asserted structurally rather than behaviourally, and the distinction matters. Building an
+     * AstParser with a pinned parser and then asserting compatibility() is unchanged proves
+     * nothing: the method is static and reads no instance state, so no constructed object could
+     * reach it whatever it held, and the assertion would be a copy of the one above. Staticness
+     * IS the property, so pin staticness. Make this method non-static and consult $this->parser
+     * and this test fails, which is exactly when it should.
+     */
+    public function testCompatibilityIsStaticSoNoInstanceCanColourIt(): void
+    {
+        $this->assertTrue(
+            (new \ReflectionMethod(AstParser::class, 'compatibility'))->isStatic()
+        );
+    }
+
+    /**
+     * The behavioural half of the same guarantee: a pinned parser is a deliberate choice, and
+     * the parser it pins must not leak into the package-level verdict.
      */
     public function testCompatibilityIgnoresAParserSomebodyInjected(): void
     {
-        new AstParser((new ParserFactory())->createForVersion(PhpVersion::fromString('8.0')));
+        $pinned = new AstParser((new ParserFactory())->createForVersion(PhpVersion::fromString('8.0')));
 
+        $this->assertNotSame(
+            PhpVersion::getNewestSupported()->id,
+            PhpVersion::fromString('8.0')->id,
+            'The pinned version must differ from the default, or this test cannot fail.'
+        );
         $this->assertSame(
             PhpVersion::getNewestSupported()->id,
-            AstParser::compatibility()->parserVersionId
+            $pinned::compatibility()->parserVersionId
         );
     }
 
