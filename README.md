@@ -318,14 +318,17 @@ if ($parser->hasFailure($configPath)) {
 | `ConfigFileHelper::findNestedArrayKeyLine($path, $parent, $child)` | `(new ConfigFileParser($parser))->findNestedArrayKeyLine($path, $parent, $child)` |
 | `PackageDetector::isFilamentConfigured($basePath)` | `(new FilamentPanelDetector($parser))->isConfigured($basePath)` |
 
-The three statics still exist and still behave exactly as they did, so released callers keep
-working. They are `@deprecated` and will go in 3.0.0: each builds its own parser and drops it,
-which is the behaviour this section exists to replace.
+The three statics still exist and keep the same signatures, so released callers keep compiling.
+One of them changes its answer: `PackageDetector::isFilamentConfigured()` delegates to
+`FilamentPanelDetector`, so an application whose panel provider does not parse now comes back
+`true` where it came back `false` — the bug this release fixes, and the reason the static cannot
+tell you that is what happened. All three are `@deprecated` and will go in 3.0.0: each builds
+its own parser and drops it, which is the behaviour this section exists to replace.
 
 Both classes take a `RecordingParserInterface`, not an `AstParser`, so you can pass the parser
 your application already holds — including one resolved from a container.
 
-Three things worth knowing:
+Four things worth knowing:
 
 - **`isConfigured()` recovers a provider that will not parse.** A file the parser could not read
   has its class name taken straight out of the source, so a broken provider does not silently
@@ -333,7 +336,12 @@ Three things worth knowing:
   so `true` with a non-empty `recoveries()` means "configured, and one of those files is broken".
 - **It reports failures only partially, by design.** A file is parsed only once it contains both
   `extends` and `PanelProvider`. A provider broken badly enough to lose either string is rejected
-  before the parser sees it, and leaves no record.
+  before the parser sees it, and leaves no record. A parser that throws rather than records
+  leaves none either — nothing reaches its failure log, so there is nothing for `recordRecovery()`
+  to attach to. `AstParser` records, so this only affects an implementation of your own.
+- **The recovery reads code, not comments.** Comments and string literals are stripped before the
+  class name is matched, so a commented-out provider or one quoted in a generator template is not
+  mistaken for a live declaration.
 - **A parser you keep, keeps what it read.** `AstParser` caches each file's AST, so a parser
   threaded through a whole run holds every AST that run touched. That is the point — it is what
   makes the log readable — but it is also memory. `clearCache()` drops the ASTs, and

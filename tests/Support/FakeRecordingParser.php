@@ -13,9 +13,10 @@ use ShieldCI\AnalyzersCore\ValueObjects\ParseFailure;
  * A RecordingParserInterface that is not an AstParser.
  *
  * Three jobs. It proves the helpers depend on the contract rather than the concrete class -- if
- * one of them reaches for AstParser directly, a test using this fails. It can be told to
- * throw, which AstParser never does (it records instead), so it is the only way to reach the
- * defensive fallbacks a third-party implementation makes possible. And it can be told to report
+ * one of them reaches for AstParser directly, a test using this fails. It can be told to throw
+ * -- from the parse or from its bookkeeping -- which AstParser never does (it records instead),
+ * so it is the only way to reach the defensive fallbacks a third-party implementation makes
+ * possible. And it can be told to report
  * a failure while still returning an AST, which is the error-recovering parser AstParser is not:
  * a real one rebuilds what it can, drops the broken region, and logs the file all the same.
  */
@@ -30,11 +31,15 @@ final class FakeRecordingParser implements RecordingParserInterface
     /**
      * @param  array<Node>  $ast  The AST to hand back when not throwing.
      * @param  list<string>  $failingPaths  Paths this parser reports a recorded failure for.
+     * @param  \Throwable|null  $throwOnRecord  Thrown from recordRecovery(), for the consumer
+     *                                          implementation whose bookkeeping breaks rather
+     *                                          than its parse.
      */
     public function __construct(
         private readonly ?\Throwable $throwOnParse = null,
         private readonly array $ast = [],
-        private readonly array $failingPaths = [],
+        private array $failingPaths = [],
+        private readonly ?\Throwable $throwOnRecord = null,
     ) {
     }
 
@@ -128,11 +133,19 @@ final class FakeRecordingParser implements RecordingParserInterface
 
     public function resetFailures(): void
     {
+        // Both logs, as the contract says: recoveries() is defined as a subset of failures(),
+        // so clearing one and keeping the other models a state no conforming parser can reach
+        // and would let a test assert against it.
+        $this->failingPaths = [];
         $this->recoveries = [];
     }
 
     public function recordRecovery(string $path): bool
     {
+        if ($this->throwOnRecord !== null) {
+            throw $this->throwOnRecord;
+        }
+
         if (! $this->hasFailure($path)) {
             return false;
         }
