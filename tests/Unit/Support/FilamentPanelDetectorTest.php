@@ -830,6 +830,46 @@ PHP);
     }
 
     /**
+     * #78: a second run on a shared parser. The orchestrator resets the failure log between
+     * runs but need not drain the AST cache, and the fallback is gated on hasFailure() -- so
+     * a cached empty AST from the first run would silently switch recovery off in the second.
+     */
+    public function test_recovers_a_broken_panel_provider_again_after_the_failure_log_is_reset(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        $providerFile = $filamentDir.'/AdminPanelProvider.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Filament\Panel\PanelProvider;
+
+class AdminPanelProvider extends PanelProvider
+{
+    public function panel(
+}
+PHP);
+
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+        $parser = new AstParser();
+        $detector = new FilamentPanelDetector($parser);
+
+        $this->assertTrue($detector->isConfigured($this->testDir));
+
+        $parser->resetFailures();
+
+        $this->assertTrue($detector->isConfigured($this->testDir));
+        $this->assertTrue($parser->hasFailure($providerFile));
+        $this->assertSame([$providerFile], $parser->recoveries());
+    }
+
+    /**
      * The fallback is gated on a recorded failure, not on an empty AST. A file that parses
      * cleanly and simply is not a panel provider must not reach the regex: "no panel provider
      * here" is a real answer and the AST is the authority on it. Gate on the AST instead and

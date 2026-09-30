@@ -937,6 +937,67 @@ PHP;
         $this->assertCount(1, $this->parser->failures());
     }
 
+    public function testReparsingAfterResetFailuresRecordsTheFailureAgain(): void
+    {
+        // #78: the reverse of the test above. Resetting the log must not leave the cache
+        // holding a failed parse, or the re-parse would return the same empty AST while
+        // recording nothing - hasFailure() false for a file that still does not parse.
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, "<?php\nclass B\n{\n    public function i(\n}\n");
+
+        $this->parser->parseFile($file);
+        $this->parser->resetFailures();
+
+        $ast = $this->parser->parseFile($file);
+
+        $this->assertSame([], $ast);
+        $this->assertTrue($this->parser->hasFailure($file));
+        $this->assertCount(1, $this->parser->failures());
+    }
+
+    public function testRecoveryCanBeRecordedAfterResetFailuresWithoutClearCache(): void
+    {
+        // What a hasFailure()-gated fallback does on a second run in the same process.
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, "<?php\nclass B\n{\n    public function i(\n}\n");
+
+        $this->parser->parseFile($file);
+        $this->parser->resetFailures();
+        $this->parser->parseFile($file);
+
+        $this->assertTrue($this->parser->recordRecovery($file));
+        $this->assertSame([$file], $this->parser->recoveries());
+    }
+
+    public function testAParsedFileIsStillServedFromTheCacheAfterResetFailures(): void
+    {
+        // Only failed parses skip the cache: a file that parsed returns the same nodes
+        // and records nothing, however the log was reset in between.
+        $file = $this->testDir . '/Good.php';
+        file_put_contents($file, '<?php class Good {}');
+
+        $first = $this->parser->parseFile($file);
+        $this->parser->resetFailures();
+        $second = $this->parser->parseFile($file);
+
+        $this->assertNotEmpty($first);
+        $this->assertSame($first, $second);
+        $this->assertSame([], $this->parser->failures());
+    }
+
+    public function testAnEmptyFileParsedRepeatedlyRecordsNothing(): void
+    {
+        // An empty AST is not cached, so an empty file is parsed afresh each time. That
+        // parse succeeds, and must keep being told apart from a failure.
+        $file = $this->testDir . '/Empty.php';
+        file_put_contents($file, "<?php\n");
+
+        $this->assertSame([], $this->parser->parseFile($file));
+        $this->assertSame([], $this->parser->parseFile($file));
+        $this->assertFalse($this->parser->hasFailure($file));
+        $this->assertSame([], $this->parser->failures());
+    }
+
     public function testTranslatesTheReportedLineWhenATranslatorIsGiven(): void
     {
         // A caller parsing generated code (a compiled template) knows the real source
