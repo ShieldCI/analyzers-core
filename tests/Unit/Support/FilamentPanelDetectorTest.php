@@ -15,6 +15,24 @@ class FilamentPanelDetectorTest extends TestCase
 {
     use CreatesTestApplication;
 
+    /**
+     * Trips the cheap str_contains() gate on both 'extends' and 'PanelProvider', parses fine,
+     * and is not a panel provider. Shared so the tests that differ only in which parser they
+     * inject cannot drift apart in their fixture instead.
+     */
+    private const NOT_A_PANEL_PROVIDER = <<<'PHP'
+        <?php
+
+        namespace App\Providers;
+
+        use Illuminate\Support\ServiceProvider;
+
+        // Nothing to do with PanelProvider, despite the word appearing here.
+        class AppServiceProvider extends ServiceProvider
+        {
+        }
+        PHP;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -443,6 +461,10 @@ PHP;
      * cheap str_contains() gate rejects the file before any parsing otherwise, and a broken
      * file that fails that gate is never seen by the parser at all. Failure visibility here
      * is therefore partial by design -- do not read failures() as exhaustive for this method.
+     *
+     * The verdict below does not turn on the parse. A provider that does not parse still has
+     * its class name recovered from the source; this one is unconfigured because nothing
+     * registers it, and the recovery is recorded all the same.
      */
     public function test_is_filament_configured_records_a_broken_provider_on_an_injected_parser(): void
     {
@@ -467,10 +489,14 @@ PHP);
 
         $parser = new AstParser();
 
+        // False because nothing registers it, not because it would not parse: the class name is
+        // recovered from the source either way. Register it and this is true -- see
+        // test_recovers_a_registered_panel_provider_that_does_not_parse().
         $this->assertFalse((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
 
         $this->assertTrue($parser->hasFailure($providerFile));
         $this->assertSame(ParseFailureCause::SyntaxError, $parser->failures()[0]->cause);
+        $this->assertSame([$providerFile], $parser->recoveries());
     }
 
     /**
@@ -536,9 +562,136 @@ PHP);
 
         $this->registerProviderInBootstrap('App\Providers\Filament\AdminPanelProvider');
 
-        $detector = new FilamentPanelDetector(new FakeRecordingParser(new \RuntimeException('parser exploded')));
+        $parser = new FakeRecordingParser(new \RuntimeException('parser exploded'));
 
-        $this->assertTrue($detector->isConfigured($this->testDir));
+        $this->assertTrue((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+
+        // The limit of the docblock's promise that the parser says how the answer was reached,
+        // asserted rather than left to be discovered. A parser that throws never recorded a
+        // failure, and recordRecovery() is defined as a no-op without one, so this verdict comes
+        // out of a regex and says so nowhere. RecordingParserInterface has no recordFailure()
+        // for the detector to call, so closing this means widening that contract.
+        $this->assertSame([], $parser->failures());
+        $this->assertSame([], $parser->recoveries());
+    }
+
+    /**
+     * Bookkeeping is a courtesy and must not cost the caller its verdict. recordRecovery() is
+     * the one parser call the detector makes after it already knows the answer, so a consumer
+     * implementation that throws there -- a container-backed log, a full disk -- has to lose the
+     * log entry, not turn isConfigured() into an exception the caller never asked to handle.
+     */
+    public function test_survives_a_parser_that_throws_when_recording_a_recovery(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        $providerFile = $filamentDir.'/AdminPanelProvider.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Filament\Panel\PanelProvider;
+
+class AdminPanelProvider extends PanelProvider
+{
+}
+PHP);
+
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+        // Parses fine and is on the failure log, so the AST path reaches recordRecovery().
+        $rebuilt = (new AstParser())->parseCode("<?php\nclass AdminPanelProvider extends PanelProvider {}\n");
+
+        $parser = new FakeRecordingParser(
+            null,
+            $rebuilt,
+            [$providerFile],
+            new \RuntimeException('record exploded'),
+        );
+
+        $this->assertTrue((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+    }
+
+    /**
+     * A commented-out provider is not a provider. The regex runs on a file nobody can parse --
+     * that is the whole premise -- so it is the one match in the package with no syntax tree
+     * behind it to tell a live declaration from a dead one. Left on raw source it reports a
+     * class that does not exist, and the caller cannot tell that verdict from a real one.
+     */
+    public function test_the_fallback_ignores_a_provider_that_only_appears_in_a_comment(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        $providerFile = $filamentDir.'/AppServiceProvider.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Illuminate\Support\ServiceProvider;
+
+// class AdminPanelProvider extends PanelProvider (removed in v3)
+class AppServiceProvider extends ServiceProvider
+{
+    public function register(
+}
+PHP);
+
+        // Still listed, which is what makes the false positive reachable end to end: recover a
+        // class name from the comment and it matches a registration that means nothing.
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+        $parser = new AstParser();
+
+        $this->assertFalse((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+
+        // The file genuinely would not parse, so the failure record stands. Nothing was
+        // recovered from it, and the log has to keep those two apart.
+        $this->assertTrue($parser->hasFailure($providerFile));
+        $this->assertSame([], $parser->recoveries());
+    }
+
+    /**
+     * The same hole one step along: a provider declaration inside a string literal -- a code
+     * generator's template, a fixture, a docblock example lifted into a heredoc -- reads to a
+     * regex exactly like the real thing.
+     */
+    public function test_the_fallback_ignores_a_provider_inside_a_string_literal(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        $providerFile = $filamentDir.'/PanelStubs.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Illuminate\Support\ServiceProvider;
+
+class PanelStubs extends ServiceProvider
+{
+    public const STUB = 'class AdminPanelProvider extends PanelProvider {}';
+
+    public function register(
+}
+PHP);
+
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+        $parser = new AstParser();
+
+        $this->assertFalse((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+        $this->assertSame([], $parser->recoveries());
     }
 
     /**
@@ -552,19 +705,7 @@ PHP);
         $providersDir = $this->testDir.'/app/Providers';
         mkdir($providersDir, 0755, true);
 
-        // Contains both 'extends' and 'PanelProvider', so the cheap gate lets it through.
-        file_put_contents($providersDir.'/AppServiceProvider.php', <<<'PHP'
-<?php
-
-namespace App\Providers;
-
-use Illuminate\Support\ServiceProvider;
-
-// Nothing to do with PanelProvider, despite the word appearing here.
-class AppServiceProvider extends ServiceProvider
-{
-}
-PHP);
+        file_put_contents($providersDir.'/AppServiceProvider.php', self::NOT_A_PANEL_PROVIDER);
 
         $detector = new FilamentPanelDetector(new FakeRecordingParser(new \RuntimeException('parser exploded')));
 
@@ -646,4 +787,151 @@ PHP);
         $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
     }
 
+    /**
+     * The bug behind #76, stated as behaviour: an application that has Filament, has written a
+     * panel provider, and has registered it is configured -- and stays configured when that
+     * provider stops parsing. Reporting false here is the same answer given for an application
+     * that never had Filament, so every check gated on it is skipped on a panel that may be
+     * unprotected.
+     *
+     * The verdict is recovered, not the file. The failure record stands, and recoveries() says
+     * the class name came from a regex rather than an AST, so a reporter can tell the two apart.
+     */
+    public function test_recovers_a_registered_panel_provider_that_does_not_parse(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        $providerFile = $filamentDir.'/AdminPanelProvider.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Filament\Panel\PanelProvider;
+
+class AdminPanelProvider extends PanelProvider
+{
+    public function panel(
+}
+PHP);
+
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+        $parser = new AstParser();
+
+        $this->assertTrue((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+
+        $this->assertTrue($parser->hasFailure($providerFile));
+        $this->assertSame([$providerFile], $parser->recoveries());
+        $this->assertSame([$providerFile], array_column($parser->failures(), 'path'));
+    }
+
+    /**
+     * The fallback is gated on a recorded failure, not on an empty AST. A file that parses
+     * cleanly and simply is not a panel provider must not reach the regex: "no panel provider
+     * here" is a real answer and the AST is the authority on it. Gate on the AST instead and
+     * the reasoning inverts into #76 itself -- a file whose statements are legitimately absent
+     * gets read as one the parser could not read.
+     */
+    public function test_does_not_run_the_fallback_over_a_file_that_parsed(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $providersDir = $this->testDir.'/app/Providers';
+        mkdir($providersDir, 0755, true);
+
+        file_put_contents($providersDir.'/AppServiceProvider.php', self::NOT_A_PANEL_PROVIDER);
+
+        $parser = new AstParser();
+
+        $this->assertFalse((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+        $this->assertSame([], $parser->failures());
+        $this->assertSame([], $parser->recoveries());
+    }
+
+    /**
+     * The recovery names the class that extends PanelProvider, not merely the first class in the
+     * file that extends anything. Both live here, the wrong one first, and only the anchored
+     * match tells them apart.
+     */
+    public function test_the_fallback_names_the_class_that_actually_extends_panel_provider(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $providersDir = $this->testDir.'/app/Providers';
+        mkdir($providersDir, 0755, true);
+
+        $providerFile = $providersDir.'/Panels.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers;
+
+use Filament\Panel\PanelProvider;
+use Illuminate\Support\ServiceProvider;
+
+class SupportServiceProvider extends ServiceProvider
+{
+}
+
+class AdminPanelProvider extends PanelProvider
+{
+    public function panel(
+}
+PHP);
+
+        $this->registerProviderInBootstrap('App\\Providers\\AdminPanelProvider');
+
+        $parser = new AstParser();
+
+        $this->assertTrue((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+        $this->assertSame([$providerFile], $parser->recoveries());
+    }
+
+    /**
+     * An error-recovering parser rebuilds what it can and logs the file anyway, so it can hand
+     * back a usable class from a file it also reported as a failure. That AST is better evidence
+     * than a regex and is used as-is -- but it came out of a file that would not parse, so it is
+     * still a recovery and the log has to say so.
+     *
+     * The two paths would otherwise be indistinguishable, since both end in recordRecovery(). So
+     * the class the parser rebuilt is deliberately named differently from the one the regex would
+     * read off the file, and only the rebuilt name is registered: true is reachable only if the
+     * AST won.
+     */
+    public function test_records_a_recovery_when_the_parser_supplies_a_partial_ast(): void
+    {
+        $this->createComposerLock(['filamentphp/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+
+        $providerFile = $filamentDir.'/AdminPanelProvider.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+use Filament\Panel\PanelProvider;
+
+class RegexWouldSayThis extends PanelProvider
+{
+    public function panel(
+}
+PHP);
+
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AstSaysThis');
+
+        // What an error-recovering parser returns: the class it rebuilt, plus a logged failure.
+        // Unwrapped by the namespace so it is a top-level node, which is all the fake filters.
+        $rebuilt = (new AstParser())->parseCode("<?php\nclass AstSaysThis extends PanelProvider {}\n");
+
+        $parser = new FakeRecordingParser(null, $rebuilt, [$providerFile]);
+
+        $this->assertTrue((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+        $this->assertSame([$providerFile], $parser->recoveries());
+    }
 }
