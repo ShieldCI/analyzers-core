@@ -987,8 +987,8 @@ PHP;
 
     public function testAnEmptyFileParsedRepeatedlyRecordsNothing(): void
     {
-        // An empty AST is not cached, so an empty file is parsed afresh each time. That
-        // parse succeeds, and must keep being told apart from a failure.
+        // An empty file parses cleanly to no statements. Whether or not it is served from
+        // the cache, it must keep being told apart from a failure.
         $file = $this->testDir . '/Empty.php';
         file_put_contents($file, "<?php\n");
 
@@ -996,6 +996,34 @@ PHP;
         $this->assertSame([], $this->parser->parseFile($file));
         $this->assertFalse($this->parser->hasFailure($file));
         $this->assertSame([], $this->parser->failures());
+    }
+
+    public function testAPartialAstRecoveredByASubclassIsNotCached(): void
+    {
+        // The cache is gated on the failure log, not on an empty AST. A subclass that falls
+        // back to its own recovery after parent::parseCode() fails hands back nodes, and a
+        // cached copy of those would hide the failure after resetFailures() just as #78 did.
+        $parser = new class () extends AstParser {
+            public int $parses = 0;
+
+            public function parseCode(string $code, ?string $origin = null, ?callable $translateLine = null): array
+            {
+                $this->parses++;
+                $ast = parent::parseCode($code, $origin, $translateLine);
+
+                return $origin !== null && $this->hasFailure($origin) ? [new Stmt\Nop()] : $ast;
+            }
+        };
+
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, "<?php\nclass B\n{\n    public function i(\n}\n");
+
+        $this->assertNotEmpty($parser->parseFile($file));
+        $parser->resetFailures();
+        $this->assertNotEmpty($parser->parseFile($file));
+
+        $this->assertSame(2, $parser->parses);
+        $this->assertTrue($parser->hasFailure($file));
     }
 
     public function testTranslatesTheReportedLineWhenATranslatorIsGiven(): void

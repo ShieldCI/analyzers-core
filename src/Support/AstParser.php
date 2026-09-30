@@ -215,9 +215,10 @@ class AstParser implements RecordingParserInterface
 
         // A failed parse is not cached, so every parse of a broken file reaches parseCode()
         // and the failure log can be rebuilt after resetFailures() without clearCache()
-        // first. An empty AST is the only thing a failure returns; the only other source
-        // of one is an empty file, which costs nothing to parse again.
-        if ($ast !== []) {
+        // first. Gated on the log rather than on an empty AST: a subclass that recovers a
+        // partial AST after parent::parseCode() fails returns nodes, and those must not be
+        // cached either, while an empty file parses cleanly and is.
+        if (! isset($this->failures[$filePath])) {
             $this->astCache[$cacheKey] = $ast;
         }
 
