@@ -262,7 +262,9 @@ The cause distinguishes who has to fix it:
 
 Each file is recorded once, however many times it is parsed. `resetFailures()` is
 deliberately separate from `clearCache()`: the AST cache is drained frequently to bound
-memory, so a log tied to it would only ever hold the most recent caller's failures.
+memory, so a log tied to it would only ever hold the most recent caller's failures. The two
+can be reset in any order: a failed parse is never cached, so after `resetFailures()` the next
+parse of a file that still does not parse records it again.
 
 A caller that recovered usable syntax from a file it could not parse can say so:
 
@@ -342,12 +344,13 @@ Four things worth knowing:
 - **The recovery reads code, not comments.** Comments and string literals are stripped before the
   class name is matched, so a commented-out provider or one quoted in a generator template is not
   mistaken for a live declaration.
-- **A parser you keep, keeps what it read.** `AstParser` caches each file's AST, so a parser
-  threaded through a whole run holds every AST that run touched. That is the point — it is what
+- **A parser you keep, keeps what it read.** `AstParser` caches the AST of each file that parsed, so a
+  parser threaded through a whole run holds every AST that run touched. That is the point — it is what
   makes the log readable — but it is also memory. `clearCache()` drops the ASTs, and
   `resetFailures()` drops the failure and recovery logs. They are separate on purpose: the cache
   is usually drained per analyzer to bound memory, while the log is run-scoped and belongs to
-  whatever orchestrates the run.
+  whatever orchestrates the run. Neither has to precede the other: a failed parse is not cached,
+  so resetting the log never hides a file that still does not parse.
 
 
 #### Is the parser older than the PHP you are running?

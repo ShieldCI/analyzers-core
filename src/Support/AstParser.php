@@ -108,6 +108,9 @@ class AstParser implements RecordingParserInterface
      * analyzer to bound memory, so a log tied to it would survive only until the next
      * analyzer started and would end up holding whatever the last one happened to hit.
      * This is run-scoped, and belongs to whatever orchestrates a run.
+     *
+     * The two can be reset in either order, or independently: a failed parse is never
+     * cached, so the next parse of a file that still does not parse records it again.
      */
     public function resetFailures(): void
     {
@@ -208,7 +211,18 @@ class AstParser implements RecordingParserInterface
             // @codeCoverageIgnoreEnd
         }
 
-        return $this->astCache[$cacheKey] = $this->parseCode($code, $filePath);
+        $ast = $this->parseCode($code, $filePath);
+
+        // A failed parse is not cached, so every parse of a broken file reaches parseCode()
+        // and the failure log can be rebuilt after resetFailures() without clearCache()
+        // first. Gated on the log rather than on an empty AST: a subclass that recovers a
+        // partial AST after parent::parseCode() fails returns nodes, and those must not be
+        // cached either, while an empty file parses cleanly and is.
+        if (! isset($this->failures[$filePath])) {
+            $this->astCache[$cacheKey] = $ast;
+        }
+
+        return $ast;
     }
 
     /**

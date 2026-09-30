@@ -47,6 +47,10 @@ interface RecordingParserInterface extends ParserInterface
      *
      * Run-scoped, and deliberately separate from any AST cache the implementation keeps: a log
      * tied to a per-analyzer cache would survive only until the next analyzer started.
+     *
+     * Separate in the other direction too: a cache must not hide a failure from a log that has
+     * since been reset. Parsing a file that still does not parse records it again, whether or
+     * not any cache was cleared first.
      */
     public function resetFailures(): void;
 
