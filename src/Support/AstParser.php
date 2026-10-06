@@ -338,10 +338,9 @@ class AstParser implements RecordingParserInterface
      * Never throws. php-parser reports two things while resolving: an import whose alias is
      * already taken (`use A\Clock; use B\Clock;`, compared case-insensitively except for
      * `use const` aliases, which are case-sensitive) and a qualified special class name such
-     * as `\self`. Both are compile errors, not parse errors, so the
-     * file has a usable AST and every other name in it can be resolved. Each is collected and
-     * dropped: a colliding import keeps its first spelling, as PHP itself would read it, and
-     * resolution carries on past it.
+     * as `\self`. Both are compile errors, not parse errors, so the file has a usable AST and
+     * every other name in it can be resolved. Each is collected and dropped: a colliding import
+     * keeps its first spelling, as PHP itself would read it, and resolution carries on past it.
      *
      * Catching a throw would not be equivalent. Traversal stops at the offending node, so every
      * name after it would be left unresolved. Nothing is written to failures() either: that log
