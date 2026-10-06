@@ -12,6 +12,20 @@ use ShieldCI\AnalyzersCore\Support\AstParser;
 
 class AstParserTest extends TestCase
 {
+    /**
+     * Parses, but PHP rejects it at compile time: the second import reuses the alias Clock.
+     */
+    private const COLLIDING_IMPORTS = <<<'PHP'
+<?php
+namespace App;
+
+use App\Support\Clock;
+use App\Legacy\Clock;
+use Illuminate\Support\Facades\Route;
+
+Route::get('/', fn () => new Clock());
+PHP;
+
     private AstParser $parser;
     private string $testDir = '';
 
@@ -563,6 +577,96 @@ PHP;
         $resolvedName = $newNode->class->getAttribute('resolvedName');
         $this->assertInstanceOf(\PhpParser\Node\Name\FullyQualified::class, $resolvedName);
         $this->assertSame('App\Models\User', $resolvedName->toString());
+    }
+
+    public function testResolveNamesKeepsFirstImportWhenAliasesCollide(): void
+    {
+        $ast = $this->parser->parseCode(self::COLLIDING_IMPORTS);
+        $resolved = $this->parser->resolveNames($ast, ['replaceNodes' => false]);
+
+        $newNodes = $this->parser->findNodes($resolved, \PhpParser\Node\Expr\New_::class);
+        $this->assertCount(1, $newNodes);
+
+        /** @var \PhpParser\Node\Expr\New_ $newNode */
+        $newNode = $newNodes[0];
+        $this->assertInstanceOf(\PhpParser\Node\Name::class, $newNode->class);
+        $this->assertNotInstanceOf(\PhpParser\Node\Name\FullyQualified::class, $newNode->class);
+        $this->assertSame('Clock', $newNode->class->toString());
+
+        $resolvedName = $newNode->class->getAttribute('resolvedName');
+        $this->assertInstanceOf(\PhpParser\Node\Name\FullyQualified::class, $resolvedName);
+        $this->assertSame('App\Support\Clock', $resolvedName->toString());
+    }
+
+    public function testResolveNamesResolvesImportsAfterACollision(): void
+    {
+        // Catching the resolver's throw and keeping the AST fails here: traversal stops
+        // at the second import, so Route is never resolved.
+        $ast = $this->parser->parseCode(self::COLLIDING_IMPORTS);
+        $resolved = $this->parser->resolveNames($ast, ['replaceNodes' => false]);
+
+        $staticCalls = $this->parser->findNodes($resolved, \PhpParser\Node\Expr\StaticCall::class);
+        $this->assertCount(1, $staticCalls);
+
+        /** @var \PhpParser\Node\Expr\StaticCall $call */
+        $call = $staticCalls[0];
+        $this->assertInstanceOf(\PhpParser\Node\Name::class, $call->class);
+
+        $resolvedName = $call->class->getAttribute('resolvedName');
+        $this->assertInstanceOf(\PhpParser\Node\Name\FullyQualified::class, $resolvedName);
+        $this->assertSame('Illuminate\Support\Facades\Route', $resolvedName->toString());
+    }
+
+    public function testResolveNamesCollisionIsCaseInsensitiveAndReplacesNodes(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace App;
+
+use A\Clock;
+use B\clock;
+
+new Clock();
+PHP;
+        $ast = $this->parser->parseCode($code);
+        $resolved = $this->parser->resolveNames($ast);
+
+        $newNodes = $this->parser->findNodes($resolved, \PhpParser\Node\Expr\New_::class);
+        $this->assertCount(1, $newNodes);
+
+        /** @var \PhpParser\Node\Expr\New_ $newNode */
+        $newNode = $newNodes[0];
+        $this->assertInstanceOf(\PhpParser\Node\Name\FullyQualified::class, $newNode->class);
+        $this->assertSame('A\Clock', $newNode->class->toString());
+    }
+
+    public function testResolveNamesDoesNotThrowOnQualifiedSpecialClassName(): void
+    {
+        // '\self' parses but does not compile, and php-parser reports it while resolving.
+        $code = <<<'PHP'
+<?php
+namespace App;
+
+use Foo\Bar;
+
+new \self();
+new Bar();
+PHP;
+        $ast = $this->parser->parseCode($code);
+        $this->assertSame([], $this->parser->failures());
+
+        $resolved = $this->parser->resolveNames($ast, ['replaceNodes' => false]);
+
+        $newNodes = $this->parser->findNodes($resolved, \PhpParser\Node\Expr\New_::class);
+        $this->assertCount(2, $newNodes);
+
+        /** @var \PhpParser\Node\Expr\New_ $barNode */
+        $barNode = $newNodes[1];
+        $this->assertInstanceOf(\PhpParser\Node\Name::class, $barNode->class);
+
+        $resolvedName = $barNode->class->getAttribute('resolvedName');
+        $this->assertInstanceOf(\PhpParser\Node\Name\FullyQualified::class, $resolvedName);
+        $this->assertSame('Foo\Bar', $resolvedName->toString());
     }
 
     public function testCollectStringLinesReturnsEmptyForCodeWithNoStrings(): void

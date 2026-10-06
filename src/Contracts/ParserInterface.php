@@ -53,6 +53,9 @@ interface ParserInterface
     /**
      * Traverse AST with NameResolver to resolve fully qualified class names.
      *
+     * Must not throw on a name that parses but would not compile, such as a second import
+     * reusing an alias: that name is ignored (the first import wins) and the rest resolves.
+     *
      * @param  array<Node>  $ast
      * @param  array<string, bool>  $options  Options passed to NameResolver
      * @return array<Node>
