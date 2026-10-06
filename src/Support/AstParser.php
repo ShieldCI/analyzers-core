@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Support;
 
-use PhpParser\{Error, Node, NodeFinder, NodeTraverser, Parser, ParserFactory, PhpVersion};
+use PhpParser\{Error, ErrorHandler, Node, NodeFinder, NodeTraverser, Parser, ParserFactory, PhpVersion};
 use PhpParser\Node\{Expr, Stmt};
 use PhpParser\NodeVisitor\NameResolver;
 use ShieldCI\AnalyzersCore\Contracts\RecordingParserInterface;
@@ -335,6 +335,17 @@ class AstParser implements RecordingParserInterface
      * After this, use `$node->getAttribute('resolvedName')` to get FQCNs
      * on Name nodes (class references, function calls, etc.).
      *
+     * Never throws. php-parser reports two things while resolving: an import whose alias is
+     * already taken (`use A\Clock; use B\Clock;`, compared case-insensitively except for
+     * `use const` aliases, which are case-sensitive) and a qualified special class name such
+     * as `\self`. Both are compile errors, not parse errors, so the file has a usable AST and
+     * every other name in it can be resolved. Each is collected and dropped: a colliding import
+     * keeps its first spelling, as PHP itself would read it, and resolution carries on past it.
+     *
+     * Catching a throw would not be equivalent. Traversal stops at the offending node, so every
+     * name after it would be left unresolved. Nothing is written to failures() either: that log
+     * is for files that produced no AST, and this one did.
+     *
      * @param  array<Node>  $ast
      * @param  array<string, bool>  $options  Options passed to NameResolver (e.g., ['replaceNodes' => false])
      * @return array<Node>
@@ -342,7 +353,7 @@ class AstParser implements RecordingParserInterface
     public function resolveNames(array $ast, array $options = []): array
     {
         $traverser = new NodeTraverser();
-        $traverser->addVisitor(new NameResolver(null, $options));
+        $traverser->addVisitor(new NameResolver(new ErrorHandler\Collecting(), $options));
 
         return $traverser->traverse($ast);
     }
