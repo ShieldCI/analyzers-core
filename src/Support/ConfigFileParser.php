@@ -92,7 +92,6 @@ final class ConfigFileParser
             $envDefault = null;
             $envHasDefault = false;
             $envDefaultIsLiteral = false;
-            [$isLiteral, $value] = self::readLiteral($item->value);
 
             // Peel the casts off first: `(bool) env(...)` is a Cast, and the env() call under it
             // is what decides the value at runtime.
@@ -104,27 +103,29 @@ final class ConfigFileParser
                 $node = $node->expr;
             }
 
+            // Function names are case-insensitive, and env(...) builds a Closure, not a call.
             if ($node instanceof FuncCall
                 && $node->name instanceof Name
-                && $node->name->toString() === 'env'
+                && strtolower($node->name->toString()) === 'env'
+                && ! $node->isFirstClassCallable()
             ) {
                 $isEnvCall = true;
                 $isLiteral = false;
                 $value = null;
+                $arg = self::envDefaultArg($node);
 
-                if (isset($node->args[1])) {
-                    $arg = $node->args[1];
-                    if ($arg instanceof Node\Arg) {
-                        $envHasDefault = true;
-                        $default = self::readLiteral($arg->value);
+                if ($arg !== null) {
+                    $envHasDefault = true;
+                    $default = self::readLiteral($arg->value);
 
-                        foreach (array_reverse($casts) as $cast) {
-                            $default = self::applyCast($cast, $default);
-                        }
-
-                        [$envDefaultIsLiteral, $envDefault] = $default;
+                    foreach (array_reverse($casts) as $cast) {
+                        $default = self::applyCast($cast, $default);
                     }
+
+                    [$envDefaultIsLiteral, $envDefault] = $default;
                 }
+            } else {
+                [$isLiteral, $value] = self::readLiteral($item->value);
             }
 
             $result[$item->key->value] = [
@@ -224,6 +225,23 @@ final class ConfigFileParser
 
             if ($item->key->value === $key) {
                 return $item->value;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The argument env() receives as its `default` parameter, or null when there is none.
+     *
+     * That is an argument named `default`, or an unnamed second one -- never just whatever sits
+     * second, because in `env(default: false, key: 'X')` that is the key.
+     */
+    private static function envDefaultArg(FuncCall $call): ?Node\Arg
+    {
+        foreach ($call->getArgs() as $position => $arg) {
+            if ($arg->name === null ? $position === 1 : $arg->name->toString() === 'default') {
+                return $arg;
             }
         }
 

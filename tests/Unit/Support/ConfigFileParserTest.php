@@ -398,6 +398,63 @@ PHP);
     }
 
     /**
+     * The default is env()'s `default` parameter, not whatever sits second: with named
+     * arguments the second argument can be the key.
+     */
+    public function test_a_named_env_default_is_read_by_name_not_position(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'reordered' => (bool) env(default: false, key: 'APP_DEBUG'),
+    'named' => env('SESSION_SAME_SITE', default: 'lax'),
+    'key_only' => env(key: 'APP_DEBUG'),
+PHP);
+
+        $this->assertTrue($result['reordered']['envHasDefault']);
+        $this->assertFalse($result['reordered']['envDefault']);
+        $this->assertTrue($result['reordered']['envDefaultIsLiteral']);
+
+        $this->assertSame('lax', $result['named']['envDefault']);
+
+        $this->assertTrue($result['key_only']['isEnvCall']);
+        $this->assertFalse($result['key_only']['envHasDefault']);
+    }
+
+    /**
+     * PHP function names are case-insensitive, so Env() and ENV() are env() calls.
+     */
+    public function test_env_is_matched_case_insensitively(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'title' => Env('APP_DEBUG', true),
+    'upper' => (bool) ENV('APP_DEBUG', false),
+    'qualified' => \env('APP_DEBUG', true),
+PHP);
+
+        foreach (['title', 'upper', 'qualified'] as $key) {
+            $this->assertTrue($result[$key]['isEnvCall'], $key);
+            $this->assertTrue($result[$key]['envHasDefault'], $key);
+        }
+
+        $this->assertTrue($result['title']['envDefault']);
+        $this->assertFalse($result['upper']['envDefault']);
+    }
+
+    /**
+     * env(...) makes a Closure; it does not call env().
+     */
+    public function test_a_first_class_callable_env_is_not_an_env_call(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'resolver' => env(...),
+PHP);
+
+        $this->assertFalse($result['resolver']['isEnvCall']);
+        $this->assertFalse($result['resolver']['envHasDefault']);
+        $this->assertFalse($result['resolver']['isLiteral']);
+        $this->assertNull($result['resolver']['value']);
+    }
+
+    /**
      * envDefault null is two readings -- a literal null default, or a default that could not
      * be read -- and envDefaultIsLiteral is what separates them.
      */
