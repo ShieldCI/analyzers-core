@@ -6,8 +6,12 @@ namespace ShieldCI\AnalyzersCore\Support;
 
 use PhpParser\Node;
 use PhpParser\Node\Expr\Array_;
+use PhpParser\Node\Expr\BinaryOp\Concat;
+use PhpParser\Node\Expr\Cast;
 use PhpParser\Node\Expr\ConstFetch;
 use PhpParser\Node\Expr\FuncCall;
+use PhpParser\Node\Expr\UnaryMinus;
+use PhpParser\Node\Expr\UnaryPlus;
 use PhpParser\Node\Name;
 use PhpParser\Node\Stmt\Return_;
 use PhpParser\NodeFinder;
@@ -52,14 +56,22 @@ final class ConfigFileParser
     /**
      * Extract top-level string key-value pairs from a config file that returns an array.
      *
-     * Handles value types: String_, LNumber, DNumber, ConstFetch (true/false/null), FuncCall
-     * (env()). When a value is an env() call, isEnvCall is set to true and the default argument
-     * (if any) is captured in envDefault.
+     * A value is read only when the file alone decides it: string, int and float literals,
+     * true/false/null, concatenation of literal strings, a sign on a literal number, and a
+     * (bool)/(int)/(float)/(string) cast of any of those. isLiteral says whether that happened.
+     * Anything else -- a constant, a class constant, __DIR__, an interpolated string, a call --
+     * gives value null with isLiteral false, so `'key' => null` (isLiteral true) and "not
+     * statically known" are different entries. A constant is never read as its own name.
+     *
+     * An env() call, also one wrapped in casts as Laravel 11+ ships `(bool) env('APP_DEBUG',
+     * false)`, sets isEnvCall and is never literal. Its default argument, with the casts
+     * applied, is read by the same rules into envDefault, and envDefaultIsLiteral separates
+     * `env('X', null)` from a default that could not be read.
      *
      * An empty array means both "defines no string keys" and "would not parse". Ask the parser
      * you constructed this with which one happened.
      *
-     * @return array<string, array{value: mixed, line: int, isEnvCall: bool, envDefault: mixed, envHasDefault: bool}>
+     * @return array<string, array{value: mixed, line: int, isEnvCall: bool, envDefault: mixed, envHasDefault: bool, isLiteral: bool, envDefaultIsLiteral: bool}>
      */
     public function parseArray(string $filePath): array
     {
@@ -76,35 +88,54 @@ final class ConfigFileParser
                 continue;
             }
 
-            $key = $item->key->value;
-            $line = $item->getStartLine();
             $isEnvCall = false;
             $envDefault = null;
             $envHasDefault = false;
-            $value = self::extractNodeValue($item->value);
+            $envDefaultIsLiteral = false;
 
-            if ($item->value instanceof FuncCall
-                && $item->value->name instanceof Name
-                && $item->value->name->toString() === 'env'
-            ) {
-                $isEnvCall = true;
-                $value = null;
+            // Peel the casts off first: `(bool) env(...)` is a Cast, and the env() call under it
+            // is what decides the value at runtime.
+            $casts = [];
+            $node = $item->value;
 
-                if (isset($item->value->args[1])) {
-                    $arg = $item->value->args[1];
-                    if ($arg instanceof Node\Arg) {
-                        $envHasDefault = true;
-                        $envDefault = self::extractNodeValue($arg->value);
-                    }
-                }
+            while ($node instanceof Cast) {
+                $casts[] = $node;
+                $node = $node->expr;
             }
 
-            $result[$key] = [
+            // Function names are case-insensitive, and env(...) builds a Closure, not a call.
+            if ($node instanceof FuncCall
+                && $node->name instanceof Name
+                && strtolower($node->name->toString()) === 'env'
+                && ! $node->isFirstClassCallable()
+            ) {
+                $isEnvCall = true;
+                $isLiteral = false;
+                $value = null;
+                $arg = self::envDefaultArg($node);
+
+                if ($arg !== null) {
+                    $envHasDefault = true;
+                    $default = self::readLiteral($arg->value);
+
+                    foreach (array_reverse($casts) as $cast) {
+                        $default = self::applyCast($cast, $default);
+                    }
+
+                    [$envDefaultIsLiteral, $envDefault] = $default;
+                }
+            } else {
+                [$isLiteral, $value] = self::readLiteral($item->value);
+            }
+
+            $result[$item->key->value] = [
                 'value' => $value,
-                'line' => $line,
+                'line' => $item->getStartLine(),
                 'isEnvCall' => $isEnvCall,
                 'envDefault' => $envDefault,
                 'envHasDefault' => $envHasDefault,
+                'isLiteral' => $isLiteral,
+                'envDefaultIsLiteral' => $envDefaultIsLiteral,
             ];
         }
 
@@ -201,30 +232,114 @@ final class ConfigFileParser
     }
 
     /**
-     * Extract a typed PHP value from an AST node.
+     * The argument env() receives as its `default` parameter, or null when there is none.
      *
-     * Returns actual PHP scalars (string, int, float, bool, null) for simple
-     * literal nodes. Returns null for complex expressions.
+     * That is an argument named `default`, or an unnamed second one -- never just whatever sits
+     * second, because in `env(default: false, key: 'X')` that is the key.
      */
-    private static function extractNodeValue(Node $node): mixed
+    private static function envDefaultArg(FuncCall $call): ?Node\Arg
     {
-        if ($node instanceof Node\Scalar\String_) {
-            return $node->value;
+        foreach ($call->getArgs() as $position => $arg) {
+            if ($arg->name === null ? $position === 1 : $arg->name->toString() === 'default') {
+                return $arg;
+            }
         }
 
-        if ($node instanceof Node\Scalar\LNumber || $node instanceof Node\Scalar\DNumber) {
-            return $node->value;
+        return null;
+    }
+
+    /**
+     * Read the value an expression has from the file alone, as [isLiteral, value].
+     *
+     * The flag is the answer and the value only means something when it is true: a literal
+     * null and an unread expression both carry null, so a caller that drops the flag is back
+     * to not being able to tell them apart.
+     *
+     * @return array{bool, mixed}
+     */
+    private static function readLiteral(Node $node): array
+    {
+        if ($node instanceof Node\Scalar\String_
+            || $node instanceof Node\Scalar\LNumber
+            || $node instanceof Node\Scalar\DNumber
+        ) {
+            return [true, $node->value];
         }
 
         if ($node instanceof ConstFetch) {
             return match (strtolower($node->name->toString())) {
-                'true' => true,
-                'false' => false,
-                'null' => null,
-                default => $node->name->toString(),
+                'true' => [true, true],
+                'false' => [true, false],
+                'null' => [true, null],
+                default => self::unread(),
             };
         }
 
-        return null;
+        if ($node instanceof Concat) {
+            [$leftIsLiteral, $left] = self::readLiteral($node->left);
+            [$rightIsLiteral, $right] = self::readLiteral($node->right);
+
+            return $leftIsLiteral && $rightIsLiteral && is_string($left) && is_string($right)
+                ? [true, $left.$right]
+                : self::unread();
+        }
+
+        if ($node instanceof UnaryMinus || $node instanceof UnaryPlus) {
+            [$isLiteral, $number] = self::readLiteral($node->expr);
+
+            if (! $isLiteral || ! (is_int($number) || is_float($number))) {
+                return self::unread();
+            }
+
+            return [true, $node instanceof UnaryMinus ? -$number : $number];
+        }
+
+        if ($node instanceof Cast) {
+            return self::applyCast($node, self::readLiteral($node->expr));
+        }
+
+        return self::unread();
+    }
+
+    /**
+     * Apply a scalar cast to an already-read value, as PHP would at runtime.
+     *
+     * (array), (object) and (unset) give no scalar, and a cast cannot make an unread value
+     * read. An (int) cast of a float with no int value is left unread too: PHP 8.5 warns on
+     * it, and an analyzer must not trip a warning over a config file.
+     *
+     * @param  array{bool, mixed}  $read
+     * @return array{bool, mixed}
+     */
+    private static function applyCast(Cast $cast, array $read): array
+    {
+        [$isLiteral, $value] = $read;
+
+        if (! $isLiteral || ! ($value === null || is_scalar($value))) {
+            return self::unread();
+        }
+
+        if ($cast instanceof Cast\Int_
+            && is_float($value)
+            && ! ($value >= (float) PHP_INT_MIN && $value < (float) PHP_INT_MAX)
+        ) {
+            return self::unread();
+        }
+
+        return match (true) {
+            $cast instanceof Cast\Bool_ => [true, (bool) $value],
+            $cast instanceof Cast\Int_ => [true, (int) $value],
+            $cast instanceof Cast\Double => [true, (float) $value],
+            $cast instanceof Cast\String_ => [true, (string) $value],
+            default => self::unread(),
+        };
+    }
+
+    /**
+     * @return array{false, null}
+     */
+    private static function unread(): array
+    {
+        return [false, null];
     }
 }

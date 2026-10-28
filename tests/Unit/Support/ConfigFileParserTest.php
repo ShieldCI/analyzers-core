@@ -158,8 +158,10 @@ PHP);
 
         $this->assertTrue($result['key']['isEnvCall']);
         $this->assertNull($result['key']['value']);
+        $this->assertFalse($result['key']['isLiteral']);
         $this->assertFalse($result['key']['envHasDefault']);
         $this->assertNull($result['key']['envDefault']);
+        $this->assertFalse($result['key']['envDefaultIsLiteral']);
     }
 
     public function testParseConfigArrayDetectsEnvCallWithDefault(): void
@@ -236,21 +238,270 @@ PHP);
         $this->assertCount(1, $result);
     }
 
-    public function testParseConfigArrayExtractsPhpConstantAsString(): void
+    /**
+     * A constant's value is not in the file, so it is not read. Its name is not its value:
+     * 'cipher' => APP_CIPHER used to come back as the string 'APP_CIPHER'.
+     */
+    public function test_a_constant_is_unread_rather_than_its_own_name(): void
     {
-        $file = $this->tempDir.'/config/app.php';
-        file_put_contents($file, <<<'PHP'
-<?php
-return [
+        $result = $this->parseBody(<<<'PHP'
     'max' => PHP_INT_MAX,
-];
+    'cipher' => APP_CIPHER,
+    'same_site' => Cookie::SAMESITE_LAX,
 PHP);
 
-        $result = (new ConfigFileParser(new AstParser()))->parseArray($file);
+        foreach (['max', 'cipher', 'same_site'] as $key) {
+            $this->assertNull($result[$key]['value'], $key);
+            $this->assertFalse($result[$key]['isLiteral'], $key);
+            $this->assertFalse($result[$key]['isEnvCall'], $key);
+        }
+    }
 
-        $this->assertArrayHasKey('max', $result);
-        $this->assertSame('PHP_INT_MAX', $result['max']['value']);
-        $this->assertFalse($result['max']['isEnvCall']);
+    public function test_literal_values_are_flagged_as_literal_including_null(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'name' => 'App',
+    'port' => 3306,
+    'ratio' => 0.5,
+    'debug' => FALSE,
+    'secret' => null,
+PHP);
+
+        foreach (['name', 'port', 'ratio', 'debug', 'secret'] as $key) {
+            $this->assertTrue($result[$key]['isLiteral'], $key);
+        }
+
+        $this->assertFalse($result['debug']['value']);
+        $this->assertNull($result['secret']['value']);
+    }
+
+    public function test_unreadable_expressions_are_not_literal(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'dir' => __DIR__,
+    'interpolated' => "{$prefix}-app",
+    'call' => storage_path('app'),
+    'mixed_concat' => 'base64:' . APP_KEY_CONST,
+    'negated_const' => -SOME_CONST,
+    'negated_string' => -'1',
+PHP);
+
+        foreach (['dir', 'interpolated', 'call', 'mixed_concat', 'negated_const', 'negated_string'] as $key) {
+            $this->assertNull($result[$key]['value'], $key);
+            $this->assertFalse($result[$key]['isLiteral'], $key);
+        }
+    }
+
+    public function test_concatenated_literal_strings_are_folded(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'key' => 'base64:' . 'c2Vj' . 'cmV0',
+PHP);
+
+        $this->assertSame('base64:c2VjcmV0', $result['key']['value']);
+        $this->assertTrue($result['key']['isLiteral']);
+    }
+
+    public function test_signed_numbers_are_folded(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'minus' => -1,
+    'plus' => +1.5,
+PHP);
+
+        $this->assertSame(-1, $result['minus']['value']);
+        $this->assertTrue($result['minus']['isLiteral']);
+        $this->assertSame(1.5, $result['plus']['value']);
+        $this->assertTrue($result['plus']['isLiteral']);
+    }
+
+    public function test_scalar_casts_of_literals_are_applied(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'bool' => (bool) true,
+    'int' => (int) '30',
+    'float' => (float) '1.5',
+    'string' => (string) false,
+    'nested' => (string) (int) '5',
+    'cast_null' => (bool) null,
+PHP);
+
+        $this->assertTrue($result['bool']['value']);
+        $this->assertSame(30, $result['int']['value']);
+        $this->assertSame(1.5, $result['float']['value']);
+        $this->assertSame('', $result['string']['value']);
+        $this->assertSame('5', $result['nested']['value']);
+        $this->assertFalse($result['cast_null']['value']);
+
+        foreach (['bool', 'int', 'float', 'string', 'nested', 'cast_null'] as $key) {
+            $this->assertTrue($result[$key]['isLiteral'], $key);
+        }
+    }
+
+    /**
+     * (array) and (object) do not produce a scalar, a cast cannot make an unread value read,
+     * and a float that has no int value would warn on PHP 8.5 rather than cast.
+     */
+    public function test_casts_that_give_no_scalar_literal_are_unread(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'array' => (array) 'x',
+    'object' => (object) 'x',
+    'const' => (bool) SOME_CONST,
+    'overflow' => (int) 1e1000,
+    'too_big' => (int) 1e20,
+PHP);
+
+        foreach (['array', 'object', 'const', 'overflow', 'too_big'] as $key) {
+            $this->assertNull($result[$key]['value'], $key);
+            $this->assertFalse($result[$key]['isLiteral'], $key);
+        }
+    }
+
+    /**
+     * The config/app.php and config/session.php that ship with Laravel 11+ wrap env() in a
+     * cast. The cast used to hide the call, so the entry read as an unread non-env value.
+     */
+    public function test_a_cast_around_env_is_still_an_env_call(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'debug' => (bool) env('APP_DEBUG', false),
+    'lifetime' => (int) env('SESSION_LIFETIME', 120),
+    'truthy' => (bool) env('X', 'yes'),
+    'stringified' => (string) env('SESSION_SAME_SITE', 'lax'),
+PHP);
+
+        $this->assertTrue($result['debug']['isEnvCall']);
+        $this->assertTrue($result['debug']['envHasDefault']);
+        $this->assertFalse($result['debug']['envDefault']);
+        $this->assertSame(120, $result['lifetime']['envDefault']);
+        $this->assertTrue($result['truthy']['envDefault']);
+        $this->assertSame('lax', $result['stringified']['envDefault']);
+
+        foreach (['debug', 'lifetime', 'truthy', 'stringified'] as $key) {
+            $this->assertNull($result[$key]['value'], $key);
+            $this->assertFalse($result[$key]['isLiteral'], $key);
+            $this->assertTrue($result[$key]['envDefaultIsLiteral'], $key);
+        }
+    }
+
+    public function test_a_cast_env_call_without_a_default_has_no_default(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'debug' => (bool) env('APP_DEBUG'),
+PHP);
+
+        $this->assertTrue($result['debug']['isEnvCall']);
+        $this->assertFalse($result['debug']['envHasDefault']);
+        $this->assertNull($result['debug']['envDefault']);
+        $this->assertFalse($result['debug']['envDefaultIsLiteral']);
+    }
+
+    /**
+     * The default is env()'s `default` parameter, not whatever sits second: with named
+     * arguments the second argument can be the key.
+     */
+    public function test_a_named_env_default_is_read_by_name_not_position(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'reordered' => (bool) env(default: false, key: 'APP_DEBUG'),
+    'named' => env('SESSION_SAME_SITE', default: 'lax'),
+    'key_only' => env(key: 'APP_DEBUG'),
+PHP);
+
+        $this->assertTrue($result['reordered']['envHasDefault']);
+        $this->assertFalse($result['reordered']['envDefault']);
+        $this->assertTrue($result['reordered']['envDefaultIsLiteral']);
+
+        $this->assertSame('lax', $result['named']['envDefault']);
+
+        $this->assertTrue($result['key_only']['isEnvCall']);
+        $this->assertFalse($result['key_only']['envHasDefault']);
+    }
+
+    /**
+     * PHP function names are case-insensitive, so Env() and ENV() are env() calls.
+     */
+    public function test_env_is_matched_case_insensitively(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'title' => Env('APP_DEBUG', true),
+    'upper' => (bool) ENV('APP_DEBUG', false),
+    'qualified' => \env('APP_DEBUG', true),
+PHP);
+
+        foreach (['title', 'upper', 'qualified'] as $key) {
+            $this->assertTrue($result[$key]['isEnvCall'], $key);
+            $this->assertTrue($result[$key]['envHasDefault'], $key);
+        }
+
+        $this->assertTrue($result['title']['envDefault']);
+        $this->assertFalse($result['upper']['envDefault']);
+    }
+
+    /**
+     * env(...) makes a Closure; it does not call env().
+     */
+    public function test_a_first_class_callable_env_is_not_an_env_call(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'resolver' => env(...),
+PHP);
+
+        $this->assertFalse($result['resolver']['isEnvCall']);
+        $this->assertFalse($result['resolver']['envHasDefault']);
+        $this->assertFalse($result['resolver']['isLiteral']);
+        $this->assertNull($result['resolver']['value']);
+    }
+
+    /**
+     * envDefault null is two readings -- a literal null default, or a default that could not
+     * be read -- and envDefaultIsLiteral is what separates them.
+     */
+    public function test_env_default_literalness_separates_null_from_unread(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'unread' => env('SESSION_SAME_SITE', Cookie::SAMESITE_STRICT),
+    'null' => env('SESSION_SAME_SITE', null),
+    'array_cast' => (array) env('X', 'a'),
+PHP);
+
+        $this->assertTrue($result['unread']['envHasDefault']);
+        $this->assertNull($result['unread']['envDefault']);
+        $this->assertFalse($result['unread']['envDefaultIsLiteral']);
+
+        $this->assertTrue($result['null']['envHasDefault']);
+        $this->assertNull($result['null']['envDefault']);
+        $this->assertTrue($result['null']['envDefaultIsLiteral']);
+
+        $this->assertTrue($result['array_cast']['isEnvCall']);
+        $this->assertNull($result['array_cast']['envDefault']);
+        $this->assertFalse($result['array_cast']['envDefaultIsLiteral']);
+    }
+
+    public function test_entries_that_are_not_env_calls_have_no_env_default(): void
+    {
+        $result = $this->parseBody(<<<'PHP'
+    'name' => 'App',
+    'cast' => (bool) true,
+PHP);
+
+        foreach (['name', 'cast'] as $key) {
+            $this->assertFalse($result[$key]['isEnvCall'], $key);
+            $this->assertFalse($result[$key]['envHasDefault'], $key);
+            $this->assertFalse($result[$key]['envDefaultIsLiteral'], $key);
+        }
+    }
+
+    /**
+     * @return array<string, array{value: mixed, line: int, isEnvCall: bool, envDefault: mixed, envHasDefault: bool, isLiteral: bool, envDefaultIsLiteral: bool}>
+     */
+    private function parseBody(string $items): array
+    {
+        $file = $this->tempDir.'/config/app.php';
+        file_put_contents($file, "<?php\nreturn [\n".$items."\n];\n");
+
+        return (new ConfigFileParser(new AstParser()))->parseArray($file);
     }
 
     public function testParseConfigArrayReturnsNullForComplexValues(): void
@@ -267,6 +518,7 @@ PHP);
 
         $this->assertArrayHasKey('connections', $result);
         $this->assertNull($result['connections']['value']);
+        $this->assertFalse($result['connections']['isLiteral']);
         $this->assertFalse($result['connections']['isEnvCall']);
     }
 

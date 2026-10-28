@@ -602,18 +602,20 @@ if ($entries === [] && $parser->hasFailure('/path/to/config/session.php')) {
     // Unreadable, not empty. Do not report "no keys set".
 }
 
-// Each entry has: value, line, isEnvCall, envDefault, envHasDefault
+// Each entry has: value, line, isLiteral, isEnvCall, envDefault, envHasDefault, envDefaultIsLiteral
 foreach ($entries as $key => $entry) {
     echo "{$key} on line {$entry['line']}: ";
 
     if ($entry['isEnvCall']) {
         // Value comes from env() at runtime
         echo "env() call";
-        if ($entry['envHasDefault']) {
-            var_dump($entry['envDefault']); // The default argument value
+        if ($entry['envHasDefault'] && $entry['envDefaultIsLiteral']) {
+            var_dump($entry['envDefault']); // The default argument value, casts applied
         }
+    } elseif ($entry['isLiteral']) {
+        var_dump($entry['value']); // string, int, float, bool, or null
     } else {
-        var_dump($entry['value']); // Literal: string, int, float, bool, or null
+        echo "not known from the file"; // value is null, but that is not a literal null
     }
 }
 ```
@@ -641,15 +643,21 @@ if ($secure !== true) {
 
 **Supported value types:**
 
-| PHP Source | `value` |
-|---|---|
-| `'string'` | `'string'` |
-| `42` / `3.14` | `42` / `3.14` |
-| `true` / `false` / `null` | `true` / `false` / `null` |
-| `PHP_INT_MAX` (constant) | `'PHP_INT_MAX'` (string) |
-| `env('KEY')` | `null` (isEnvCall = true) |
-| `env('KEY', 'default')` | `null` (envDefault = `'default'`) |
-| `['nested', 'array']` | `null` (complex, not extracted) |
+| PHP Source | `value` | `isLiteral` |
+|---|---|---|
+| `'string'` | `'string'` | true |
+| `42` / `3.14` / `-1` | `42` / `3.14` / `-1` | true |
+| `true` / `false` / `null` | `true` / `false` / `null` | true |
+| `'a' . 'b'` | `'ab'` | true |
+| `(int) '60'` (also `(bool)`, `(float)`, `(string)`) | `60` | true |
+| `PHP_INT_MAX`, `Cookie::SAMESITE_STRICT` (constants) | `null` | false |
+| `__DIR__.'/x'`, `"{$var}"`, a call, `['nested']` | `null` | false |
+| `env('KEY')` | `null` (isEnvCall = true, envHasDefault = false) | false |
+| `env('KEY', 'default')`, `env('KEY', default: 'default')` | `null` (envDefault = `'default'`, envDefaultIsLiteral = true) | false |
+| `(bool) env('KEY', 'yes')` | `null` (envDefault = `true`, the cast applied) | false |
+| `env('KEY', SOME_CONST)` | `null` (envDefault = `null`, envDefaultIsLiteral = false) | false |
+
+`value` is `null` both for a literal `null` and for anything the file alone does not decide; only `isLiteral` tells them apart. The same goes for `envDefault` and `envDefaultIsLiteral`.
 
 ### Stripping PHP Comments
 
