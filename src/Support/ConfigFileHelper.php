@@ -335,7 +335,7 @@ class ConfigFileHelper
      *                   indistinguishable from a config that defines no keys. Use
      *                   ConfigFileParser::parseArray() with a parser you keep.
      *
-     * @return array<string, array{value: mixed, line: int, isEnvCall: bool, envDefault: mixed, envHasDefault: bool}>
+     * @return array<string, array{value: mixed, line: int, isEnvCall: bool, envDefault: mixed, envHasDefault: bool, isLiteral: bool, envDefaultIsLiteral: bool}>
      */
     public static function parseConfigArray(string $filePath): array
     {
