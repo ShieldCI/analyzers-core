@@ -234,12 +234,145 @@ class PathHelperTest extends TestCase
         $this->assertSame('0/src', PathHelper::join('0', 'src'));
     }
 
-    public function test_join_leaves_a_dot_segment_alone(): void
+    // =========================================================================
+    // join() and '.' segments - ShieldCI/analyzers-core#84
+    //
+    // Exclude patterns are anchored relative globs ('vendor/*'), so a scan root
+    // spelled '/project/.' relativised to './vendor/...' and slipped past every
+    // one of them. A segment that is exactly '.' now collapses; '..', dot-files
+    // and dot-dirs do not.
+    // =========================================================================
+
+    public function test_join_answers_the_base_for_a_dot_path(): void
     {
-        // setPaths(['.']) is the dominant idiom in the downstream suites, and
-        // consumers strip the resulting './' prefix off reported locations.
-        // Collapsing it here would change behaviour in shieldci/laravel-pro.
-        $this->assertSame('/var/www/project/.', PathHelper::join('/var/www/project', '.'));
+        $this->assertSame('/var/www/project', PathHelper::join('/var/www/project', '.'));
+    }
+
+    public function test_join_answers_the_base_for_a_dot_slash_path(): void
+    {
+        $this->assertSame('/var/www/project', PathHelper::join('/var/www/project', './'));
+    }
+
+    public function test_join_answers_the_base_for_a_dot_backslash_path(): void
+    {
+        $this->assertSame('/var/www/project', PathHelper::join('/var/www/project', '.\\'));
+    }
+
+    public function test_join_answers_the_base_for_a_run_of_dot_segments(): void
+    {
+        $this->assertSame('/var/www/project', PathHelper::join('/var/www/project', './.'));
+        $this->assertSame('/var/www/project', PathHelper::join('/var/www/project', '././'));
+        $this->assertSame('/var/www/project', PathHelper::join('/var/www/project', '.\\./'));
+    }
+
+    public function test_join_strips_a_leading_dot_slash_segment(): void
+    {
+        $this->assertSame('/var/www/project/app', PathHelper::join('/var/www/project', './app'));
+    }
+
+    public function test_join_strips_repeated_leading_dot_segments(): void
+    {
+        $this->assertSame('/var/www/project/app', PathHelper::join('/var/www/project', '././app'));
+    }
+
+    public function test_join_strips_a_leading_dot_backslash_segment_on_a_windows_base(): void
+    {
+        $this->assertSame('C:\\proj/app', PathHelper::join('C:\\proj', '.\\app'));
+    }
+
+    public function test_join_collapses_an_inner_dot_segment(): void
+    {
+        $this->assertSame('/var/www/project/app/Http', PathHelper::join('/var/www/project', 'app/./Http'));
+    }
+
+    public function test_join_collapses_an_inner_backslash_dot_segment(): void
+    {
+        $this->assertSame('C:\\proj/app\\Http', PathHelper::join('C:\\proj', 'app\\.\\Http'));
+    }
+
+    public function test_join_collapses_inner_dot_segments_between_mixed_separators(): void
+    {
+        // The separator after the '.' survives; the one before it goes with it.
+        $this->assertSame('/var/www/project/app\\Http', PathHelper::join('/var/www/project', 'app/.\\Http'));
+        $this->assertSame('/var/www/project/app/Http', PathHelper::join('/var/www/project', 'app\\./Http'));
+    }
+
+    public function test_join_collapses_a_run_of_inner_dot_segments(): void
+    {
+        $this->assertSame('/var/www/project/app/Http', PathHelper::join('/var/www/project', 'app/././Http'));
+    }
+
+    public function test_join_collapses_a_trailing_dot_segment(): void
+    {
+        $this->assertSame('/var/www/project/app', PathHelper::join('/var/www/project', 'app/.'));
+    }
+
+    public function test_join_leaves_a_dot_file_alone(): void
+    {
+        $this->assertSame('/var/www/project/.env', PathHelper::join('/var/www/project', '.env'));
+    }
+
+    public function test_join_leaves_a_dot_directory_alone(): void
+    {
+        $this->assertSame('/var/www/project/.github/x', PathHelper::join('/var/www/project', '.github/x'));
+        $this->assertSame('/var/www/project/app/.github', PathHelper::join('/var/www/project', 'app/.github'));
+    }
+
+    public function test_join_leaves_a_parent_segment_alone(): void
+    {
+        $this->assertSame('/var/www/project/..', PathHelper::join('/var/www/project', '..'));
+        $this->assertSame('/var/www/project/../x', PathHelper::join('/var/www/project', '../x'));
+        $this->assertSame('/var/www/project/app/..', PathHelper::join('/var/www/project', 'app/..'));
+    }
+
+    public function test_join_leaves_a_dotted_name_alone(): void
+    {
+        $this->assertSame('/var/www/project/a.b', PathHelper::join('/var/www/project', 'a.b'));
+        $this->assertSame('/var/www/project/a./b', PathHelper::join('/var/www/project', 'a./b'));
+    }
+
+    public function test_join_leaves_an_interior_double_separator_alone(): void
+    {
+        $this->assertSame('/var/www/project/app//Http', PathHelper::join('/var/www/project', 'app//./Http'));
+    }
+
+    public function test_join_answers_the_root_for_a_separator_base_and_a_dot_path(): void
+    {
+        $this->assertSame('/', PathHelper::join('/', '.'));
+        $this->assertSame('/app', PathHelper::join('/', './app'));
+    }
+
+    public function test_join_answers_dot_for_an_empty_base_and_a_dot_path(): void
+    {
+        // With no base there is nothing for '.' to collapse onto, and '' is not
+        // a path - is_dir('') is false, so it would scan nothing.
+        $this->assertSame('.', PathHelper::join('', '.'));
+        $this->assertSame('.', PathHelper::join('', './'));
+    }
+
+    public function test_join_normalises_the_segment_for_an_empty_base(): void
+    {
+        $this->assertSame('app/Http', PathHelper::join('', './app/./Http'));
+    }
+
+    public function test_join_keeps_leading_separators_for_an_empty_base(): void
+    {
+        // No base means the path answers for itself; an absolute one stays absolute.
+        $this->assertSame('/src', PathHelper::join('', '/src'));
+        $this->assertSame('/app', PathHelper::join('', '/./app'));
+        $this->assertSame('/', PathHelper::join('', '/.'));
+    }
+
+    public function test_join_answers_empty_for_an_empty_base_and_an_empty_path(): void
+    {
+        $this->assertSame('', PathHelper::join('', ''));
+    }
+
+    public function test_join_with_a_dot_path_relativises_to_a_clean_path(): void
+    {
+        $joined = PathHelper::join('/var/www/project', './app/A.php');
+
+        $this->assertSame('app/A.php', PathHelper::relativeTo($joined, '/var/www/project'));
     }
 
     public function test_join_and_relative_to_are_inverses(): void

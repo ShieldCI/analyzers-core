@@ -56,16 +56,26 @@ class PathHelper
      * buildPath(), and rtrim($basePath, '/').'/config/' in ConfigFileHelper - none
      * of which trimmed a trailing backslash off a Windows base.
      *
-     * An empty base answers the segment unchanged, and an empty segment answers the
+     * An empty base answers the segment itself, and an empty segment answers the
      * base. That pairing is what lets getFilesToAnalyze() spell "scan the base path
      * itself" as '' instead of seeding $paths with the base and joining it on twice,
      * which produced '/app//app' and silently scanned nothing (#62).
      *
-     * A '.' segment is deliberately preserved rather than collapsed. setPaths(['.'])
-     * is the dominant idiom in the downstream suites, and consumers - notably
-     * laravel-pro's AuditLoggingAnalyzer - strip the resulting './' prefix back off
-     * reported locations. Interior '//' is left alone for the same reason
-     * relativeTo() leaves it alone: only trailing separators are ours to touch.
+     * A segment that is exactly '.' collapses, whichever separator follows it: a
+     * path of '.' or './' answers the base, leading './' and '.\' segments are
+     * dropped, and inner '/./' and '\.\' segments fold away. It used to be kept,
+     * and that broke two things (#84). Exclude patterns are anchored relative
+     * globs, so a scan root of '/app/.' relativised to './vendor/...', which
+     * 'vendor/*' does not match - setPaths(['.']) scanned vendor/, storage/ and
+     * tests/ in full. And reported locations, and the fingerprints built from
+     * them, changed with how the path was spelled: './app' reported './app/A.php'
+     * where 'app' reported 'app/A.php'. '..' is not touched - resolving it needs
+     * the filesystem, not string surgery - and neither are dot-files, dot-dirs or
+     * names such as 'a.b'. With an empty base there is nothing for '.' to
+     * collapse onto, so a segment of nothing but '.' answers '.' rather than ''.
+     *
+     * Interior '//' is left alone for the same reason relativeTo() leaves it
+     * alone: only trailing separators are ours to touch.
      *
      * @param  string  $basePath  The root to join onto; '' means no root
      * @param  string  $path  The segment to append; '' means the base path itself
@@ -73,8 +83,18 @@ class PathHelper
      */
     public static function join(string $basePath, string $path): string
     {
+        $segment = self::withoutDotSegments(ltrim($path, '/\\'));
+
         if ($basePath === '') {
-            return $path;
+            // No base means the path answers for itself, so its leading
+            // separators stay: '/src' must not come back relative.
+            $root = substr($path, 0, strspn($path, '/\\'));
+
+            if ($root === '' && $segment === '' && $path !== '') {
+                return '.';
+            }
+
+            return $root.$segment;
         }
 
         $base = rtrim($basePath, '/\\');
@@ -82,9 +102,25 @@ class PathHelper
         // A base of nothing but separators trims away to nothing. Stay anchored at
         // the root rather than turning an absolute scan root into a relative one.
         if ($base === '') {
-            return $path === '' ? '/' : '/'.ltrim($path, '/\\');
+            return $segment === '' ? '/' : '/'.$segment;
         }
 
-        return $path === '' ? $base : $base.'/'.ltrim($path, '/\\');
+        return $segment === '' ? $base : $base.'/'.$segment;
+    }
+
+    /**
+     * Drop every segment that is exactly '.' from a path with no leading separator.
+     *
+     * Leading '.' segments go with the separators after them, so '././app' and
+     * '.\app' answer 'app'. An inner '.' goes with the separator before it, so
+     * 'app/./Http' answers 'app/Http' and a trailing 'app/.' answers 'app'. The
+     * lookahead is what keeps '..', '.env' and '.github' intact: a '.' only
+     * counts as a segment when a separator or the end of the path follows it.
+     */
+    private static function withoutDotSegments(string $path): string
+    {
+        $path = (string) preg_replace('#^(?:\.(?:[/\\\\]+|$))+#', '', $path);
+
+        return (string) preg_replace('#[/\\\\]\.(?=[/\\\\]|$)#', '', $path);
     }
 }
