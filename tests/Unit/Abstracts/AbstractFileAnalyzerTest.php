@@ -734,27 +734,112 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertSame($this->sortedPhpFiles($explicit), $this->sortedPhpFiles($default));
     }
 
-    public function testTheDotPathIdiomStillResolvesToTheBaseDirectory(): void
-    {
-        // setPaths(['.']) is the dominant idiom in the downstream suites, and
-        // consumers strip the resulting './' segment back off reported
-        // locations - so join() must leave it in place, not collapse it.
-        $analyzer = new ConcreteFileAnalyzer();
-        $analyzer->setBasePath($this->testDir);
-        $analyzer->setPaths(['.']);
+    // =========================================================================
+    // '.' in the analyzed paths - ShieldCI/analyzers-core#84
+    //
+    // Excludes are anchored relative globs, so a scan root spelled '/project/.'
+    // relativised to './vendor/...' and matched none of them. Every spelling of
+    // a directory must now scan and report the same files.
+    // =========================================================================
 
+    public function testTheDotPathAppliesExcludePatterns(): void
+    {
+        $analyzer = $this->dotSegmentAnalyzer(['.']);
+
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($analyzer));
+    }
+
+    public function testADotSlashPathReportsTheCleanLocation(): void
+    {
+        $analyzer = $this->dotSegmentAnalyzer(['./app']);
+
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($analyzer));
+    }
+
+    public function testAnInnerDotSegmentReportsTheCleanLocation(): void
+    {
+        $analyzer = $this->dotSegmentAnalyzer(['app/./Http']);
+
+        $this->assertSame(['app/Http/H.php'], $this->relativePhpFiles($analyzer));
+    }
+
+    public function testTheDotPathYieldsPathnamesWithoutADotSegment(): void
+    {
+        $analyzer = $this->dotSegmentAnalyzer(['.']);
         $files = $analyzer->getPhpFilesPublic();
         sort($files);
 
         $this->assertSame(
-            [
-                $this->testDir . '/./src/File1.php',
-                $this->testDir . '/./src/File2.php',
-                $this->testDir . '/./tests/Test1.php',
-                $this->testDir . '/./vendor/Package.php',
-            ],
+            [$this->testDir . '/project/app/A.php', $this->testDir . '/project/app/Http/H.php'],
             $files
         );
+    }
+
+    public function testTheDotPathMatchesTheDefaultAndEmptyPathScans(): void
+    {
+        $dot = $this->relativePhpFiles($this->dotSegmentAnalyzer(['.']));
+
+        $this->assertSame($this->relativePhpFiles($this->dotSegmentAnalyzer([])), $dot);
+        $this->assertSame($this->relativePhpFiles($this->dotSegmentAnalyzer([''])), $dot);
+    }
+
+    public function testNamedPathsStillScanAsBefore(): void
+    {
+        $this->assertSame(
+            ['app/A.php', 'app/Http/H.php'],
+            $this->relativePhpFiles($this->dotSegmentAnalyzer(['app']))
+        );
+        $this->assertSame(
+            ['app/A.php', 'app/Http/H.php'],
+            $this->relativePhpFiles($this->dotSegmentAnalyzer(['app', 'vendor']))
+        );
+    }
+
+    /**
+     * The project from the #84 report, under its own base path so the fixture
+     * setUp() builds does not leak into the assertions.
+     *
+     * @param  array<string>  $paths
+     */
+    private function dotSegmentAnalyzer(array $paths): ConcreteFileAnalyzer
+    {
+        $project = $this->testDir . '/project';
+
+        if (! is_dir($project)) {
+            foreach (['app/Http', 'vendor/acme', 'storage/framework/views', 'tests'] as $dir) {
+                mkdir($project . '/' . $dir, 0777, true);
+            }
+
+            file_put_contents($project . '/app/A.php', "<?php\n");
+            file_put_contents($project . '/app/Http/H.php', "<?php\n");
+            file_put_contents($project . '/vendor/acme/B.php', "<?php\n");
+            file_put_contents($project . '/storage/framework/views/c.php', "<?php\n");
+            file_put_contents($project . '/tests/DTest.php', "<?php\n");
+        }
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setExcludePatterns(['vendor/*', 'node_modules/*', 'storage/*', 'bootstrap/cache/*', 'tests/*']);
+
+        if ($paths !== []) {
+            $analyzer->setPaths($paths);
+        }
+
+        return $analyzer;
+    }
+
+    /**
+     * @return array<string>
+     */
+    private function relativePhpFiles(ConcreteFileAnalyzer $analyzer): array
+    {
+        $files = array_map(
+            fn (string $file): string => $analyzer->getRelativePathPublic($file),
+            $analyzer->getPhpFilesPublic()
+        );
+        sort($files);
+
+        return $files;
     }
 
     public function testTreatsZeroAsARealBasePath(): void
