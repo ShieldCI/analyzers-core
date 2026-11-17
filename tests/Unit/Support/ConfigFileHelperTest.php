@@ -728,6 +728,216 @@ PHP;
         $this->assertSame(1, ConfigFileHelper::findNestedKeyLine($configFile, 'stores', 'driver', 'redis'));
     }
 
+    // =========================================================================
+    // Block comments - #90
+    // =========================================================================
+
+    // A '/* */' or '/** */' block hides every line inside it, not only the ones that
+    // start with '//' or '#'. A commented-out copy above the live key must not win.
+
+    public function test_locate_nested_config_key_skips_an_item_inside_a_block_comment(): void
+    {
+        $this->writeCacheConfig(self::CACHE_WITH_COMMENTED_STORE);
+
+        $location = ConfigFileHelper::locateNestedConfigKey($this->tempDir, 'cache.php', 'stores', 'driver', 'main');
+
+        $this->assertNotNull($location);
+        $this->assertSame(11, $location->line);
+        $this->assertStringContainsString("'driver' => 'file'", $this->cacheConfigLine(11));
+    }
+
+    public function test_find_nested_key_line_skips_an_item_inside_a_block_comment(): void
+    {
+        $this->writeCacheConfig(self::CACHE_WITH_COMMENTED_STORE);
+
+        $this->assertSame(
+            11,
+            ConfigFileHelper::findNestedKeyLine($this->tempDir.'/config/cache.php', 'stores', 'driver', 'main')
+        );
+    }
+
+    public function test_locate_config_key_skips_a_top_level_key_inside_a_block_comment(): void
+    {
+        file_put_contents($this->tempDir.'/config/cors.php', <<<'PHP'
+            <?php
+
+            return [
+                /*
+                'allowed_origins' => ['*'],
+                */
+                'allowed_origins' => ['https://example.com'],
+            ];
+            PHP);
+
+        $location = ConfigFileHelper::locateConfigKey($this->tempDir, 'cors.php', 'allowed_origins');
+
+        $this->assertNotNull($location);
+        $this->assertSame(7, $location->line);
+        $this->assertSame(7, ConfigFileHelper::findKeyLine($this->tempDir.'/config/cors.php', 'allowed_origins'));
+    }
+
+    public function test_find_key_line_skips_a_block_commented_key_within_the_parent(): void
+    {
+        $configFile = $this->tempDir.'/config/cache.php';
+        file_put_contents($configFile, <<<'PHP'
+            <?php
+
+            return [
+                'stores' => [
+                    /*
+                    'driver' => 'redis',
+                    */
+                    'driver' => 'file',
+                ],
+            ];
+            PHP);
+
+        $this->assertSame(8, ConfigFileHelper::findKeyLine($configFile, 'driver', 'stores'));
+
+        $location = ConfigFileHelper::locateConfigKey($this->tempDir, 'cache.php', 'driver', 'stores');
+        $this->assertNotNull($location);
+        $this->assertSame(8, $location->line);
+    }
+
+    public function test_find_key_line_skips_a_key_inside_a_docblock(): void
+    {
+        $configFile = $this->tempDir.'/config/cache.php';
+        file_put_contents($configFile, <<<'PHP'
+            <?php
+
+            return [
+                /**
+                 * 'default' => 'redis',
+                 */
+                'default' => 'file',
+            ];
+            PHP);
+
+        $this->assertSame(7, ConfigFileHelper::findKeyLine($configFile, 'default'));
+    }
+
+    public function test_find_key_line_skips_a_single_line_block_comment(): void
+    {
+        $configFile = $this->tempDir.'/config/cache.php';
+        file_put_contents($configFile, <<<'PHP'
+            <?php
+
+            return [
+                /* 'default' => 'redis', */
+                'default' => 'file',
+            ];
+            PHP);
+
+        $this->assertSame(5, ConfigFileHelper::findKeyLine($configFile, 'default'));
+    }
+
+    public function test_a_key_that_only_exists_inside_a_block_comment_is_absent(): void
+    {
+        $configFile = $this->tempDir.'/config/cache.php';
+        file_put_contents($configFile, <<<'PHP'
+            <?php
+
+            return [
+                'prefix' => 'shieldci',
+                /*
+                'default' => 'redis',
+                */
+            ];
+            PHP);
+
+        $location = ConfigFileHelper::locateConfigKey($this->tempDir, 'cache.php', 'default');
+
+        $this->assertNotNull($location);
+        $this->assertNull($location->line);
+        $this->assertSame(1, ConfigFileHelper::findKeyLine($configFile, 'default'));
+    }
+
+    // Comment markers inside a string are not comments. The per-line strip cut a line at
+    // the '//' of a URL and lost every key after it.
+
+    public function test_find_key_line_reads_past_a_url_on_the_same_line(): void
+    {
+        $configFile = $this->tempDir.'/config/services.php';
+        file_put_contents($configFile, <<<'PHP'
+            <?php
+
+            return [
+                'url' => 'http://example.com', 'default' => 'file',
+            ];
+            PHP);
+
+        $this->assertSame(4, ConfigFileHelper::findKeyLine($configFile, 'default'));
+    }
+
+    public function test_find_key_line_does_not_open_a_comment_at_a_glob_in_a_string(): void
+    {
+        $configFile = $this->tempDir.'/config/filesystems.php';
+        file_put_contents($configFile, <<<'PHP'
+            <?php
+
+            return [
+                'url' => 'http://example.com/storage/*',
+                'default' => 'local',
+            ];
+            PHP);
+
+        $this->assertSame(5, ConfigFileHelper::findKeyLine($configFile, 'default'));
+    }
+
+    public function test_find_key_line_finds_a_live_key_after_a_comment_on_the_same_line(): void
+    {
+        $configFile = $this->tempDir.'/config/cache.php';
+        file_put_contents($configFile, <<<'PHP'
+            <?php
+
+            return [
+                /*
+                 * Legacy store. */ 'default' => 'file',
+            ];
+            PHP);
+
+        $this->assertSame(5, ConfigFileHelper::findKeyLine($configFile, 'default'));
+    }
+
+    public function test_a_top_level_key_behind_a_block_comment_still_ends_the_parent_scope(): void
+    {
+        // Indentation is measured on the line as written. Measured on the stripped line,
+        // the comment's trailing space would push 'queue' past column 4 and the search
+        // would run on into its 'connection'.
+        $configFile = $this->tempDir.'/config/cache.php';
+        file_put_contents($configFile, <<<'PHP'
+            <?php
+
+            return [
+                'stores' => [
+                    'file' => [],
+                ],
+                /* moved */ 'queue' => [
+                    'connection' => 'redis',
+                ],
+            ];
+            PHP);
+
+        $this->assertSame(1, ConfigFileHelper::findKeyLine($configFile, 'connection', 'stores'));
+    }
+
+    private const CACHE_WITH_COMMENTED_STORE = <<<'PHP'
+        <?php
+
+        return [
+            'stores' => [
+                /*
+                'main' => [
+                    'driver' => 'redis',
+                ],
+                */
+                'main' => [
+                    'driver' => 'file',
+                ],
+            ],
+        ];
+        PHP;
+
     private function writeCacheConfig(string $contents): void
     {
         file_put_contents($this->tempDir.'/config/cache.php', $contents."\n");

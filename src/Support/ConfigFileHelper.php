@@ -125,7 +125,7 @@ class ConfigFileHelper
 
     /**
      * Find the line number where a specific key is defined in a config file.
-     * Uses precise patterns to avoid matches in comments.
+     * Keys inside any kind of comment, block and docblock included, are not matches.
      *
      * Answers 1 both when the file cannot be read and when the key is absent.
      * Use locateConfigKey() when those two need telling apart.
@@ -149,18 +149,15 @@ class ConfigFileHelper
      */
     private static function findKeyLineOrNull(string $configFile, string $key, ?string $parentKey = null): ?int
     {
-        $lines = FileParser::getLines($configFile);
+        $lines = self::readLinesWithoutComments($configFile);
 
-        if (empty($lines)) {
+        if ($lines === null) {
             return null;
         }
 
         $inParentArray = $parentKey === null;
 
-        foreach ($lines as $lineNumber => $line) {
-            // Strip single-line comments (// and #)
-            $lineWithoutComments = FileParser::stripComments($line);
-
+        foreach ($lines as $lineNumber => [$line, $lineWithoutComments]) {
             // If we have a parent key, detect when we enter that array
             if ($parentKey !== null && ! $inParentArray) {
                 $parentPattern = '/[\'"](?:'.preg_quote($parentKey, '/').')[\'"]\s*=>/';
@@ -234,9 +231,9 @@ class ConfigFileHelper
      */
     private static function findNestedKeyLineOrNull(string $configFile, string $parentKey, string $nestedKey, string $nestedValue): ?int
     {
-        $lines = FileParser::getLines($configFile);
+        $lines = self::readLinesWithoutComments($configFile);
 
-        if (empty($lines)) {
+        if ($lines === null) {
             return null;
         }
 
@@ -244,10 +241,7 @@ class ConfigFileHelper
         $inNestedArray = false;
         $nestedArrayStartLine = 1; // Default to line 1 (never 0, as line numbers are 1-indexed)
 
-        foreach ($lines as $lineNumber => $line) {
-            // Strip single-line comments
-            $lineWithoutComments = FileParser::stripComments($line);
-
+        foreach ($lines as $lineNumber => [$line, $lineWithoutComments]) {
             // Detect when we enter the parent array
             if (! $inParentArray) {
                 $parentPattern = '/[\'"](?:'.preg_quote($parentKey, '/').')[\'"]\s*=>/';
@@ -308,6 +302,35 @@ class ConfigFileHelper
 
         // Fallback: try to find the parent key
         return self::findKeyLineOrNull($configFile, $parentKey);
+    }
+
+    /**
+     * Read a config file as pairs of each line as written and the same line with its comments removed.
+     *
+     * The comments come out of the whole file through the tokenizer rather than line by
+     * line, so a key inside a block or docblock comment is hidden too, and a '//' or '#'
+     * inside a string is left alone. Line numbering survives because a comment is replaced
+     * with as many newlines as it spanned. The line as written is kept for measuring
+     * indentation, which a comment in front of a key would otherwise shift.
+     *
+     * @return array<int, array{string, string}>|null  Null when the file cannot be read
+     */
+    private static function readLinesWithoutComments(string $configFile): ?array
+    {
+        $contents = FileParser::readFile($configFile);
+
+        if ($contents === null) {
+            return null;
+        }
+
+        $linesWithoutComments = explode("\n", FileParser::stripAllComments($contents));
+        $lines = [];
+
+        foreach (explode("\n", $contents) as $index => $line) {
+            $lines[] = [$line, $linesWithoutComments[$index] ?? ''];
+        }
+
+        return $lines;
     }
 
     /**
