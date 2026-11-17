@@ -390,6 +390,19 @@ class FileParserTest extends TestCase
         $this->assertEquals(0, $count);
     }
 
+    // --- stripComments ---
+
+    public function testStripCommentsRemovesDoubleSlashAndHashComments(): void
+    {
+        $this->assertSame("    'a' => 1, ", FileParser::stripComments("    'a' => 1, // note"));
+        $this->assertSame("    'b' => 2, ", FileParser::stripComments("    'b' => 2, # note"));
+    }
+
+    public function testStripCommentsLeavesALineWithoutCommentsUnchanged(): void
+    {
+        $this->assertSame("    'a' => 1,", FileParser::stripComments("    'a' => 1,"));
+    }
+
     // --- stripAllComments ---
 
     public function testStripAllCommentsRemovesSingleLineDoubleSlash(): void
