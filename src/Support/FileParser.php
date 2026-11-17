@@ -12,51 +12,60 @@ use ShieldCI\AnalyzersCore\ValueObjects\CodeSnippet;
 class FileParser
 {
     /**
+     * A namespace name: identifier segments joined by backslashes. Matched against token text
+     * because a segment may be a reserved word (`namespace Match;`), which lexes as that
+     * keyword's token rather than T_STRING.
+     */
+    private const NAMESPACE_NAME = '/^[A-Za-z_\x80-\xff][\w\x80-\xff]*(?:\\\\[A-Za-z_\x80-\xff][\w\x80-\xff]*)*$/';
+
+    /**
      * Extract namespace from PHP file.
+     *
+     * Reads the first named `namespace` declaration from the tokenized source, so the word
+     * "namespace" in a comment, string, heredoc or `namespace\relative` name is ignored.
+     * Handles `namespace App;`, `namespace App ?>` and the braced `namespace App { ... }`
+     * form, including reserved-word names such as `namespace Match;`; a global
+     * `namespace { ... }` block declares no name and is skipped.
      */
     public static function extractNamespace(string $filePath): ?string
     {
-        $content = self::readFile($filePath);
-        if ($content === null) {
-            return null;
-        }
-
-        if (preg_match('/namespace\s+([^;]+);/', $content, $matches)) {
-            return trim($matches[1]);
-        }
-
-        return null;
+        return self::findNamespace(self::tokenizeIfMentions(self::readFile($filePath), 'namespace'));
     }
 
     /**
      * Extract class name from PHP file.
+     *
+     * Returns the name of the first `class` declaration in the tokenized source. The word
+     * "class" in a comment, string or heredoc is ignored, as are `Foo::class` and anonymous
+     * `new class` expressions. Interfaces, traits and enums are not considered.
      */
     public static function extractClassName(string $filePath): ?string
     {
-        $content = self::readFile($filePath);
-        if ($content === null) {
-            return null;
-        }
+        $tokens = self::tokenizeIfMentions(self::readFile($filePath), 'class');
+        $name = self::findClassNameIndex($tokens);
 
-        if (preg_match('/class\s+(\w+)/', $content, $matches)) {
-            return $matches[1];
-        }
-
-        return null;
+        return $name === null ? null : $tokens[$name]->text;
     }
 
     /**
      * Get fully qualified class name from file.
+     *
+     * Qualifies the class from extractClassName() with the namespace declaration that encloses
+     * it, which in a multi-namespace file need not be the first one; a class inside a global
+     * `namespace { ... }` block is returned unqualified.
      */
     public static function extractFullyQualifiedClassName(string $filePath): ?string
     {
-        $namespace = self::extractNamespace($filePath);
-        $className = self::extractClassName($filePath);
+        // Tokenize once for both lookups; any file declaring a class mentions "class".
+        $tokens = self::tokenizeIfMentions(self::readFile($filePath), 'class');
 
-        if ($className === null) {
+        $name = self::findClassNameIndex($tokens);
+        if ($name === null) {
             return null;
         }
 
+        $className = $tokens[$name]->text;
+        $namespace = self::enclosingNamespace($tokens, $name);
         if ($namespace === null) {
             return $className;
         }
@@ -67,18 +76,187 @@ class FileParser
     /**
      * Extract use statements from file.
      *
+     * Returns the trimmed source between `use` and `;` (or `?>`) for every import and trait `use`
+     * statement, e.g. `Foo\Bar as Baz`, `function Foo\bar`, `Foo\{Bar, Baz}` or
+     * `HasFactory`. A trait `use` with a conflict-resolution block stops at its `{`
+     * (`use A, B { ... }` gives `A, B`). Each comment inside a statement becomes a single
+     * space. Only a `use` that starts a statement counts, so the word "use" in a comment,
+     * string or heredoc, a closure's `use (...)` clause, and `use` as a name (`const USE`,
+     * `K::USE`, `foo(use: 1)`, `namespace Use;`) are all ignored.
+     *
      * @return array<string>
      */
     public static function extractUseStatements(string $filePath): array
     {
-        $content = self::readFile($filePath);
-        if ($content === null) {
+        $tokens = self::tokenizeIfMentions(self::readFile($filePath), 'use');
+        $statements = [];
+
+        // Index-based so the walk resumes after each statement it consumed: rescanning those
+        // tokens from the next `use` makes malformed input quadratic.
+        for ($i = 0; isset($tokens[$i]); $i++) {
+            if ($tokens[$i]->id !== T_USE) {
+                continue;
+            }
+
+            if (! self::startsStatement($tokens, $i)) {
+                continue;
+            }
+
+            $body = '';
+            $last = null;
+            for ($j = $i + 1; ; $j++) {
+                if (! isset($tokens[$j])) {
+                    // Unterminated statement at end of file.
+                    return $statements;
+                }
+
+                // The statement ends at `;` or a close tag, or at the `{` opening a trait conflict block.
+                // The `{` of a group import (`use App\{A, B};`) follows a namespace separator.
+                $token = $tokens[$j];
+                if ($token->is([';', T_CLOSE_TAG]) || ($token->is('{') && $last?->is(T_NS_SEPARATOR) !== true)) {
+                    break;
+                }
+
+                $body .= $token->is([T_COMMENT, T_DOC_COMMENT]) ? ' ' : $token->text;
+                $last = $token->isIgnorable() ? $last : $token;
+            }
+
+            $statements[] = trim($body);
+            $i = $j;
+        }
+
+        return $statements;
+    }
+
+    /**
+     * The first named namespace declaration.
+     *
+     * @param  array<int, \PhpToken>  $tokens
+     */
+    private static function findNamespace(array $tokens): ?string
+    {
+        foreach ($tokens as $i => $token) {
+            if ($token->id === T_NAMESPACE && self::startsStatement($tokens, $i) && ($name = self::declaredNamespace($tokens, $i)) !== null) {
+                return $name;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The name declared by the nearest namespace declaration before position $i, or null when
+     * there is none or it opens a global `namespace { ... }` block.
+     *
+     * @param  array<int, \PhpToken>  $tokens
+     */
+    private static function enclosingNamespace(array $tokens, int $i): ?string
+    {
+        for ($j = $i - 1; $j >= 0; $j--) {
+            if ($tokens[$j]->id === T_NAMESPACE && self::startsStatement($tokens, $j)) {
+                return self::declaredNamespace($tokens, $j);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether the keyword at position $i starts a statement. Keywords also lex as their own
+     * token when used as a name (`const USE`, `K::NAMESPACE`, `function namespace()`,
+     * `foo(use: 1)`), and none of those follows a statement boundary.
+     *
+     * @param  array<int, \PhpToken>  $tokens
+     */
+    private static function startsStatement(array $tokens, int $i): bool
+    {
+        $prev = self::adjacentIndex($tokens, $i, -1);
+
+        return $prev === null || $tokens[$prev]->is([';', '{', '}', T_CLOSE_TAG, T_INLINE_HTML]);
+    }
+
+    /**
+     * The name declared by the `namespace` token at position $i, or null when it declares
+     * none (a global `namespace { ... }` block).
+     *
+     * @param  array<int, \PhpToken>  $tokens
+     */
+    private static function declaredNamespace(array $tokens, int $i): ?string
+    {
+        $name = self::adjacentIndex($tokens, $i, 1);
+        if ($name === null || preg_match(self::NAMESPACE_NAME, $tokens[$name]->text) !== 1) {
+            return null;
+        }
+
+        $after = self::adjacentIndex($tokens, $name, 1);
+
+        return $after !== null && $tokens[$after]->is([';', '{', T_CLOSE_TAG]) ? $tokens[$name]->text : null;
+    }
+
+    /**
+     * Index of the name token of the first `class` declaration.
+     *
+     * @param  array<int, \PhpToken>  $tokens
+     */
+    private static function findClassNameIndex(array $tokens): ?int
+    {
+        foreach ($tokens as $i => $token) {
+            if ($token->id !== T_CLASS) {
+                continue;
+            }
+
+            $prev = self::adjacentIndex($tokens, $i, -1);
+            if ($prev !== null && $tokens[$prev]->is(T_DOUBLE_COLON)) {
+                continue;
+            }
+
+            // An anonymous class (`new class {`, `new class(...)`, `new class extends ...`)
+            // is never followed by a name; nor is `namespace Class;`.
+            $next = self::adjacentIndex($tokens, $i, 1);
+            if ($next !== null && $tokens[$next]->is(T_STRING)) {
+                return $next;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Tokenize PHP source, or return no tokens when it is missing or cannot contain the
+     * keyword. The case-insensitive pre-check skips the tokenizer, which costs far more
+     * memory and time than a string search, for files that cannot match.
+     *
+     * PhpToken::tokenize() peaks at or below stripAllComments() on real large files (2.2 MB
+     * generated class: 189 vs 202 MB; 8.5 MB autoload_static.php: 135 vs 173 MB). On input
+     * made almost entirely of one-character tokens it peaks several times higher (1M `;`:
+     * 138 vs 18 MB), since each becomes an object rather than a string.
+     *
+     * @return array<int, \PhpToken>
+     */
+    private static function tokenizeIfMentions(?string $content, string $keyword): array
+    {
+        if ($content === null || stripos($content, $keyword) === false) {
             return [];
         }
 
-        preg_match_all('/use\s+([^;]+);/', $content, $matches);
+        return @\PhpToken::tokenize($content);
+    }
 
-        return array_map('trim', $matches[1]);
+    /**
+     * Index of the nearest token before ($step = -1) or after ($step = 1) position $i that
+     * is not whitespace, a comment or the open tag.
+     *
+     * @param  array<int, \PhpToken>  $tokens
+     */
+    private static function adjacentIndex(array $tokens, int $i, int $step): ?int
+    {
+        for ($j = $i + $step; isset($tokens[$j]); $j += $step) {
+            if (! $tokens[$j]->isIgnorable()) {
+                return $j;
+            }
+        }
+
+        return null;
     }
 
     /**

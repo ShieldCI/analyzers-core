@@ -86,11 +86,12 @@ class CodeHelper
     /**
      * Extract the namespace a file declares, or null when it declares none.
      *
-     * Deliberately stricter than FileParser::extractNamespace(), which matches everything up to
-     * the semicolon: on a line like `// change namespace to Foo;` that pattern yields "to Foo",
-     * whereas requiring namespace-legal characters skips the comment and finds the real
-     * declaration further down. The two are not interchangeable -- swapping this for that one
-     * is a silent regression, not a simplification.
+     * A regex over the code, unlike FileParser::extractNamespace(), which takes a path and reads
+     * the tokenized source. Requiring namespace-legal characters is what keeps this one correct
+     * on a line like `// change namespace to Foo;`: it skips the comment and finds the real
+     * declaration further down, where a looser `[^;]+` pattern would yield "to Foo". Do not
+     * loosen it. A comment shaped exactly like a declaration (`// namespace Foo;`) still
+     * matches here; FileParser::extractNamespace() ignores it.
      *
      * Takes code rather than a path, following the rest of this class, so a caller that already
      * has the file contents in hand does not read it a second time.

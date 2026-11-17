@@ -145,6 +145,331 @@ class FileParserTest extends TestCase
         $this->assertEmpty($uses);
     }
 
+    // --- extractNamespace / extractClassName / extractUseStatements read declarations, not text ---
+    //
+    // Each extractor used to run a regex over the raw file, so a word after "class", "namespace"
+    // or "use" in a comment, a string or a closure was taken for a declaration.
+
+    public function testExtractClassNameIgnoresWordsInDocblock(): void
+    {
+        $file = $this->writeFixture("<?php\n\nnamespace App;\n\n/**\n * This class handles payments.\n */\nfinal class PaymentService {}\n");
+
+        $this->assertSame('PaymentService', FileParser::extractClassName($file));
+        $this->assertSame('App\\PaymentService', FileParser::extractFullyQualifiedClassName($file));
+    }
+
+    public function testExtractNamespaceIgnoresLineComment(): void
+    {
+        $file = $this->writeFixture("<?php\n\n// The namespace Legacy; was dropped\nnamespace App\\Models;\n\nclass User {}\n");
+
+        $this->assertSame('App\\Models', FileParser::extractNamespace($file));
+    }
+
+    public function testExtractUseStatementsIgnoresCommentsAndClosureUse(): void
+    {
+        $file = $this->writeFixture("<?php\n\nuse App\\Models\\User;\n\n// We use caching; it is fast\n\$f = function () use (\$x) { return 1; };\n\$g = fn (\$y) => \$y;\n");
+
+        $this->assertSame(['App\\Models\\User'], FileParser::extractUseStatements($file));
+    }
+
+    public function testExtractorsIgnoreDeclarationsInDocblock(): void
+    {
+        $file = $this->writeFixture("<?php\n\n/**\n * Lives in namespace Wrong; and you should use Nothing; here.\n */\nnamespace App;\n\nuse App\\Real;\n\nclass Thing {}\n");
+
+        $this->assertSame('App', FileParser::extractNamespace($file));
+        $this->assertSame(['App\\Real'], FileParser::extractUseStatements($file));
+        $this->assertSame('Thing', FileParser::extractClassName($file));
+    }
+
+    public function testExtractorsIgnoreHashComment(): void
+    {
+        $file = $this->writeFixture("<?php\n\n# use Legacy\\Thing; namespace Old; class Gone\nnamespace App;\n\nclass Real {}\n");
+
+        $this->assertSame('App', FileParser::extractNamespace($file));
+        $this->assertSame([], FileParser::extractUseStatements($file));
+        $this->assertSame('Real', FileParser::extractClassName($file));
+    }
+
+    public function testExtractorsIgnoreStringAndHeredocContents(): void
+    {
+        $file = $this->writeFixture("<?php\n\n\$a = 'class Foo';\n\$b = \"use Bar;\";\n\$c = <<<TXT\nnamespace Heredoc;\nuse Heredoc\\Thing;\nclass Heredoc {}\nTXT;\n\nclass Real {}\n");
+
+        $this->assertNull(FileParser::extractNamespace($file));
+        $this->assertSame([], FileParser::extractUseStatements($file));
+        $this->assertSame('Real', FileParser::extractClassName($file));
+    }
+
+    public function testExtractClassNameIgnoresClassConstant(): void
+    {
+        $file = $this->writeFixture("<?php\n\nnamespace App;\n\n\$ok = \$name === Foo::class and \$strict;\n\nclass Real {}\n");
+
+        $this->assertSame('Real', FileParser::extractClassName($file));
+    }
+
+    public function testExtractClassNameIgnoresAnonymousClass(): void
+    {
+        $file = $this->writeFixture("<?php\n\n\$x = new class extends Base {};\n\nclass Real {}\n");
+
+        $this->assertSame('Real', FileParser::extractClassName($file));
+    }
+
+    public function testExtractClassNameReturnsNullForOnlyAnonymousClassAndClassConstant(): void
+    {
+        $file = $this->writeFixture("<?php\n\n\$x = new class {};\n\$y = Foo::class;\n");
+
+        $this->assertNull(FileParser::extractClassName($file));
+    }
+
+    public function testExtractorsReadBracedNamespace(): void
+    {
+        $file = $this->writeFixture("<?php\n\nnamespace App\\Http {\n    use Foo\\Bar;\n\n    class Kernel {}\n}\n");
+
+        $this->assertSame('App\\Http', FileParser::extractNamespace($file));
+        $this->assertSame(['Foo\\Bar'], FileParser::extractUseStatements($file));
+        $this->assertSame('App\\Http\\Kernel', FileParser::extractFullyQualifiedClassName($file));
+    }
+
+    public function testExtractNamespaceSkipsGlobalBracedNamespace(): void
+    {
+        $file = $this->writeFixture("<?php\n\nnamespace {\n    class Kernel {}\n}\n");
+
+        $this->assertNull(FileParser::extractNamespace($file));
+        $this->assertSame('Kernel', FileParser::extractClassName($file));
+    }
+
+    // Controls: genuine declarations come back exactly as the old regexes returned them.
+
+    public function testExtractNamespaceIgnoresRelativeNameInFileWithoutNamespace(): void
+    {
+        $file = $this->writeFixture("<?php\n\nnamespace\\helper();\n\nclass Real {}\n");
+
+        $this->assertNull(FileParser::extractNamespace($file));
+    }
+
+    public function testExtractUseStatementsKeepsAliasesFunctionsAndConstants(): void
+    {
+        $file = $this->writeFixture("<?php\n\nnamespace App;\n\nuse Foo\\Bar\\Baz as ShortName;\nuse function Illuminate\\Support\\tap;\nuse const App\\VERSION;\n\nclass Real {}\n");
+
+        $this->assertSame(
+            ['Foo\\Bar\\Baz as ShortName', 'function Illuminate\\Support\\tap', 'const App\\VERSION'],
+            FileParser::extractUseStatements($file)
+        );
+    }
+
+    public function testExtractUseStatementsKeepsGroupUseBodyVerbatim(): void
+    {
+        $file = $this->writeFixture("<?php\n\nuse App\\{Models\\User, Models\\Post as P};\nuse App\\{\n    Http\\Kernel,\n    Console\\Kernel as ConsoleKernel,\n};\n");
+
+        $this->assertSame(
+            ['App\\{Models\\User, Models\\Post as P}', "App\\{\n    Http\\Kernel,\n    Console\\Kernel as ConsoleKernel,\n}"],
+            FileParser::extractUseStatements($file)
+        );
+    }
+
+    public function testExtractUseStatementsKeepsTraitUseInsideClass(): void
+    {
+        $file = $this->writeFixture("<?php\n\nnamespace App\\Models;\n\nuse Illuminate\\Database\\Eloquent\\Factories\\HasFactory;\n\nabstract class User\n{\n    use HasFactory, Notifiable;\n}\n");
+
+        $this->assertSame(
+            ['Illuminate\\Database\\Eloquent\\Factories\\HasFactory', 'HasFactory, Notifiable'],
+            FileParser::extractUseStatements($file)
+        );
+        $this->assertSame('User', FileParser::extractClassName($file));
+    }
+
+    public function testExtractUseStatementsReadsStatementOnOpenTagLine(): void
+    {
+        $file = $this->writeFixture("<?php use Foo\\Bar;\n\nclass Real {}\n");
+
+        $this->assertSame(['Foo\\Bar'], FileParser::extractUseStatements($file));
+    }
+
+    public function testExtractUseStatementsDropsCommentsInsideStatement(): void
+    {
+        $file = $this->writeFixture("<?php\n\nuse Foo\\Bar /* legacy; keep */;\nuse App\\{\n    User, // primary\n    Post,\n};\n");
+
+        $this->assertSame(
+            ['Foo\\Bar', "App\\{\n    User,  \n    Post,\n}"],
+            FileParser::extractUseStatements($file)
+        );
+    }
+
+    public function testExtractUseStatementsIgnoresUnterminatedStatement(): void
+    {
+        $file = $this->writeFixture("<?php\n\nuse Foo\\Bar");
+
+        $this->assertSame([], FileParser::extractUseStatements($file));
+    }
+
+    // Only a `use` that starts a statement is an import or trait use. Keywords are
+    // case-insensitive and also lex as T_USE when used as a name.
+
+    public function testExtractUseStatementsIgnoresUppercaseClassConstantNamedUse(): void
+    {
+        $this->assertSame([], FileParser::extractUseStatements($this->writeFixture("<?php\nclass K { const USE = 'x'; }\n")));
+    }
+
+    public function testExtractUseStatementsIgnoresLowercaseClassConstantNamedUse(): void
+    {
+        $this->assertSame([], FileParser::extractUseStatements($this->writeFixture("<?php\nclass K { const use = 'x'; }\n")));
+    }
+
+    public function testExtractUseStatementsIgnoresStaticFetchOfConstantNamedUse(): void
+    {
+        $this->assertSame(['Foo\\Bar'], FileParser::extractUseStatements($this->writeFixture("<?php\nuse Foo\\Bar;\n\$a = [K::USE, K::OTHER];\n")));
+    }
+
+    public function testExtractUseStatementsIgnoresNamedArgumentUse(): void
+    {
+        $this->assertSame(['Foo\\Bar'], FileParser::extractUseStatements($this->writeFixture("<?php\nuse Foo\\Bar;\n\$r = foo(use: true);\n")));
+    }
+
+    public function testExtractUseStatementsIgnoresEnumCaseNamedUse(): void
+    {
+        $this->assertSame([], FileParser::extractUseStatements($this->writeFixture("<?php\nenum E { case USE; case OTHER; }\n")));
+    }
+
+    public function testExtractUseStatementsReadsStatementAfterInlineHtml(): void
+    {
+        $this->assertSame(['Foo\\Bar'], FileParser::extractUseStatements($this->writeFixture("<?php\n?>\n<p>x</p>\n<?php use Foo\\Bar;\n")));
+    }
+
+    public function testExtractUseStatementsIgnoresUseAsLastToken(): void
+    {
+        $this->assertSame([], FileParser::extractUseStatements($this->writeFixture("<?php\nclass X {}\nuse")));
+    }
+
+    public function testExtractUseStatementsReplacesCommentWithSpace(): void
+    {
+        $this->assertSame(['Foo\\Bar as Baz'], FileParser::extractUseStatements($this->writeFixture("<?php\nuse Foo\\Bar/**/as Baz;\n")));
+    }
+
+    public function testExtractUseStatementsStopsAtTraitConflictBlock(): void
+    {
+        $this->assertSame(['A, B'], FileParser::extractUseStatements($this->writeFixture("<?php\nclass X { use A, B { A::foo insteadof B; B::foo as bar; } }\n")));
+    }
+
+    public function testExtractUseStatementsStopsAtEmptyTraitBlock(): void
+    {
+        $this->assertSame(['A'], FileParser::extractUseStatements($this->writeFixture("<?php\nclass X { use A {} public function y() { return 1; } }\n")));
+    }
+
+    public function testExtractUseStatementsKeepsGroupUseAfterFullyQualifiedPrefix(): void
+    {
+        $this->assertSame(['\\App\\ {C, D}'], FileParser::extractUseStatements($this->writeFixture("<?php\nuse \\App\\ {C, D};\n")));
+    }
+
+    // A namespace segment may be a reserved word, which lexes as that keyword's token.
+
+    public function testExtractNamespaceReadsKeywordNamespaces(): void
+    {
+        foreach (['Match', 'Fn', 'Readonly', 'List', 'Class', 'Function', 'Use'] as $name) {
+            $file = $this->writeFixture("<?php\nnamespace {$name};\nclass X {}\n");
+
+            $this->assertSame($name, FileParser::extractNamespace($file), $name);
+            $this->assertSame("{$name}\\X", FileParser::extractFullyQualifiedClassName($file), $name);
+        }
+    }
+
+    public function testExtractNamespaceReadsBracedKeywordNamespace(): void
+    {
+        $this->assertSame('Match', FileParser::extractNamespace($this->writeFixture("<?php\nnamespace Match {\n    class X {}\n}\n")));
+    }
+
+    public function testExtractUseStatementsIgnoresNamespaceNamedUse(): void
+    {
+        $this->assertSame(['Foo\\Bar'], FileParser::extractUseStatements($this->writeFixture("<?php\nnamespace Use;\nuse Foo\\Bar;\n")));
+    }
+
+    public function testExtractorsSkipFilesThatNeverMentionTheKeyword(): void
+    {
+        $file = $this->writeFixture("<?php\n\$x = 42;\n");
+
+        $this->assertNull(FileParser::extractNamespace($file));
+        $this->assertNull(FileParser::extractClassName($file));
+        $this->assertNull(FileParser::extractFullyQualifiedClassName($file));
+        $this->assertSame([], FileParser::extractUseStatements($file));
+    }
+
+    // A close tag ends a statement, like `;`.
+
+    public function testExtractUseStatementsEndsStatementAtCloseTag(): void
+    {
+        $file = $this->writeFixture("<?php use Foo\\Bar ?>\n<p>hi</p>\n<?php use Baz\\Qux; ?>\n");
+
+        $this->assertSame(['Foo\\Bar', 'Baz\\Qux'], FileParser::extractUseStatements($file));
+    }
+
+    public function testExtractUseStatementsReadsManyCloseTagTerminatedStatements(): void
+    {
+        $file = $this->writeFixture(str_repeat("<?php use A\\B ?>x", 2000) . "<?php ;\n");
+
+        $this->assertSame(array_fill(0, 2000, 'A\\B'), FileParser::extractUseStatements($file));
+    }
+
+    /**
+     * The walk resumes after each statement it consumed instead of rescanning from the next
+     * `use`, which kept it linear: on this invalid file a rescan would yield 3000 entries
+     * (and take seconds), one per `use`, each running to the final `;`.
+     */
+    public function testExtractUseStatementsDoesNotRescanConsumedTokens(): void
+    {
+        $file = $this->writeFixture("<?php\n" . str_repeat("use A\\B }\n", 3000) . ";\n");
+
+        $uses = FileParser::extractUseStatements($file);
+
+        $this->assertCount(1, $uses);
+        $this->assertStringStartsWith("A\\B }\nuse A\\B }", $uses[0]);
+    }
+
+    public function testExtractNamespaceEndsAtCloseTag(): void
+    {
+        $file = $this->writeFixture("<?php namespace App ?>\n<?php class X {}\n");
+
+        $this->assertSame('App', FileParser::extractNamespace($file));
+        $this->assertSame('App\\X', FileParser::extractFullyQualifiedClassName($file));
+    }
+
+    // The class is qualified by the namespace that encloses it, not the file's first one.
+
+    public function testExtractFullyQualifiedClassNameUsesGlobalBlockEnclosingClass(): void
+    {
+        $file = $this->writeFixture("<?php\nnamespace {\n    class G {}\n}\nnamespace App {\n    class X {}\n}\n");
+
+        $this->assertSame('G', FileParser::extractFullyQualifiedClassName($file));
+        $this->assertSame('App', FileParser::extractNamespace($file));
+    }
+
+    public function testExtractFullyQualifiedClassNameUsesNamespaceEnclosingClass(): void
+    {
+        $file = $this->writeFixture("<?php\nnamespace A;\ninterface I {}\nnamespace B;\nclass C {}\n");
+
+        $this->assertSame('B\\C', FileParser::extractFullyQualifiedClassName($file));
+        $this->assertSame('A', FileParser::extractNamespace($file));
+    }
+
+    // `namespace` also lexes as T_NAMESPACE when used as a name; only a declaration counts.
+
+    public function testExtractFullyQualifiedClassNameSkipsNamespaceUsedAsName(): void
+    {
+        foreach ([
+            "<?php\nnamespace App;\n\ninterface HasNs\n{\n    const NAMESPACE = 'x';\n}\n\nclass Foo implements HasNs {}\n",
+            "<?php\nnamespace App;\n\nfunction prefix(): string { return Config::NAMESPACE; }\n\nclass Foo {}\n",
+            "<?php\nnamespace App;\n\ntrait T { public function namespace(): string { return ''; } }\n\nclass Foo { use T; }\n",
+            "<?php\nnamespace App;\n\nfoo(namespace: 1);\n\nclass Foo {}\n",
+        ] as $code) {
+            $this->assertSame('App\\Foo', FileParser::extractFullyQualifiedClassName($this->writeFixture($code)), $code);
+        }
+    }
+
+    private function writeFixture(string $code): string
+    {
+        $file = $this->testDir . '/fixture.php';
+        file_put_contents($file, $code);
+
+        return $file;
+    }
+
     public function testCountLinesReturnsCorrectCount(): void
     {
         $file = $this->testDir . '/test.php';
