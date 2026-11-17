@@ -557,10 +557,8 @@ class CodeHelperTest extends TestCase
     }
 
     /**
-     * The reason this is not FileParser::extractNamespace(): that pattern matches everything up
-     * to the semicolon, so the comment below yields "to Foo". Requiring namespace-legal
-     * characters skips it and finds the real declaration. Swapping the two is a silent
-     * regression, not a simplification.
+     * Requiring namespace-legal characters is what skips the comment below: a looser `[^;]+`
+     * pattern would yield "to Foo". Loosening the regex is a silent regression.
      */
     public function testExtractNamespaceSkipsTheWordNamespaceInAComment(): void
     {
