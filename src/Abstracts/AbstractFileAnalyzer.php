@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Abstracts;
 
+use RecursiveCallbackFilterIterator;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use ShieldCI\AnalyzersCore\Support\PathHelper;
@@ -41,6 +42,13 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * @var array<string>
      */
     private array $compiledExcludePatterns = [];
+
+    /**
+     * Directories the latest walk skipped because they could not be opened.
+     *
+     * @var list<string>
+     */
+    private array $unreadablePaths = [];
 
     /**
      * Set the base path.
@@ -123,6 +131,11 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * empty($this->paths) to install a narrower scan root of their own - a
      * getter that mutates is one reordering away from taking that away.
      *
+     * A directory that cannot be opened or entered is skipped and recorded for
+     * getUnreadablePaths() rather than thrown (#91). The iterator used to throw
+     * out of the walk, and analyze() turned that into an Error result, so one
+     * root-owned directory left every readable file unjudged.
+     *
      * @return iterable<SplFileInfo>
      */
     protected function getFilesToAnalyze(): iterable
@@ -132,6 +145,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         // the last reader left that could disagree with them (#58, #62).
         $basePath = $this->getBasePath();
         $paths = $this->paths === [] ? [''] : $this->paths;
+        $this->unreadablePaths = [];
 
         foreach ($paths as $path) {
             $fullPath = PathHelper::join($basePath, $path);
@@ -144,9 +158,31 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
                 continue;
             }
 
+            if (! $this->canEnterDirectory($fullPath)) {
+                $this->recordUnreadablePath($fullPath);
+
+                continue;
+            }
+
+            // The filter checks each directory before the walk descends into it.
+            // CATCH_GET_CHILD is only the backstop for one that turns unreadable
+            // between that check and the open: it swallows the exception without
+            // saying which directory failed, so that skip goes unrecorded.
             $iterator = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($fullPath, RecursiveDirectoryIterator::SKIP_DOTS),
-                RecursiveIteratorIterator::LEAVES_ONLY
+                new RecursiveCallbackFilterIterator(
+                    new RecursiveDirectoryIterator($fullPath, RecursiveDirectoryIterator::SKIP_DOTS),
+                    function (SplFileInfo $current, string $key, RecursiveDirectoryIterator $iterator): bool {
+                        if ($iterator->hasChildren() && ! $this->canEnterDirectory($current->getPathname())) {
+                            $this->recordUnreadablePath($current->getPathname());
+
+                            return false;
+                        }
+
+                        return true;
+                    }
+                ),
+                RecursiveIteratorIterator::LEAVES_ONLY,
+                RecursiveIteratorIterator::CATCH_GET_CHILD
             );
 
             /** @var SplFileInfo $file */
@@ -156,6 +192,80 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
                 }
             }
         }
+    }
+
+    /**
+     * Directories the latest getFilesToAnalyze() walk skipped as unreadable.
+     *
+     * Spelled like the pathnames of the files the walk yields (so relative when
+     * the base path is), each once, in the order the walk met them. A directory
+     * in which the exclude patterns would drop every PHP file is skipped
+     * silently.
+     *
+     * The record resets when a walk starts, so on a cached instance it never carries a
+     * directory fixed since the last run - but it also describes only that walk:
+     * read it after the walk you care about, and know that a walk abandoned
+     * part-way has recorded only the directories it reached. Subclasses that
+     * replace getFilesToAnalyze() record nothing here.
+     *
+     * @return list<string>
+     */
+    protected function getUnreadablePaths(): array
+    {
+        return $this->unreadablePaths;
+    }
+
+    /**
+     * Whether the walk can list a directory and stat what is in it.
+     *
+     * Read permission alone is not enough: a 0444 directory lists its entries
+     * but none of them can be stat'ed, so the walk would drop them as non-files
+     * without failing. Windows has no search bit and is_executable() answers
+     * false for every directory there, so the search check is POSIX-only.
+     */
+    private function canEnterDirectory(string $dir): bool
+    {
+        if (! is_readable($dir)) {
+            return false;
+        }
+
+        if (DIRECTORY_SEPARATOR === '\\') {
+            return true; // @codeCoverageIgnore
+        }
+
+        return is_executable($dir);
+    }
+
+    private function recordUnreadablePath(string $path): void
+    {
+        // Not recorded if the excludes would drop a PHP file of any name inside
+        // it. The probe is named with a NUL byte, which no real filename or
+        // literal pattern holds, so only a wildcard ('vendor/*', '*.php') can
+        // match it. The directory is skipped either way; only the report differs.
+        $probe = $path.'/'."\0.php";
+
+        if ($this->matchesExcludePattern(ltrim($this->getRelativePath($probe), '/'), $probe)) {
+            return;
+        }
+
+        if (! in_array($path, $this->unreadablePaths, true)) {
+            $this->unreadablePaths[] = $path;
+        }
+    }
+
+    /**
+     * Match the compiled exclude patterns against both spellings of a path, the
+     * relative one and the absolute one, as shouldAnalyzeFile() explains.
+     */
+    private function matchesExcludePattern(string $relativePath, string $path): bool
+    {
+        foreach ($this->compiledExcludePatterns as $regex) {
+            if (preg_match($regex, $relativePath) === 1 || preg_match($regex, $path) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -174,13 +284,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         // patterns that relied on it ('*/vendor/*').
         $relativePath = ltrim($this->getRelativePath($path), '/');
 
-        foreach ($this->compiledExcludePatterns as $regex) {
-            if (preg_match($regex, $relativePath) === 1 || preg_match($regex, $path) === 1) {
-                return false;
-            }
-        }
-
-        return true;
+        return ! $this->matchesExcludePattern($relativePath, $path);
     }
 
     /**

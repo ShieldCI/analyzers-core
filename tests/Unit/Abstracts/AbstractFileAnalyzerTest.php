@@ -15,6 +15,14 @@ class AbstractFileAnalyzerTest extends TestCase
 {
     private string $testDir = '';
 
+    /**
+     * Directories a test chmod'ed shut, reopened in tearDown() so cleanup can
+     * descend into them.
+     *
+     * @var list<string>
+     */
+    private array $lockedDirs = [];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -37,6 +45,11 @@ class AbstractFileAnalyzerTest extends TestCase
     protected function tearDown(): void
     {
         parent::tearDown();
+
+        foreach ($this->lockedDirs as $dir) {
+            chmod($dir, 0755);
+        }
+        $this->lockedDirs = [];
 
         // Clean up test directory
         if (is_dir($this->testDir)) {
@@ -842,6 +855,277 @@ class AbstractFileAnalyzerTest extends TestCase
         return $files;
     }
 
+    // =========================================================================
+    // Unreadable directories - ShieldCI/analyzers-core#91
+    //
+    // One directory the scanner could not open used to throw out of the walk,
+    // and AbstractAnalyzer::analyze() turned that into an Error result - the
+    // readable files were never judged at all.
+    // =========================================================================
+
+    public function testAnUnreadableNestedDirectoryDoesNotFailTheAnalysis(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new WalkingFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app']);
+
+        $result = $analyzer->analyze();
+
+        $this->assertSame('passed', $result->getStatus()->value, $result->getMessage());
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAnUnreadableNestedDirectoryIsSkippedUnderTheDefaultScanRoot(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new WalkingFileAnalyzer();
+        $analyzer->setBasePath($project);
+
+        $result = $analyzer->analyze();
+
+        $this->assertSame('passed', $result->getStatus()->value, $result->getMessage());
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testAnUnreadableAnalyzedRootIsSkipped(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new WalkingFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers', 'app/Http']);
+
+        $result = $analyzer->analyze();
+
+        $this->assertSame('passed', $result->getStatus()->value, $result->getMessage());
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testGetUnreadablePathsListsEachSkippedDirectoryOnce(): void
+    {
+        // 'app' finds app/Providers nested and 'app/Providers' names it as a
+        // root; it is one directory and is reported once, absolute.
+        $project = $this->unreadableProject();
+        mkdir($project . '/app/Http/Locked');
+        $this->lock($project . '/app/Http/Locked');
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers', 'app']);
+
+        $analyzer->getPhpFilesPublic();
+        $unreadable = $analyzer->getUnreadablePathsPublic();
+        sort($unreadable);
+
+        $this->assertSame([$project . '/app/Http/Locked', $project . '/app/Providers'], $unreadable);
+    }
+
+    public function testAFullyReadableTreeRecordsNoUnreadablePaths(): void
+    {
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app']);
+
+        $files = $analyzer->getPhpFilesPublic();
+        sort($files);
+
+        $this->assertSame(
+            [$project . '/app/Http/Controllers/C.php', $project . '/app/Providers/P.php'],
+            $files
+        );
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testTheUnreadableRecordDescribesTheLatestWalkOnly(): void
+    {
+        // AnalyzerManager caches analyzer instances, so a directory fixed
+        // between runs must not stay reported against the next one.
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app']);
+
+        $analyzer->getPhpFilesPublic();
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+
+        chmod($project . '/app/Providers', 0755);
+
+        $this->assertCount(2, $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testASearchlessNestedDirectoryIsRecorded(): void
+    {
+        // 0444 can be listed but not entered: its entries cannot be stat'ed, so
+        // the walk used to drop them as non-files and record nothing.
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers', 0444);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app']);
+
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testASearchlessAnalyzedRootIsRecorded(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers', 0444);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testAnUnreadableDirectoryInsideAnExcludedTreeIsNotRecorded(): void
+    {
+        // Every file under vendor/ would be excluded anyway, so reporting the
+        // directory as missed coverage would be a false positive.
+        $project = $this->unreadableProject();
+        mkdir($project . '/vendor/pkg/locked', 0777, true);
+        file_put_contents($project . '/vendor/pkg/locked/V.php', "<?php\n");
+        $this->lock($project . '/vendor/pkg/locked');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setExcludePatterns(['vendor/*']);
+
+        $files = $analyzer->getPhpFilesPublic();
+        sort($files);
+
+        $this->assertSame(
+            [$project . '/app/Http/Controllers/C.php', $project . '/app/Providers/P.php'],
+            $files
+        );
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testAnExcludedUnreadableAnalyzedRootIsNotRecorded(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers']);
+        $analyzer->setExcludePatterns(['*/Providers/*']);
+
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testAnUnreadableDirectoryOutsideTheExcludesIsStillRecorded(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setExcludePatterns(['vendor/*', '*.blade.php', 'app/Providers']);
+
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testADirectoryShapedExcludeDoesNotHideAnUnreadableDirectory(): void
+    {
+        // 'app/*/' matches the directory spelled with a trailing slash but no
+        // file below it, so the files it hides from the walk stay unaccounted.
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setExcludePatterns(['app/*/']);
+
+        $analyzer->getPhpFilesPublic();
+        $unreadable = $analyzer->getUnreadablePathsPublic();
+
+        chmod($project . '/app/Providers', 0755);
+        clearstatcache();
+
+        $this->assertContains($project . '/app/Providers/P.php', $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project . '/app/Providers'], $unreadable);
+    }
+
+    public function testATrailingSlashDirectoryExcludeDoesNotHideAnUnreadableDirectory(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setExcludePatterns(['app/Providers/']);
+
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testAnExcludeOfEveryPhpFileHidesAnUnreadableDirectory(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setExcludePatterns(['*.php']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+    }
+
+    /**
+     * The tree from the #91 report, under its own base path so the fixture
+     * setUp() builds does not leak into the assertions.
+     */
+    private function unreadableProject(): string
+    {
+        $project = $this->testDir . '/unreadable-project';
+
+        mkdir($project . '/app/Http/Controllers', 0777, true);
+        mkdir($project . '/app/Providers', 0777, true);
+        file_put_contents($project . '/app/Http/Controllers/C.php', "<?php\n");
+        file_put_contents($project . '/app/Providers/P.php', "<?php\n");
+
+        return $project;
+    }
+
+    /**
+     * Take read (0000) or search (0444) permission away from $dir, skipping the
+     * test where that changes nothing (root, Windows, some ACL filesystems).
+     */
+    private function lock(string $dir, int $mode = 0000): void
+    {
+        chmod($dir, $mode);
+        $this->lockedDirs[] = $dir;
+        clearstatcache();
+
+        if (is_readable($dir) && is_executable($dir)) {
+            $this->markTestSkipped(sprintf('chmod %04o does not lock a directory here (running as root?)', $mode));
+        }
+    }
+
     public function testTreatsZeroAsARealBasePath(): void
     {
         // '0' is falsy, so getFilesToAnalyze()'s `$this->basePath ?` and
@@ -956,5 +1240,23 @@ class ConcreteFileAnalyzer extends AbstractFileAnalyzer
     public function exposedGetEnvironment(): string
     {
         return $this->getEnvironment();
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function getUnreadablePathsPublic(): array
+    {
+        return $this->getUnreadablePaths();
+    }
+}
+
+// Walks its files inside analyze(), as real file analyzers do, so a walk that
+// throws surfaces as the Error result AbstractAnalyzer::analyze() produces.
+class WalkingFileAnalyzer extends ConcreteFileAnalyzer
+{
+    protected function runAnalysis(): ResultInterface
+    {
+        return $this->passed(count($this->getPhpFiles()) . ' files analyzed');
     }
 }
