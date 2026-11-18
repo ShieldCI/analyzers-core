@@ -27,7 +27,9 @@ class JsonFormatter implements ReporterInterface
             'results' => array_map(fn (ResultInterface $r) => $r->toArray(), $results),
         ];
 
-        $flags = JSON_THROW_ON_ERROR;
+        // Issue data quotes scanned files, which may hold bytes that are not UTF-8. Substitute
+        // U+FFFD for them rather than let one bad byte throw away the whole report.
+        $flags = JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE;
         if ($this->prettyPrint) {
             $flags |= JSON_PRETTY_PRINT;
         }

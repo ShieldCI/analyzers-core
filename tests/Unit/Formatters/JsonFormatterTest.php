@@ -8,7 +8,7 @@ use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Enums\{Severity, Status};
 use ShieldCI\AnalyzersCore\Formatters\JsonFormatter;
 use ShieldCI\AnalyzersCore\Results\{AnalysisResult, ResultCollection};
-use ShieldCI\AnalyzersCore\ValueObjects\{Issue, Location};
+use ShieldCI\AnalyzersCore\ValueObjects\{CodeSnippet, Issue, Location};
 
 class JsonFormatterTest extends TestCase
 {
@@ -284,5 +284,67 @@ class JsonFormatterTest extends TestCase
             $data['summary']['score']
         );
         $this->assertEquals(33.33, $data['summary']['score']);
+    }
+
+    // =========================================================================
+    // Invalid UTF-8 in issue data - one bad byte in a scanned file used to make
+    // json_encode() throw for the whole report.
+    // =========================================================================
+
+    public function testInvalidUtf8InACodeSnippetIsSubstitutedNotFatal(): void
+    {
+        $file = sys_get_temp_dir().'/json_invalid_utf8_'.uniqid().'.php';
+        file_put_contents($file, "<?php\n\$a = \"\xFF\";\n");
+
+        try {
+            $issue = new Issue(
+                message: 'Bad byte',
+                location: new Location($file, 2),
+                severity: Severity::Low,
+                recommendation: 'Fix it',
+                codeSnippet: CodeSnippet::fromFile($file, 2, 1),
+            );
+
+            $data = json_decode((new JsonFormatter())->format([AnalysisResult::failed('rp', 'x', [$issue])]), true);
+        } finally {
+            unlink($file);
+        }
+
+        $this->assertIsArray($data);
+        $this->assertSame("\$a = \"\u{FFFD}\";", $data['results'][0]['issues'][0]['code_snippet']['lines'][2]);
+    }
+
+    public function testInvalidUtf8InAnIssueMessageIsSubstitutedNotFatal(): void
+    {
+        $issue = new Issue(
+            message: "Found \xC3\x28 here",
+            location: null,
+            severity: Severity::Low,
+            recommendation: 'Fix it',
+        );
+
+        $data = json_decode((new JsonFormatter())->format([AnalysisResult::failed('rp', 'x', [$issue])]), true);
+
+        $this->assertIsArray($data);
+        $this->assertSame("Found \u{FFFD}( here", $data['results'][0]['issues'][0]['message']);
+    }
+
+    public function testValidUtf8OutputIsUnchanged(): void
+    {
+        $issue = new Issue(
+            message: 'Café € 😀',
+            location: null,
+            severity: Severity::Low,
+            recommendation: 'Fix it',
+        );
+        $results = [AnalysisResult::failed('rp', 'x', [$issue])];
+
+        $output = (new JsonFormatter())->format($results);
+
+        $this->assertStringContainsString('"Caf\u00e9 \u20ac \ud83d\ude00"', $output);
+        $this->assertSame(json_encode([
+            'summary' => json_decode($output, true)['summary'],
+            'results' => array_map(static fn (AnalysisResult $r): array => $r->toArray(), $results),
+        ], JSON_THROW_ON_ERROR), $output);
     }
 }

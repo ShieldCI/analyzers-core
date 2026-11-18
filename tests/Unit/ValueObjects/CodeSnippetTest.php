@@ -5,11 +5,17 @@ declare(strict_types=1);
 namespace ShieldCI\AnalyzersCore\Tests\Unit\ValueObjects;
 
 use PHPUnit\Framework\TestCase;
-use ShieldCI\AnalyzersCore\ValueObjects\CodeSnippet;
+use ShieldCI\AnalyzersCore\Enums\Severity;
+use ShieldCI\AnalyzersCore\Formatters\JsonFormatter;
+use ShieldCI\AnalyzersCore\Results\AnalysisResult;
+use ShieldCI\AnalyzersCore\ValueObjects\{CodeSnippet, Issue, Location};
 
 class CodeSnippetTest extends TestCase
 {
     private string $testFile;
+
+    /** @var list<string> */
+    private array $tempFiles = [];
 
     protected function setUp(): void
     {
@@ -43,6 +49,12 @@ PHP;
     {
         if (file_exists($this->testFile)) {
             unlink($this->testFile);
+        }
+
+        foreach ($this->tempFiles as $file) {
+            if (file_exists($file)) {
+                unlink($file);
+            }
         }
 
         parent::tearDown();
@@ -607,12 +619,8 @@ PHP;
         $this->assertEquals($this->testFile, $snippet->getFilePath());
     }
 
-    public function test_from_file_handles_runtime_exception(): void
+    public function test_from_file_reads_a_small_file(): void
     {
-        // Test lines 73-75: Catch RuntimeException and return null
-        // Create a valid file and verify the fromFile method works correctly
-        // The RuntimeException catch block is marked with @codeCoverageIgnore
-        // since SplFileObject blocks on FIFOs and there's no portable way to trigger it
         $file = sys_get_temp_dir().'/runtime_exception_'.uniqid().'.php';
         file_put_contents($file, "<?php\nclass Test {}\n");
 
@@ -870,12 +878,8 @@ PHP;
         unlink($file);
     }
 
-    public function test_find_signature_line_skips_non_string_lines(): void
+    public function test_find_signature_line_handles_ordinary_lines(): void
     {
-        // Test line 129: continue when line is not a string
-        // This is hard to test directly since SplFileObject->current() usually returns string
-        // But we can verify the code handles it correctly by testing edge cases
-
         $file = sys_get_temp_dir().'/non_string_'.uniqid().'.php';
         $content = <<<'PHP'
 <?php
@@ -890,11 +894,8 @@ class Test
 PHP;
         file_put_contents($file, $content);
 
-        // The findSignatureLine method should handle non-string lines gracefully
-        // by continuing the loop (line 129)
         $snippet = CodeSnippet::fromFile($file, 7, 2);
 
-        // Should work correctly even if some lines are not strings
         $this->assertNotNull($snippet);
         $lines = $snippet->getLines();
         $this->assertArrayHasKey(7, $lines);
@@ -1016,5 +1017,197 @@ PHP;
         $this->assertGreaterThanOrEqual(1, count($lines));
 
         unlink($file);
+    }
+
+    // =========================================================================
+    // fromFile() line indexing - ShieldCI/analyzers-core#92
+    //
+    // fromFile() reads a file in one streaming pass and then only the lines a
+    // snippet needs. It must give what the SplFileObject implementation gave,
+    // including its line-count quirks, without holding the file in memory.
+    // =========================================================================
+
+    public function test_from_file_counts_lines_like_split_on_newline(): void
+    {
+        // A trailing "\n" adds a final empty line; an empty file is one empty line.
+        $this->assertSame([1 => 'a', 2 => 'b', 3 => ''], CodeSnippet::fromFile($this->writeTemp("a\nb\n"), 3, 1)?->getLines());
+        $this->assertSame([1 => 'a', 2 => 'b'], CodeSnippet::fromFile($this->writeTemp("a\nb"), 2, 1)?->getLines());
+        $this->assertSame([1 => ''], CodeSnippet::fromFile($this->writeTemp(''), 1, 3)?->getLines());
+    }
+
+    public function test_from_file_treats_crlf_and_lone_cr_like_split_on_newline(): void
+    {
+        $this->assertSame([1 => 'a', 2 => 'b', 3 => ''], CodeSnippet::fromFile($this->writeTemp("a\r\nb\r\n"), 2, 1)?->getLines());
+        // A lone "\r" is not a line break, so this is one line.
+        $this->assertSame([1 => "a\rb\rc"], CodeSnippet::fromFile($this->writeTemp("a\rb\rc"), 1, 3)?->getLines());
+    }
+
+    public function test_from_file_returns_null_for_directory(): void
+    {
+        $this->assertNull(CodeSnippet::fromFile(sys_get_temp_dir(), 1));
+    }
+
+    public function test_from_file_target_beyond_end_of_file(): void
+    {
+        $file = $this->writeTemp("<?php\nfunction f()\n{\n    return 1;\n}\n");
+
+        // Edge compensation pulls the window back onto the last lines; the signature search
+        // walks lines 7 and 6 first, the first of which does not exist.
+        $expected = [4 => '    return 1;', 5 => '}', 6 => ''];
+        $this->assertSame($expected, CodeSnippet::fromFile($file, 8, 1)?->getLines());
+        $this->assertSame($expected, CodeSnippet::fromFile($file, 20, 1)?->getLines());
+    }
+
+    public function test_from_file_non_positive_target(): void
+    {
+        $file = $this->writeTemp("a\nb\nc\nd");
+
+        $this->assertSame([1 => 'a', 2 => 'b', 3 => 'c'], CodeSnippet::fromFile($file, 0, 1)?->getLines());
+        $this->assertSame([1 => 'a', 2 => 'b', 3 => 'c'], CodeSnippet::fromFile($file, -1, 1)?->getLines());
+    }
+
+    public function test_from_file_reads_lines_across_index_blocks(): void
+    {
+        $lines = array_map(static fn (int $n): string => "line {$n}", range(1, 500));
+        $file = $this->writeTemp(implode("\n", $lines));
+
+        foreach ([1, 31, 32, 33, 64, 65, 250, 499, 500] as $target) {
+            $snippet = CodeSnippet::fromFile($file, $target, 8);
+            $this->assertNotNull($snippet);
+
+            foreach ($snippet->getLines() as $number => $text) {
+                $this->assertSame("line {$number}", $text, "target {$target}");
+            }
+        }
+    }
+
+    public function test_from_file_does_not_hold_the_whole_file_in_memory(): void
+    {
+        // 100,000 lines, 3.4 MB. Holding it as one string plus a line array needs well over
+        // 10 MB; streaming it needs a fraction. A memory fatal cannot be caught, so the
+        // call runs in a subprocess.
+        $file = $this->writeTemp(str_repeat("        \$this->assertSame(1, \$x);\n", 100000));
+        $code = 'require "'.dirname(__DIR__, 3).'/vendor/autoload.php";'
+            .' $s = \ShieldCI\AnalyzersCore\ValueObjects\CodeSnippet::fromFile($argv[1], 50000, 8);'
+            .' echo count($s->getLines());';
+
+        exec(PHP_BINARY.' -d memory_limit=10M -r '.escapeshellarg($code).' '.escapeshellarg($file).' 2>&1', $out, $rc);
+
+        $this->assertSame([0, '17'], [$rc, implode("\n", $out)]);
+    }
+
+    public function test_from_file_memory_does_not_grow_with_line_length(): void
+    {
+        // 40 lines of 512 KiB. The SplFileObject version held one line at a time; holding a
+        // whole 32-line block at once needs 16 MiB and more. Run where 24 MiB is the limit.
+        $file = $this->writeTemp(str_repeat(str_repeat('y', 524288)."\n", 40));
+        $code = 'require "'.dirname(__DIR__, 3).'/vendor/autoload.php";'
+            .' $s = \ShieldCI\AnalyzersCore\ValueObjects\CodeSnippet::fromFile($argv[1], 2, 8);'
+            .' echo count($s->getLines()), " ", strlen($s->getLines()[2]);';
+
+        exec(PHP_BINARY.' -d memory_limit=24M -r '.escapeshellarg($code).' '.escapeshellarg($file).' 2>&1', $out, $rc);
+
+        $this->assertSame([0, '17 250'], [$rc, implode("\n", $out)]);
+    }
+
+    public function test_signature_search_ignores_long_leading_and_trailing_whitespace(): void
+    {
+        $pad = str_repeat(' ', 5000);
+        $lines = ['<?php', $pad."class Padded".$pad, '{', $pad.'public function run()'.$pad];
+        for ($n = 5; $n <= 12; $n++) {
+            $lines[] = "    \$v{$n} = {$n};";
+        }
+        $lines[] = $pad.'}'.$pad;
+        for ($n = 14; $n <= 30; $n++) {
+            $lines[] = "    \$v{$n} = {$n};";
+        }
+        $file = $this->writeTemp(implode("\n", $lines));
+
+        // Context 6 centres line 12 on 6..18; the padded method signature on line 4 fits the
+        // budget (8 above, 4 below), so the window expands up to it.
+        $snippet = CodeSnippet::fromFile($file, 12, 6);
+        $this->assertNotNull($snippet);
+        $this->assertSame(4, array_key_first($snippet->getLines()));
+
+        // Context 8 centres line 16 on 8..24. Searching up, the padded "}" on line 13 stops the
+        // search before it reaches line 4, which would otherwise have fitted (12 above, 4 below).
+        $below = CodeSnippet::fromFile($file, 16, 8);
+        $this->assertNotNull($below);
+        $this->assertSame(8, array_key_first($below->getLines()));
+    }
+
+    public function test_truncation_does_not_split_a_two_byte_character(): void
+    {
+        // 'é' (2 bytes) occupies bytes 249-250; a 250-byte cut would keep only its lead byte.
+        $this->assertSame(str_repeat('a', 249), $this->truncated(str_repeat('a', 249).'é'.'tail'));
+    }
+
+    public function test_truncation_does_not_split_a_three_byte_character(): void
+    {
+        $this->assertSame(str_repeat('a', 248), $this->truncated(str_repeat('a', 248).'€'.'tail'));
+        $this->assertSame(str_repeat('a', 249), $this->truncated(str_repeat('a', 249).'€'.'tail'));
+    }
+
+    public function test_truncation_does_not_split_a_four_byte_character(): void
+    {
+        foreach ([247, 248, 249] as $prefix) {
+            $this->assertSame(str_repeat('a', $prefix), $this->truncated(str_repeat('a', $prefix).'😀'.'tail'));
+        }
+    }
+
+    public function test_truncation_keeps_a_character_ending_exactly_at_the_limit(): void
+    {
+        $this->assertSame(str_repeat('a', 248).'é', $this->truncated(str_repeat('a', 248).'é'.'tail'));
+        $this->assertSame(str_repeat('a', 246).'😀', $this->truncated(str_repeat('a', 246).'😀'.'tail'));
+    }
+
+    public function test_truncation_leaves_invalid_bytes_alone(): void
+    {
+        // A stray continuation byte at the cut has no lead byte to back off to.
+        $this->assertSame(str_repeat('a', 249)."\x80", $this->truncated(str_repeat('a', 249)."\x80\x80tail"));
+        // A complete 'é' ending at byte 250, followed by a stray continuation byte.
+        $this->assertSame(str_repeat('a', 248).'é', $this->truncated(str_repeat('a', 248)."é\x80tail"));
+        // A lead byte whose sequence is broken before the cut is not a character to protect.
+        $this->assertSame(str_repeat('a', 248)."\xE2a", $this->truncated(str_repeat('a', 248)."\xE2a\x80\x80tail"));
+        // A lead byte with too few continuation bytes for its own length.
+        $this->assertSame(str_repeat('a', 248)."\xF0\x9F", $this->truncated(str_repeat('a', 248)."\xF0\x9F\x98".'tail'));
+    }
+
+    public function test_truncated_multibyte_line_still_encodes_as_json(): void
+    {
+        $file = $this->writeTemp("<?php\nreturn ['k' => 'x".str_repeat('é', 200)."'];\n");
+        $issue = new Issue(
+            message: 'x',
+            location: new Location($file, 2),
+            severity: Severity::Low,
+            recommendation: 'y',
+            codeSnippet: CodeSnippet::fromFile($file, 2, 1),
+        );
+
+        $json = (new JsonFormatter())->format([AnalysisResult::failed('rp', 'x', [$issue])]);
+
+        $decoded = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertIsArray($decoded);
+        $this->assertSame(
+            "return ['k' => 'x".str_repeat('é', 116),
+            $decoded['results'][0]['issues'][0]['code_snippet']['lines'][2]
+        );
+    }
+
+    private function truncated(string $line): string
+    {
+        $snippet = CodeSnippet::fromFile($this->writeTemp($line."\n"), 1, 0);
+        $this->assertNotNull($snippet);
+
+        return $snippet->getLines()[1];
+    }
+
+    private function writeTemp(string $content): string
+    {
+        $file = sys_get_temp_dir().'/code_snippet_lines_'.uniqid('', true).'.php';
+        file_put_contents($file, $content);
+        $this->tempFiles[] = $file;
+
+        return $file;
     }
 }

@@ -7,7 +7,7 @@ namespace ShieldCI\AnalyzersCore\Abstracts;
 use ShieldCI\AnalyzersCore\Contracts\{AnalyzerInterface, ResultInterface};
 use ShieldCI\AnalyzersCore\Enums\Severity;
 use ShieldCI\AnalyzersCore\Results\AnalysisResult;
-use ShieldCI\AnalyzersCore\Support\{MessageHelper, PathHelper, TraceHelper};
+use ShieldCI\AnalyzersCore\Support\{LineIndexedFile, MessageHelper, PathHelper, TraceHelper};
 use ShieldCI\AnalyzersCore\ValueObjects\{AnalyzerMetadata, CodeSnippet, Issue, Location};
 use Throwable;
 
@@ -86,6 +86,44 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
     private float $startTime = 0.0;
 
     /**
+     * How many indexed files a run keeps for createIssueWithSnippet().
+     *
+     * An index costs one int per 32 lines plus a few small line blocks, so a handful covers an
+     * analyzer interleaving issues across several files without holding much memory (#92).
+     */
+    private const SNIPPET_CACHE_FILES = 8;
+
+    /**
+     * How many analyze() calls on this instance are in progress.
+     *
+     * The snippet cache is used only while this is above zero, and is emptied when the
+     * outermost run ends. A counter rather than a flag, so an analyze() nested inside
+     * runAnalysis() does not switch the cache off for the rest of the outer run. Outside a
+     * run - a direct call from a test or another caller - every snippet reads its file fresh.
+     */
+    private int $runDepth = 0;
+
+    /**
+     * Indexed files by path, least recently used first. Each entry is checked against the
+     * file's size, mtime and inode before use, and re-indexed if the file has changed.
+     *
+     * @var array<string, LineIndexedFile>
+     */
+    private array $snippetFiles = [];
+
+    /**
+     * A clone starts outside any run with no cached files of its own.
+     *
+     * Without this a clone made inside runAnalysis() would share this instance's open files -
+     * closing them when its own cache evicted one - and stay "mid-run" forever.
+     */
+    public function __clone()
+    {
+        $this->runDepth = 0;
+        $this->snippetFiles = [];
+    }
+
+    /**
      * Run the actual analysis logic.
      * This method should be implemented by concrete analyzers.
      */
@@ -109,6 +147,7 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
         }
 
         $this->startTimer();
+        $this->runDepth++;
 
         try {
             $result = $this->runAnalysis();
@@ -136,6 +175,10 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
                     'trace' => TraceHelper::frames($e, $this->getBasePath()),
                 ]
             );
+        } finally {
+            if (--$this->runDepth === 0) {
+                $this->clearSnippetFiles();
+            }
         }
     }
 
@@ -343,7 +386,9 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
                 if ($showSnippets) {
                     $configLines = config('shieldci.report.snippet_context_lines', 8);
                     $snippetLines = $contextLines ?? (is_numeric($configLines) ? (int) $configLines : 8);
-                    $codeSnippet = CodeSnippet::fromFile($filePath, $lineNumber, $snippetLines);
+                    $codeSnippet = $this->runDepth === 0
+                        ? CodeSnippet::fromFile($filePath, $lineNumber, $snippetLines)
+                        : $this->snippetFromCache($filePath, $lineNumber, $snippetLines);
                 }
             } catch (\Throwable $e) { // @codeCoverageIgnore
                 // Silently fail if code snippet generation fails
@@ -360,6 +405,47 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
             metadata: $metadata,
             codeSnippet: $codeSnippet
         );
+    }
+
+    /**
+     * A snippet from the run's cache of indexed files, indexing $filePath if needed.
+     *
+     * The file is indexed once per run (and again only if it changes on disk), so N issues in
+     * one file cost one read of it plus the few lines each snippet shows.
+     */
+    private function snippetFromCache(string $filePath, int $lineNumber, int $contextLines): ?CodeSnippet
+    {
+        $file = $this->snippetFiles[$filePath] ?? null;
+        unset($this->snippetFiles[$filePath]);
+
+        if ($file === null || ! $file->isCurrent()) {
+            $file?->close();
+            $file = LineIndexedFile::open($filePath);
+        }
+
+        // Missing or unreadable: nothing to cache, and the next lookup checks again.
+        if ($file === null) {
+            return null;
+        }
+
+        if (count($this->snippetFiles) >= self::SNIPPET_CACHE_FILES) {
+            $evicted = array_key_first($this->snippetFiles);
+            $this->snippetFiles[$evicted]->close();
+            unset($this->snippetFiles[$evicted]);
+        }
+
+        $this->snippetFiles[$filePath] = $file;
+
+        return CodeSnippet::fromIndexedFile($filePath, $file, $lineNumber, $contextLines);
+    }
+
+    private function clearSnippetFiles(): void
+    {
+        foreach ($this->snippetFiles as $file) {
+            $file->close();
+        }
+
+        $this->snippetFiles = [];
     }
 
     /**

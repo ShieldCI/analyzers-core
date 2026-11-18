@@ -4,8 +4,7 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\ValueObjects;
 
-use RuntimeException;
-use SplFileObject;
+use ShieldCI\AnalyzersCore\Support\LineIndexedFile;
 
 /**
  * Value object representing a code snippet with context lines around a target line.
@@ -27,53 +26,134 @@ class CodeSnippet
     }
 
     /**
+     * Longest line, in bytes, kept in a snippet. Longer lines are cut to prevent wrapping.
+     */
+    private const MAX_LINE_BYTES = 250;
+
+    /**
      * Create a CodeSnippet from a file.
+     *
+     * The file is streamed once to index its lines and then only the lines the snippet needs
+     * are read, so memory does not grow with the file size.
      *
      * @param string $filePath Absolute path to the file
      * @param int $targetLine The line number where the issue occurs
      * @param int $contextLines Number of lines to show before and after (default: 8)
-     * @return self|null Returns null if file doesn't exist or can't be read
+     * @return self|null Returns null if the path is missing, not a regular file, or can't be read
      */
     public static function fromFile(
         string $filePath,
         int $targetLine,
         int $contextLines = 8
     ): ?self {
-        if (! file_exists($filePath) || ! is_readable($filePath)) {
+        $file = LineIndexedFile::open($filePath);
+
+        if ($file === null) {
             return null;
         }
 
         try {
-            $file = new SplFileObject($filePath);
+            return self::fromIndexedFile($filePath, $file, $targetLine, $contextLines);
+        } finally {
+            $file->close();
+        }
+    }
 
-            // Get total number of lines
-            $file->seek(PHP_INT_MAX);
-            $totalLines = $file->key() + 1;
+    /**
+     * Create a CodeSnippet from a file that is already indexed.
+     *
+     * Gives exactly what fromFile() gives for the same file. It lets a caller producing many
+     * snippets from one file index it once.
+     *
+     * @internal For AbstractAnalyzer's per-run snippet cache; use fromFile().
+     *
+     * @param string $filePath The path to record on the snippet
+     * @param LineIndexedFile $file The indexed file
+     * @param int $targetLine The line number where the issue occurs
+     * @param int $contextLines Number of lines to show before and after (default: 8)
+     */
+    public static function fromIndexedFile(
+        string $filePath,
+        LineIndexedFile $file,
+        int $targetLine,
+        int $contextLines = 8
+    ): self {
+        [$startLine, $endLine] = self::calculateBoundsWithSmartExpansion(
+            $file,
+            $targetLine,
+            $file->lineCount(),
+            $contextLines
+        );
 
-            // Calculate bounds with smart context expansion
-            [$startLine, $endLine] = self::calculateBoundsWithSmartExpansion(
-                $file,
-                $targetLine,
-                $totalLines,
-                $contextLines
-            );
+        $lines = [];
 
-            // Read lines
-            $lines = [];
-            $file->seek($startLine - 1);
+        for ($i = $startLine; $i <= $endLine; $i++) {
+            $lines[$i] = rtrim(self::truncate($file->head($i) ?? ''));
+        }
 
-            for ($i = $startLine; $i <= $endLine; $i++) {
-                // Truncate long lines to prevent wrapping (max 250 chars)
-                $line = $file->current();
-                $lines[$i] = rtrim(is_string($line) ? substr($line, 0, 250) : '');
-                $file->next();
+        return new self($filePath, $targetLine, $lines, $contextLines);
+    }
+
+    /**
+     * Cut a line to MAX_LINE_BYTES without splitting a UTF-8 character.
+     *
+     * A cut that lands inside a multibyte sequence (a lead byte followed by the continuation
+     * bytes it announces) backs off to the start of that sequence, so valid UTF-8 stays valid
+     * and the JSON report can encode it. Only the byte structure is checked, so an overlong or
+     * surrogate sequence straddling the cut is dropped as well; a stray continuation byte or a
+     * truncated sequence is cut where it falls. No mbstring needed.
+     */
+    private static function truncate(string $line): string
+    {
+        $cut = self::MAX_LINE_BYTES;
+
+        if (strlen($line) <= $cut || ! self::isContinuationByte($line[$cut])) {
+            return substr($line, 0, $cut);
+        }
+
+        // Walk back over at most three continuation bytes to the lead byte.
+        for ($lead = $cut - 1; $lead >= $cut - 3; $lead--) {
+            if (! self::isContinuationByte($line[$lead])) {
+                break;
             }
+        }
 
-            return new self($filePath, $targetLine, $lines, $contextLines);
-        } catch (RuntimeException $e) { // @codeCoverageIgnoreStart
-            // File reading error, return null
-            return null;
-        } // @codeCoverageIgnoreEnd
+        $length = self::sequenceLength(ord($line[$lead]));
+
+        if ($length > $cut - $lead && self::isWellFormedSequence($line, $lead, $length)) {
+            return substr($line, 0, $lead);
+        }
+
+        return substr($line, 0, $cut);
+    }
+
+    private static function isContinuationByte(string $byte): bool
+    {
+        return (ord($byte) & 0xC0) === 0x80;
+    }
+
+    /**
+     * The byte length of the UTF-8 sequence a lead byte starts, or 0 if it starts none.
+     */
+    private static function sequenceLength(int $byte): int
+    {
+        return match (true) {
+            $byte >= 0xC2 && $byte <= 0xDF => 2,
+            $byte >= 0xE0 && $byte <= 0xEF => 3,
+            $byte >= 0xF0 && $byte <= 0xF4 => 4,
+            default => 0,
+        };
+    }
+
+    private static function isWellFormedSequence(string $line, int $lead, int $length): bool
+    {
+        for ($i = $lead + 1; $i < $lead + $length; $i++) {
+            if (! isset($line[$i]) || ! self::isContinuationByte($line[$i])) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -84,14 +164,14 @@ class CodeSnippet
      * is found OUTSIDE the current window — signatures already visible within the
      * centered window are left alone to avoid shrinking above-context.
      *
-     * @param SplFileObject $file The file object
+     * @param LineIndexedFile $file The indexed file
      * @param int $targetLine The target line number
      * @param int $totalLines Total lines in the file
      * @param int $contextLines Lines before/after to include
      * @return array{int, int} [startLine, endLine]
      */
     private static function calculateBoundsWithSmartExpansion(
-        SplFileObject $file,
+        LineIndexedFile $file,
         int $targetLine,
         int $totalLines,
         int $contextLines
@@ -133,26 +213,26 @@ class CodeSnippet
     /**
      * Find the line number of a method or class signature above the target line.
      *
-     * @param SplFileObject $file The file object
+     * @param LineIndexedFile $file The indexed file
      * @param int $targetLine The target line number
      * @param int $minLine The minimum line to search from
      * @return int|null The line number of the signature, or null if not found
      */
     private static function findSignatureLine(
-        SplFileObject $file,
+        LineIndexedFile $file,
         int $targetLine,
         int $minLine
     ): ?int {
         // Search backwards from target line
         for ($lineNum = $targetLine - 1; $lineNum >= $minLine; $lineNum--) {
-            $file->seek($lineNum - 1);
-            $line = $file->current();
+            // A bounded stand-in for trim($line): exact for '}' and '};', and enough of the
+            // line for these start-anchored patterns to match exactly when they would on it.
+            // Null for the lines past the end of the file a target beyond it searches.
+            $trimmed = $file->probe($lineNum);
 
-            if (! is_string($line)) {
-                continue; // @codeCoverageIgnore
+            if ($trimmed === null) {
+                continue;
             }
-
-            $trimmed = trim($line);
 
             // Check for class/interface/trait signature
             if (preg_match('/^(abstract\s+)?(final\s+)?(class|interface|trait|enum)\s+\w+/i', $trimmed)) {
