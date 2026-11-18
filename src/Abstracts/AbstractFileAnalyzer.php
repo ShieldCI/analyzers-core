@@ -148,7 +148,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         $this->unreadablePaths = [];
 
         foreach ($paths as $path) {
-            $fullPath = PathHelper::join($basePath, $path);
+            $fullPath = self::scanRoot($basePath, $path);
 
             if (! is_dir($fullPath)) {
                 if (is_file($fullPath)) {
@@ -266,6 +266,163 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         }
 
         return false;
+    }
+
+    /**
+     * Where to walk for one configured path.
+     *
+     * Joined onto the base path first, exactly as before #96. Only when that
+     * names nothing is an entry spelling out a location inside the base path -
+     * base_path('app') in a config file - rewritten to its remainder. join()
+     * strips leading separators, so such an entry used to be appended to the
+     * base: '/srv/app' walked '/srv/srv/app', found nothing, and the analyzer
+     * passed having read no file (#96).
+     *
+     * The join wins whenever it exists because the string alone cannot decide.
+     * Under a top-level base such as Docker's WORKDIR /app, '/app' is both the
+     * base itself and the project-relative 'app' directory, and the latter is
+     * what it always meant. This way the fix only changes entries that
+     * scanned nothing. The remainder is joined rather than walked raw so that
+     * reported paths, '.' collapsing (#84) and exclude matching come out
+     * byte-identical to the relative spelling.
+     */
+    private static function scanRoot(string $basePath, string $path): string
+    {
+        $fullPath = PathHelper::join($basePath, $path);
+
+        if (file_exists($fullPath)) {
+            return $fullPath;
+        }
+
+        $remainder = self::remainderUnderBase($path, $basePath);
+
+        return $remainder === null ? $fullPath : PathHelper::join($basePath, $remainder);
+    }
+
+    /**
+     * The part of $path below $basePath, or null when $path is not inside it.
+     *
+     * Only an entry inside the base path is read as absolute. Anything else -
+     * '/', '/app', '\app', 'a:/b', an absolute path elsewhere - is joined
+     * onto the base exactly as before: a leading separator meaning
+     * project-relative is an established convention (Laravel's
+     * base_path('/app'), join('/var/www/project', '/src')), and treating '/'
+     * as the filesystem root would walk the whole disk. An absolute path
+     * outside the base therefore still scans nothing, as it did before #96;
+     * that is accepted for now.
+     *
+     * The comparison is lexical first, against an absolute base only - a
+     * relative base such as '0' would otherwise rewrite '0/x' to 'x'. Failing
+     * that, an entry with a leading separator is compared by realpath(), so a
+     * symlinked spelling of the base (/var vs /private/var on macOS) is still
+     * recognised. The realpath branch is limited to such entries because a
+     * relative one would resolve against the working directory. No case
+     * folding: that would be wrong on case-sensitive filesystems.
+     *
+     * Order matters, and each step exists because the one after it resolves
+     * more than it should:
+     * 1. The entry as text against the base as given - cheap, and the common
+     *    case.
+     * 2. The entry's prefixes, shortest first, until one's realpath() equals
+     *    realpath(base); the rest of the entry is the remainder as typed.
+     *    This finds the base however it is reached (/var vs /private/var, a
+     *    second link to the project) without resolving anything below it.
+     * 3. realpath() of the whole entry, for a symlink from outside the base
+     *    that points into it, where no prefix resolves to the base.
+     * Resolving the whole entry any earlier resolves every symlink inside the
+     * base too, so 'applink' came back as 'app' and excludes written against
+     * 'applink/*' stopped applying.
+     */
+    private static function remainderUnderBase(string $path, string $basePath): ?string
+    {
+        if (preg_match('#^(?:[/\\\\]|[A-Za-z]:[/\\\\])#', $basePath) === 1) {
+            $remainder = self::relativeRemainder($path, $basePath);
+
+            if ($remainder !== null) {
+                return $remainder;
+            }
+        }
+
+        if (! str_starts_with($path, '/') && ! str_starts_with($path, '\\')) {
+            return null;
+        }
+
+        // Every realpath() is silenced, as FileParser silences token_get_all():
+        // under open_basedir it warns for any path outside the allowed list,
+        // and a host that turns warnings into exceptions (Laravel's
+        // HandleExceptions) would fail an analysis that the pre-#96 walk,
+        // which never called realpath(), passed.
+        $realBase = @realpath($basePath);
+
+        if ($realBase === false) {
+            return null;
+        }
+
+        // Shortest prefix first, one realpath() each, stopping at the first
+        // that resolves to the base. The rest of the entry is kept as typed.
+        preg_match_all('#[/\\\\]+#', $path, $separators, PREG_OFFSET_CAPTURE);
+
+        foreach ([...$separators[0], ['', strlen($path)]] as [, $offset]) {
+            if ($offset > 0 && @realpath(substr($path, 0, $offset)) === $realBase) {
+                $remainder = self::relativeRemainder($realBase.'/'.substr($path, $offset), $realBase);
+
+                if ($remainder !== null) {
+                    return $remainder;
+                }
+
+                break;
+            }
+        }
+
+        $realPath = @realpath($path);
+
+        return $realPath === false ? null : self::relativeRemainder($realPath, $realBase);
+    }
+
+    /**
+     * Strip $basePath off $path on a segment boundary, comparing both with
+     * forward slashes, repeated separators collapsed and '.' segments dropped.
+     * The boundary is what stops base '/p' from claiming '/proj/x'. The POSIX
+     * root '/' claims nothing: joining onto it already answers the path
+     * itself. A drive root ('C:\') normalises to 'C:' and does claim what
+     * lies below it, which joins back to the same path.
+     *
+     * A remainder with a '..' segment is refused: '/p/..' and
+     * '/p/app/../../outside' start with '/p' but resolve outside it, where the
+     * anchored excludes cannot reach ('../p/vendor/...' escapes 'vendor/*').
+     * That leaves '..' to the realpath() comparison, which resolves it, so an
+     * entry that stays inside the base is still claimed.
+     */
+    private static function relativeRemainder(string $path, string $basePath): ?string
+    {
+        $normalise = static function (string $value): string {
+            $value = str_replace('\\', '/', $value);
+            $segments = array_filter(
+                explode('/', $value),
+                static fn (string $segment): bool => $segment !== '' && $segment !== '.'
+            );
+
+            return (str_starts_with($value, '/') ? '/' : '').implode('/', $segments);
+        };
+
+        $path = $normalise($path);
+        $base = $normalise($basePath);
+
+        if ($base === '/' || $base === '') {
+            return null;
+        }
+
+        if ($path === $base) {
+            return '';
+        }
+
+        if (! str_starts_with($path, $base.'/')) {
+            return null;
+        }
+
+        $remainder = substr($path, strlen($base) + 1);
+
+        return in_array('..', explode('/', $remainder), true) ? null : $remainder;
     }
 
     /**

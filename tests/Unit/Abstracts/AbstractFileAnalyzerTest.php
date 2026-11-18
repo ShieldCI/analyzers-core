@@ -1126,6 +1126,412 @@ class AbstractFileAnalyzerTest extends TestCase
         }
     }
 
+    // =========================================================================
+    // Absolute entries in the analyzed paths - ShieldCI/analyzers-core#96
+    //
+    // PathHelper::join() strips a segment's leading separators, so an absolute
+    // entry such as base_path('app') was appended to the base path: the walk
+    // looked for '/project/project/app', found nothing, and the analyzer
+    // passed having read no file. An entry inside the base path is now
+    // rewritten to its remainder and scanned like the relative spelling;
+    // every other entry - '/', '/app', 'a:/b', a path outside the base - is
+    // joined exactly as before, because a leading '/' is project-relative by
+    // convention (base_path('/app')).
+    // =========================================================================
+
+    public function testAnAbsolutePathUnderTheBasePathIsScanned(): void
+    {
+        $analyzer = $this->dotSegmentAnalyzer([$this->testDir . '/project/app']);
+
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($analyzer));
+    }
+
+    public function testAnAbsolutePathEqualToTheBasePathMatchesTheDefaultScan(): void
+    {
+        $absolute = $this->relativePhpFiles($this->dotSegmentAnalyzer([$this->testDir . '/project']));
+
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $absolute);
+        $this->assertSame($this->relativePhpFiles($this->dotSegmentAnalyzer([])), $absolute);
+    }
+
+    public function testAnAbsolutePathCollapsesDotSegmentsLikeARelativeOne(): void
+    {
+        // '.' goes through the same PathHelper::join() collapse as a relative
+        // entry (#84), so the reported locations come out clean.
+        $analyzer = $this->dotSegmentAnalyzer([$this->testDir . '/project/./app/./Http']);
+
+        $this->assertSame(['app/Http/H.php'], $this->relativePhpFiles($analyzer));
+    }
+
+    public function testAnAbsolutePathWithADotDotSegmentIsResolvedBeforeItIsClaimed(): void
+    {
+        // A '..' remainder is never trusted as text - '/p/..' starts with '/p'
+        // too. Only the realpath() comparison can claim such an entry, so one
+        // that stays inside the base reports the resolved locations rather
+        // than the 'app/Http/../A.php' the relative spelling reports.
+        $project = $this->testDir . '/project';
+
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($this->dotSegmentAnalyzer([$project . '/app/Http/..'])));
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($this->dotSegmentAnalyzer([$project . '/../project/app'])));
+    }
+
+    public function testAnAbsolutePathThatLeavesTheBaseThroughDotDotScansNothing(): void
+    {
+        // Lexically these all start with the base, but they resolve outside
+        // it, where the anchored excludes cannot reach ('../project/vendor/...'
+        // escapes 'vendor/*'). Outside the base scans nothing, as before #96.
+        $project = $this->testDir . '/project';
+        $this->dotSegmentAnalyzer([]); // builds the fixture
+        mkdir($this->testDir . '/project-other/app', 0777, true);
+        file_put_contents($this->testDir . '/project-other/app/P.php', "<?php\n");
+        mkdir($this->testDir . '/outside');
+        file_put_contents($this->testDir . '/outside/O.php', "<?php\n");
+
+        foreach ([$project . '/..', $project . '/../project-other/app', $project . '/app/../../outside'] as $path) {
+            $this->assertSame([], $this->dotSegmentAnalyzer([$path])->getPhpFilesPublic(), "setPaths(['{$path}'])");
+        }
+    }
+
+    public function testAProjectRelativeReadingThatExistsWinsOverTheAbsoluteOne(): void
+    {
+        // Under a top-level base such as Docker's WORKDIR /app, the entry
+        // '/app' is both the base itself and the project-relative 'app' dir.
+        // The string cannot decide, so the pre-#96 reading wins whenever it
+        // names something: the fix only changes entries that scanned nothing.
+        // Reproduced here by nesting a copy of the base's own path inside it.
+        $base = $this->testDir . '/dock/app';
+        mkdir($base . $base . '/Http', 0777, true);
+        mkdir($base . '/Http');
+        file_put_contents($base . '/Other.php', "<?php\n");
+        file_put_contents($base . '/Http/X.php', "<?php\n");
+        file_put_contents($base . $base . '/N.php', "<?php\n");
+        file_put_contents($base . $base . '/Http/H.php', "<?php\n");
+        $nested = ltrim($base, '/');
+
+        $scan = function (string $path) use ($base): array {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($base);
+            $analyzer->setPaths([$path]);
+
+            return $this->relativePhpFiles($analyzer);
+        };
+
+        $this->assertSame([$nested . '/Http/H.php', $nested . '/N.php'], $scan($base));
+        $this->assertSame([$nested . '/Http/H.php'], $scan($base . '/Http'));
+    }
+
+    public function testAnAbsoluteFilePathIsScanned(): void
+    {
+        $analyzer = $this->dotSegmentAnalyzer([$this->testDir . '/project/app/A.php']);
+
+        $this->assertSame(['app/A.php'], $this->relativePhpFiles($analyzer));
+    }
+
+    public function testRelativeAndAbsoluteEntriesScanSideBySide(): void
+    {
+        $analyzer = $this->dotSegmentAnalyzer(['app/Http', $this->testDir . '/project/app/A.php']);
+
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($analyzer));
+    }
+
+    public function testAnAbsolutePathUnderTheBasePathHonoursRelativeExcludes(): void
+    {
+        $project = $this->testDir . '/project';
+        $this->dotSegmentAnalyzer([]); // builds the fixture
+        mkdir($project . '/app/Legacy');
+        file_put_contents($project . '/app/Legacy/L.php', "<?php\n");
+
+        $scan = function (array $paths) use ($project): array {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($project);
+            $analyzer->setPaths($paths);
+            $analyzer->setExcludePatterns(['app/Legacy/*']);
+
+            return $this->relativePhpFiles($analyzer);
+        };
+
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $scan([$project . '/app']));
+        $this->assertSame($scan(['app']), $scan([$project . '/app']));
+    }
+
+    public function testAnAbsolutePathOutsideTheBasePathStillScansNothing(): void
+    {
+        // The pre-#96 behaviour, kept on purpose for now: only an entry inside the
+        // base path is read as absolute, so one outside it is joined onto the
+        // base like any other entry and names nothing. 'project-other' also
+        // pins the segment boundary - base '/project' must not claim it.
+        $outside = $this->testDir . '/outside';
+        mkdir($outside, 0777, true);
+        file_put_contents($outside . '/O.php', "<?php\n");
+        mkdir($this->testDir . '/project-other/app', 0777, true);
+        file_put_contents($this->testDir . '/project-other/app/P.php', "<?php\n");
+
+        $this->assertSame([], $this->dotSegmentAnalyzer([$outside])->getPhpFilesPublic());
+        $this->assertSame([], $this->dotSegmentAnalyzer([$this->testDir . '/project-other/app'])->getPhpFilesPublic());
+    }
+
+    public function testARootEntryStillScansTheBasePath(): void
+    {
+        // '/' is not inside the base path, so it is joined as on master and
+        // names the base itself - it must never walk the whole filesystem.
+        foreach (['/', '/.', '/./'] as $path) {
+            $analyzer = $this->dotSegmentAnalyzer([$path]);
+
+            foreach ($analyzer->getFilesToAnalyzePublic() as $first) {
+                $this->assertStringStartsWith($this->testDir . '/project/', $first->getPathname(), "setPaths(['{$path}'])");
+
+                break;
+            }
+
+            $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($analyzer), "setPaths(['{$path}'])");
+        }
+    }
+
+    public function testALeadingSeparatorStillMeansProjectRelative(): void
+    {
+        // base_path('/app') is the Laravel spelling of 'app', and join() keeps
+        // '/src' inside the base on purpose. Not inside the base, so joined.
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($this->dotSegmentAnalyzer(['/app'])));
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($this->dotSegmentAnalyzer(['\\app'])));
+    }
+
+    public function testADriveShapedPosixDirectoryIsStillRelative(): void
+    {
+        $this->dotSegmentAnalyzer([]); // builds the fixture
+        mkdir($this->testDir . '/project/a:/b', 0777, true);
+        file_put_contents($this->testDir . '/project/a:/b/X.php', "<?php\n");
+
+        $this->assertSame(['a:/b/X.php'], $this->relativePhpFiles($this->dotSegmentAnalyzer(['a:/b'])));
+    }
+
+    public function testAnAbsolutePathThroughASymlinkResolvesToTheBaseSpelling(): void
+    {
+        // /var vs /private/var on macOS is the common case. Matching on the
+        // realpaths means the files are reported - and excluded - exactly as
+        // the relative spelling would be; vendor/ must stay out.
+        $project = $this->testDir . '/project';
+        $this->dotSegmentAnalyzer([]); // builds the fixture
+        $link = $this->testDir . '/link';
+        symlink($project, $link);
+
+        try {
+            $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($this->dotSegmentAnalyzer([$link . '/'])));
+            $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($this->dotSegmentAnalyzer([$link . '/app'])));
+
+            $viaLink = new ConcreteFileAnalyzer();
+            $viaLink->setBasePath($link);
+            $viaLink->setPaths([$project]);
+            $viaLink->setExcludePatterns(['vendor/*', 'storage/*', 'tests/*']);
+
+            $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($viaLink));
+        } finally {
+            unlink($link);
+        }
+    }
+
+    public function testASymlinkInsideTheBaseKeepsItsSpellingWhenTheBaseIsSymlinked(): void
+    {
+        // Base 'link' -> 'proj', and 'proj/applink' -> 'proj/app'. The entry is
+        // matched against realpath(base) as text before realpath(entry) is
+        // tried, so 'applink' is not resolved away: the same files and
+        // locations as the relative 'applink', and its excludes still apply.
+        $real = $this->testDir . '/proj';
+        mkdir($real . '/app/Legacy', 0777, true);
+        file_put_contents($real . '/app/A.php', "<?php\n");
+        file_put_contents($real . '/app/Legacy/L.php', "<?php\n");
+        symlink($real . '/app', $real . '/applink');
+        $link = $this->testDir . '/link';
+        symlink($real, $link);
+
+        $scan = function (string $path) use ($link): array {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($link);
+            $analyzer->setPaths([$path]);
+            $analyzer->setExcludePatterns(['applink/Legacy/*']);
+
+            return $this->relativePhpFiles($analyzer);
+        };
+
+        try {
+            $this->assertSame(['applink/A.php'], $scan('applink'));
+            $this->assertSame(['applink/A.php'], $scan((string) realpath($real) . '/applink'));
+        } finally {
+            unlink($link);
+            unlink($real . '/applink');
+        }
+    }
+
+    public function testAnEntryThroughAnotherLinkToTheBaseKeepsItsInBaseSymlink(): void
+    {
+        // The c1 class in other spellings: the entry reaches the base through
+        // a link the base itself is not spelled with. The prefix walk finds the
+        // shortest prefix that resolves to the base and keeps the rest as
+        // typed, so 'applink' is not resolved away and its excludes apply.
+        $t = $this->linkFixture();
+
+        try {
+            $expected = ['applink/A.php', 'applink/Http/Controllers/C.php'];
+
+            $this->assertSame($expected, $this->linkScan($t . '/proj', 'applink'));
+            $this->assertSame($expected, $this->linkScan($t . '/proj', $t . '/link/applink'));
+            $this->assertSame($expected, $this->linkScan($t . '/link', $t . '/link2/applink'));
+            // /var vs /private/var on macOS; a no-op spelling elsewhere.
+            $this->assertSame($expected, $this->linkScan($t . '/proj', (string) realpath($t) . '/link/applink'));
+            $this->assertSame($expected, $this->linkScan((string) realpath($t) . '/link', $t . '/link2/applink'));
+        } finally {
+            $this->removeLinkFixture($t);
+        }
+    }
+
+    public function testAnEntryThroughASymlinkFromOutsideTheBaseStillResolves(): void
+    {
+        // No prefix of 'elsewhere/inlink' resolves to the base, so the last
+        // resort - realpath() of the whole entry - still claims it.
+        $t = $this->linkFixture();
+
+        try {
+            $this->assertSame(
+                ['app/A.php', 'app/Http/Controllers/C.php', 'app/Legacy/L.php'],
+                $this->linkScan($t . '/proj', $t . '/elsewhere/inlink')
+            );
+            $this->assertSame([], $this->linkScan($t . '/proj', $t . '/missing/applink'));
+            $this->assertSame([], $this->linkScan($t . '/link', $t . '/link2/missing'));
+        } finally {
+            $this->removeLinkFixture($t);
+        }
+    }
+
+    /**
+     * open_basedir makes realpath() warn for a path outside it, and Laravel's
+     * HandleExceptions turns that warning into an exception that fails the
+     * analyzer. The pre-#96 walk never called realpath(), so '/usr/lib' next
+     * to 'app' used to pass quietly - it must still.
+     *
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function testRealpathStaysQuietUnderOpenBasedir(): void
+    {
+        $project = $this->testDir . '/project';
+        $this->dotSegmentAnalyzer([]); // builds the fixture
+        // The temp dir must stay reachable: PHPUnit hands the child's result
+        // back through a file there. /usr/lib is outside either way.
+        $tmp = sys_get_temp_dir();
+        ini_set('open_basedir', implode(PATH_SEPARATOR, [dirname(__DIR__, 3), $tmp, (string) realpath($tmp)]));
+
+        // The isolated child starts with E_WARNING masked out of
+        // error_reporting(); a Laravel app runs with E_ALL.
+        error_reporting(E_ALL);
+
+        // Shaped like Laravel's HandleExceptions::handleError(): it throws for
+        // any warning that error_reporting() still covers, so only an '@'d
+        // call - which masks error_reporting() for its duration - gets past.
+        set_error_handler(static function (int $severity, string $message): bool {
+            if ((error_reporting() & $severity) === 0) {
+                return false;
+            }
+
+            throw new \ErrorException($message, 0, $severity);
+        });
+
+        try {
+            $analyzer = $this->dotSegmentAnalyzer(['app/Http', '/usr/lib', '/usr/lib/missing', $project . '/app/A.php']);
+
+            $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($analyzer));
+        } finally {
+            restore_error_handler();
+        }
+    }
+
+    /**
+     * proj/app/{A.php, Http/Controllers/C.php, Legacy/L.php}, with
+     * proj/applink -> proj/app, link and link2 -> proj, and
+     * elsewhere/inlink -> proj/app.
+     */
+    private function linkFixture(): string
+    {
+        $t = $this->testDir;
+        mkdir($t . '/proj/app/Http/Controllers', 0777, true);
+        mkdir($t . '/proj/app/Legacy');
+        mkdir($t . '/elsewhere');
+        file_put_contents($t . '/proj/app/A.php', "<?php\n");
+        file_put_contents($t . '/proj/app/Http/Controllers/C.php', "<?php\n");
+        file_put_contents($t . '/proj/app/Legacy/L.php', "<?php\n");
+        symlink($t . '/proj/app', $t . '/proj/applink');
+        symlink($t . '/proj', $t . '/link');
+        symlink($t . '/proj', $t . '/link2');
+        symlink($t . '/proj/app', $t . '/elsewhere/inlink');
+
+        return $t;
+    }
+
+    /**
+     * Symlinks must go before tearDown(): its recursive delete follows a
+     * directory link and then cannot rmdir() it.
+     */
+    private function removeLinkFixture(string $t): void
+    {
+        foreach (['/proj/applink', '/link', '/link2', '/elsewhere/inlink'] as $link) {
+            unlink($t . $link);
+        }
+    }
+
+    /**
+     * @return array<string>
+     */
+    private function linkScan(string $base, string $path): array
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($base);
+        $analyzer->setPaths([$path]);
+        $analyzer->setExcludePatterns(['applink/Legacy/*']);
+
+        return $this->relativePhpFiles($analyzer);
+    }
+
+    public function testRepeatedSeparatorsInAnAbsolutePathReportCleanLocations(): void
+    {
+        $project = $this->testDir . '/project';
+
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($this->dotSegmentAnalyzer(['/' . $project . '/app'])));
+        $this->assertSame(['app/A.php', 'app/Http/H.php'], $this->relativePhpFiles($this->dotSegmentAnalyzer([$project . '//app'])));
+    }
+
+    public function testRemainderUnderBaseComparesOnSegmentBoundaries(): void
+    {
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'remainderUnderBase');
+        $method->setAccessible(true);
+
+        $cases = [
+            ['/p/app', '/p', 'app'],
+            ['/p', '/p', ''],
+            ['/p/', '/p', ''],
+            ['/p/./a//b/.', '/p', 'a/b'],
+            // '..' is only claimed through realpath(), which these do not resolve.
+            ['/p/app/../x', '/p', null],
+            ['/p/..', '/p', null],
+            ['/proj/x', '/p', null],
+            ['/app', '/p', null],
+            ['/', '/p', null],
+            // A root base claims nothing: joining onto it already answers the path.
+            ['/shieldci-missing-96/x', '/', null],
+            ['/shieldci-missing-96/x', '/shieldci-missing-base-96', null],
+            // A relative base is left alone, or base '0' would rewrite '0/x' to 'x'.
+            ['0/x', '0', null],
+            // Windows shapes: the same comparison once separators are normalised.
+            ['C:\\app\\src', 'C:\\app', 'src'],
+            ['C:/app/src', 'C:\\app', 'src'],
+            ['C:\\app', 'C:\\app\\', ''],
+            ['C:\\application\\src', 'C:\\app', null],
+            ['C:app\\src', 'C:\\app', null],
+            ['\\\\server\\share\\app', '\\\\server\\share', 'app'],
+        ];
+
+        foreach ($cases as [$path, $base, $expected]) {
+            $this->assertSame($expected, $method->invoke(null, $path, $base), "remainderUnderBase('{$path}', '{$base}')");
+        }
+    }
+
     public function testTreatsZeroAsARealBasePath(): void
     {
         // '0' is falsy, so getFilesToAnalyze()'s `$this->basePath ?` and
