@@ -74,7 +74,6 @@ class AbstractFileAnalyzerTest extends TestCase
 
         $reflection = new \ReflectionClass($analyzer);
         $property = $reflection->getProperty('basePath');
-        $property->setAccessible(true);
 
         $this->assertEquals('/path/to/project', $property->getValue($analyzer));
     }
@@ -89,7 +88,6 @@ class AbstractFileAnalyzerTest extends TestCase
 
         $reflection = new \ReflectionClass($analyzer);
         $property = $reflection->getProperty('basePath');
-        $property->setAccessible(true);
 
         $this->assertEquals('C:\\proj\\app', $property->getValue($analyzer));
     }
@@ -110,7 +108,6 @@ class AbstractFileAnalyzerTest extends TestCase
 
         $reflection = new \ReflectionClass($analyzer);
         $property = $reflection->getProperty('paths');
-        $property->setAccessible(true);
 
         $this->assertEquals($paths, $property->getValue($analyzer));
     }
@@ -131,7 +128,6 @@ class AbstractFileAnalyzerTest extends TestCase
 
         $reflection = new \ReflectionClass($analyzer);
         $property = $reflection->getProperty('excludePatterns');
-        $property->setAccessible(true);
 
         $this->assertEquals($patterns, $property->getValue($analyzer));
     }
@@ -726,7 +722,6 @@ class AbstractFileAnalyzerTest extends TestCase
 
         $reflection = new \ReflectionClass($analyzer);
         $pathsProperty = $reflection->getProperty('paths');
-        $pathsProperty->setAccessible(true);
 
         $this->assertSame([], $pathsProperty->getValue($analyzer));
     }
@@ -1889,7 +1884,6 @@ class AbstractFileAnalyzerTest extends TestCase
     public function testRemainderUnderBaseComparesOnSegmentBoundaries(): void
     {
         $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'remainderUnderBase');
-        $method->setAccessible(true);
 
         $cases = [
             ['/p/app', '/p', 'app'],

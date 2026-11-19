@@ -123,6 +123,33 @@ class IssueTest extends TestCase
         $issue->message = 'New message';
     }
 
+    public function testFromArrayClampsNegativeSnippetContextLines(): void
+    {
+        foreach ([-2 => 0, 0 => 0, 3 => 3] as $given => $expected) {
+            $issue = Issue::fromArray([
+                'message' => 'Test message',
+                'severity' => 'high',
+                'recommendation' => 'Fix it',
+                'code_snippet' => [
+                    'file' => '/path/to/file.php',
+                    'target_line' => 42,
+                    'lines' => [42 => '    return $var;'],
+                    'context_lines' => $given,
+                ],
+            ]);
+
+            $this->assertNotNull($issue->codeSnippet);
+            $this->assertSame($expected, $issue->codeSnippet->getContextLines(), "Given {$given}");
+            $this->assertSame([42 => '    return $var;'], $issue->codeSnippet->getLines(), "Given {$given}");
+
+            $snippet = $issue->codeSnippet->toArray();
+            $this->assertSame($expected, $snippet['context_lines'], "Given {$given}");
+
+            $roundTrip = Issue::fromArray(['message' => 'm', 'severity' => 'high', 'recommendation' => 'r', 'code_snippet' => $snippet]);
+            $this->assertSame($expected, $roundTrip->codeSnippet?->getContextLines(), "Given {$given}");
+        }
+    }
+
     public function testFromArrayWithCodeSnippet(): void
     {
         // Test lines 37-44, 52-57: Code snippet creation in fromArray

@@ -15,7 +15,7 @@ class CodeSnippet
      * @param string $filePath The absolute path to the file
      * @param int $targetLine The line number where the issue occurs
      * @param array<int, string> $lines The code lines with line numbers as keys
-     * @param int $contextLines Number of lines before/after the target line
+     * @param int $contextLines Number of lines before/after the target line; a negative count means 0
      */
     public function __construct(
         private string $filePath,
@@ -23,6 +23,8 @@ class CodeSnippet
         private array $lines = [],
         private int $contextLines = 8
     ) {
+        // Covers snippets built directly and by Issue::fromArray(), as fromIndexedFile() does.
+        $this->contextLines = max($contextLines, 0);
     }
 
     /**
