@@ -51,6 +51,14 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     private array $unreadablePaths = [];
 
     /**
+     * pathKey() of each recorded unreadable directory, so one spelled two ways
+     * on Windows is recorded once.
+     *
+     * @var array<string, true>
+     */
+    private array $unreadableKeys = [];
+
+    /**
      * Set the base path.
      *
      * Trims the same charlist as PathHelper, so a Windows base_path() handed in
@@ -136,6 +144,29 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * out of the walk, and analyze() turned that into an Error result, so one
      * root-owned directory left every readable file unjudged.
      *
+     * Each pathname is yielded once, in the order the walk first meets it
+     * (#97). Every entry used to be walked on its own, so overlapping entries -
+     * ['app', 'app/Http'], 'app' beside base_path('app') or './app', a file
+     * beside its directory - yielded the same file twice and every issue in it
+     * was reported twice. The dedup lives here rather than in getPhpFiles() so
+     * subclasses that iterate this walk directly get it too. It compares
+     * pathnames, not realpath(): a symlinked spelling ('applink' for 'app')
+     * still yields its own pathnames, which excludes written against it rely
+     * on, and so do '..' and case variants, which only resolution could match.
+     *
+     * Each configured entry is cleaned first (normaliseEntry()): repeated and
+     * trailing separators are folded, so 'app//Http' and 'app/Providers/' walk
+     * and report as 'app/Http' and 'app/Providers'. Folding only the dedup key
+     * would not do - whichever spelling came first would be the one yielded,
+     * and 'app//Http/...' slips past an 'app/Http/*' exclude. Only the entry
+     * is cleaned, never the base: yielded paths must keep starting with the
+     * base as stored, or relativeTo() misses and relative excludes and
+     * locations stop applying under a base such as '/srv//p'. The key then
+     * folds '\' to '/' on Windows only, where the root is joined with '/' but
+     * the iterator appends DIRECTORY_SEPARATOR, so one file reached from 'app'
+     * and from 'app/Http' arrives spelled two ways. With a single scan root
+     * no pathname can repeat, so nothing is tracked.
+     *
      * @return iterable<SplFileInfo>
      */
     protected function getFilesToAnalyze(): iterable
@@ -146,12 +177,16 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         $basePath = $this->getBasePath();
         $paths = $this->paths === [] ? [''] : $this->paths;
         $this->unreadablePaths = [];
+        $this->unreadableKeys = [];
+        $track = count($paths) > 1;
+        /** @var array<string, true> $yielded */
+        $yielded = [];
 
         foreach ($paths as $path) {
-            $fullPath = self::scanRoot($basePath, $path);
+            $fullPath = self::scanRoot($basePath, self::normaliseEntry($path));
 
             if (! is_dir($fullPath)) {
-                if (is_file($fullPath)) {
+                if (is_file($fullPath) && ! ($track && self::seenBefore($yielded, $fullPath))) {
                     yield new SplFileInfo($fullPath);
                 }
 
@@ -187,11 +222,79 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
 
             /** @var SplFileInfo $file */
             foreach ($iterator as $file) {
-                if ($file->isFile()) {
+                if ($file->isFile() && ! ($track && self::seenBefore($yielded, $file->getPathname()))) {
                     yield $file;
                 }
             }
         }
+    }
+
+    /**
+     * Whether $path was already in $seen, adding it if not.
+     *
+     * @param array<string, true> $seen
+     */
+    private static function seenBefore(array &$seen, string $path): bool
+    {
+        $key = self::pathKey($path);
+
+        if (isset($seen[$key])) {
+            return true;
+        }
+
+        $seen[$key] = true;
+
+        return false;
+    }
+
+    /**
+     * The spelling two pathnames of one file share, for dedup only - what is
+     * yielded and recorded keeps its own spelling. On Windows the scan root is
+     * joined with '/' and the iterator appends '\', so the separators are
+     * folded there. Not on POSIX, where '\' is a filename byte and 'a\b.php'
+     * is a different file from 'a/b.php'.
+     */
+    private static function pathKey(string $path, bool $windows = DIRECTORY_SEPARATOR === '\\'): string
+    {
+        return $windows ? str_replace('\\', '/', $path) : $path;
+    }
+
+    /**
+     * Fold repeated separators in a configured entry and trim trailing ones
+     * (#97).
+     *
+     * PathHelper::join() leaves both alone, and the iterator neither keeps a
+     * trailing separator nor repeats one, so without this 'app/Providers/'
+     * was recorded unreadable beside 'app/Providers', and 'app//Http' yielded
+     * a second spelling of every file that relative excludes did not match.
+     * The entry is cleaned before it reaches scanRoot(), so the base path is
+     * joined on exactly as stored; an absolute entry's remainder comes back
+     * from remainderUnderBase() already segment-normalised.
+     *
+     * Only '/' is a separator on POSIX, where '\' is a filename byte: 'weird\'
+     * names its own directory and is left alone. On Windows both are. A
+     * leading pair is kept, since '\\server\share' is a UNC root on Windows.
+     * The trim never goes past a root: '/', '\' and, on Windows, a drive
+     * root such as 'C:\' stay as they are, since '' and 'C:' name the working
+     * directory instead. On POSIX 'C:' is an ordinary name and 'C:/' trims.
+     */
+    private static function normaliseEntry(string $path, bool $windows = DIRECTORY_SEPARATOR === '\\'): string
+    {
+        $separator = $windows ? '[/\\\\]' : '/';
+        $other = $windows ? '[^/\\\\]' : '[^/]';
+        $lead = preg_match('#^'.$separator.'{2}#', $path) === 1 ? substr($path, 0, 2) : '';
+        $rest = substr($path, strlen($lead));
+
+        if ($lead !== '') {
+            $rest = (string) preg_replace('#^'.$separator.'+#', '', $rest);
+        }
+
+        $path = $lead.preg_replace('#('.$separator.')'.$separator.'+#', '$1', $rest);
+        $driveRoot = $windows ? '(?<!^[A-Za-z]:)' : '';
+
+        // \z, not $: '$' also matches before a final "\n", a filename byte on
+        // POSIX, so "app/\n" was trimmed to "app\n".
+        return (string) preg_replace('#(?<='.$other.')'.$driveRoot.$separator.'+\z#', '', $path);
     }
 
     /**
@@ -248,7 +351,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
             return;
         }
 
-        if (! in_array($path, $this->unreadablePaths, true)) {
+        if (! self::seenBefore($this->unreadableKeys, $path)) {
             $this->unreadablePaths[] = $path;
         }
     }
