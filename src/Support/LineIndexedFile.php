@@ -5,20 +5,22 @@ declare(strict_types=1);
 namespace ShieldCI\AnalyzersCore\Support;
 
 /**
- * Random access to a file's lines with memory bounded by a constant per line.
+ * Random access to a file's lines with an index of bounded size.
  *
- * open() streams the file once, recording the byte offset where every
- * LINES_PER_CHECKPOINT-th line starts. Asking for a line then streams only the block of lines
- * it falls in, in READ_CHUNK pieces, and keeps two short strings per line - never the line
- * itself:
+ * open() streams the file once, recording the byte offset where every stride-th line starts.
+ * The stride begins at FIRST_STRIDE lines; when the index reaches MAX_CHECKPOINTS offsets it
+ * drops every other one and the stride doubles, so it only grows for a file of more than
+ * MAX_CHECKPOINTS * FIRST_STRIDE lines. Asking for a line then streams only the block of
+ * stride lines it falls in, in READ_CHUNK pieces, and keeps two short strings per line - never
+ * the line itself:
  *
  * - head(): the first HEAD_BYTES raw bytes, enough to render the line.
  * - probe(): enough of the trimmed line to test it for a signature or a closing brace.
  *
- * So the index costs one int per LINES_PER_CHECKPOINT lines, a cached block costs at most
- * LINES_PER_CHECKPOINT * (HEAD_BYTES + PROBE_BYTES) bytes of text, and a single read costs one
- * READ_CHUNK - however long the lines are. A caller asking for many lines of one file reads
- * it once plus the blocks it touches, never once per line.
+ * So the index costs at most MAX_CHECKPOINTS * CHECKPOINT_BYTES however many lines the file
+ * has, a cached block costs at most stride * (HEAD_BYTES + PROBE_BYTES) bytes of text, and a
+ * single read costs one READ_CHUNK - however long the lines are. A caller asking for many
+ * lines of one file reads it once plus the blocks it touches, never once per line.
  *
  * Lines are split on "\n" only, as `explode("\n", $contents)` would: a file ending in "\n" has a
  * final empty line, an empty file is one empty line, and a CRLF line keeps its "\r". That is
@@ -41,10 +43,19 @@ final class LineIndexedFile
     private const PROBE_BYTES = 64;
 
     /**
-     * Lines per index block. Small enough that a snippet reads a few short blocks, large
-     * enough that the index of a million-line file is ~31k ints.
+     * Lines per index block until the index is full. Small enough that a snippet reads a few
+     * short blocks; the index of a million-line file is ~31k offsets.
      */
-    private const LINES_PER_CHECKPOINT = 32;
+    private const FIRST_STRIDE = 32;
+
+    /**
+     * Most offsets the index holds: 512 KB. Reached only past ~2M lines at FIRST_STRIDE; each
+     * time it fills, half are dropped and the stride doubles.
+     */
+    private const MAX_CHECKPOINTS = 65536;
+
+    /** Bytes per offset in the index, as pack('P'): unsigned 64-bit, little-endian. */
+    private const CHECKPOINT_BYTES = 8;
 
     /**
      * How many decoded blocks to keep. A snippet spans at most a handful of blocks (a 15-line
@@ -68,8 +79,9 @@ final class LineIndexedFile
     private array $blocks = [];
 
     /**
-     * @param resource $handle Unbuffered, positioned anywhere
-     * @param list<int> $checkpoints Byte offset of line (n * LINES_PER_CHECKPOINT) + 1
+     * @param resource|null $handle Unbuffered, positioned anywhere; null once unusable
+     * @param string $checkpoints pack('P*') of the byte offset of line (n * $stride) + 1
+     * @param int $stride Lines per block: FIRST_STRIDE times a power of two
      * @param array{size: int, mtime: int, ino: int} $fingerprint What the file looked like when indexed
      */
     private function __construct(
@@ -77,7 +89,8 @@ final class LineIndexedFile
         private $handle,
         private readonly int $size,
         private readonly int $lineCount,
-        private readonly array $checkpoints,
+        private readonly string $checkpoints,
+        private readonly int $stride,
         private readonly array $fingerprint,
     ) {
     }
@@ -88,26 +101,45 @@ final class LineIndexedFile
     }
 
     /**
-     * Index a file. Returns null if the path is missing, not a regular file, or unreadable.
+     * A clone opens the path again, so closing either leaves the other readable. A clone of a
+     * closed file, or of a path that no longer opens to a file with the indexed size, mtime and
+     * inode (deleted, replaced by rename, rewritten), cannot be read: this index's offsets would
+     * show another file's text.
      */
-    public static function open(string $path): ?self
+    public function __clone()
+    {
+        $handle = is_resource($this->handle) ? self::openHandle($this->path) : null;
+
+        if ($handle !== null && self::describe(@fstat($handle)) !== $this->fingerprint) {
+            fclose($handle);
+            $handle = null;
+        }
+
+        $this->handle = $handle;
+    }
+
+    /**
+     * Index a file. Returns null if the path is missing, not a regular file, or unreadable.
+     *
+     * @param int $maxCheckpoints Index size limit, at least 2; lowered only by tests, to compact
+     *                            a small file
+     */
+    public static function open(string $path, int $maxCheckpoints = self::MAX_CHECKPOINTS): ?self
     {
         if (! is_file($path) || ! is_readable($path)) {
             return null;
         }
 
-        $handle = @fopen($path, 'rb');
+        $handle = self::openHandle($path);
 
-        if ($handle === false) {
+        if ($handle === null) {
             return null; // @codeCoverageIgnore
         }
 
-        // Unbuffered, so each fread() asks the file for exactly what is wanted. Streams that
-        // refuse (some user-space wrappers) stay buffered, which costs bytes but not correctness.
-        @stream_set_read_buffer($handle, 0);
-
+        $maxBytes = max(2, $maxCheckpoints) * self::CHECKPOINT_BYTES;
         $fingerprint = self::fingerprint($path);
-        $checkpoints = [0];
+        $checkpoints = pack('P', 0);
+        $stride = self::FIRST_STRIDE;
         $newlines = 0;
         $offset = 0;
 
@@ -123,15 +155,22 @@ final class LineIndexedFile
             while (($position = strpos($chunk, "\n", $position + 1)) !== false) {
                 $newlines++;
 
-                if ($newlines % self::LINES_PER_CHECKPOINT === 0) {
-                    $checkpoints[] = $offset + $position + 1;
+                if ($newlines % $stride === 0) {
+                    $checkpoints .= pack('P', $offset + $position + 1);
+
+                    if (strlen($checkpoints) >= $maxBytes) {
+                        // Offset n covers line n * stride + 1, so the even ones are exactly the
+                        // lines a stride twice as long starts its blocks at.
+                        $checkpoints = self::everyOther($checkpoints);
+                        $stride *= 2;
+                    }
                 }
             }
 
             $offset += strlen($chunk);
         }
 
-        return new self($path, $handle, $offset, $newlines + 1, $checkpoints, $fingerprint);
+        return new self($path, $handle, $offset, $newlines + 1, $checkpoints, $stride, $fingerprint);
     }
 
     /**
@@ -199,9 +238,9 @@ final class LineIndexedFile
             return null;
         }
 
-        $block = intdiv($number - 1, self::LINES_PER_CHECKPOINT);
+        $block = intdiv($number - 1, $this->stride);
 
-        return $this->block($block)[($number - 1) % self::LINES_PER_CHECKPOINT] ?? null;
+        return $this->block($block)[($number - 1) % $this->stride] ?? null;
     }
 
     /**
@@ -233,9 +272,11 @@ final class LineIndexedFile
      */
     private function readBlock(int $block): array
     {
-        $start = $this->checkpoints[$block];
-        $isLastBlock = ! isset($this->checkpoints[$block + 1]);
-        $remaining = ($this->checkpoints[$block + 1] ?? $this->size) - $start;
+        // entry() asks only for blocks that hold a line, and every such block has an offset.
+        $start = $this->checkpoint($block) ?? $this->size;
+        $next = $this->checkpoint($block + 1);
+        $isLastBlock = $next === null;
+        $remaining = ($next ?? $this->size) - $start;
 
         if (! is_resource($this->handle) || fseek($this->handle, $start) !== 0) {
             throw new \LogicException("Cannot read {$this->path}: it has been closed");
@@ -271,6 +312,55 @@ final class LineIndexedFile
         }
 
         return $entries;
+    }
+
+    /**
+     * The byte offset where block $block starts, or null past the last block.
+     */
+    private function checkpoint(int $block): ?int
+    {
+        if (($block + 1) * self::CHECKPOINT_BYTES > strlen($this->checkpoints)) {
+            return null;
+        }
+
+        /** @var array{1: int} $offset */
+        $offset = unpack('P', $this->checkpoints, $block * self::CHECKPOINT_BYTES);
+
+        return $offset[1];
+    }
+
+    /**
+     * Open a path for reading, or null if it cannot be.
+     *
+     * @return resource|null
+     */
+    private static function openHandle(string $path)
+    {
+        $handle = @fopen($path, 'rb');
+
+        if ($handle === false) {
+            return null;
+        }
+
+        // Unbuffered, so each fread() asks the file for exactly what is wanted. Streams that
+        // refuse (some user-space wrappers) stay buffered, which costs bytes but not correctness.
+        @stream_set_read_buffer($handle, 0);
+
+        return $handle;
+    }
+
+    /**
+     * Keep the 1st, 3rd, 5th, ... offset of a packed index.
+     */
+    private static function everyOther(string $checkpoints): string
+    {
+        $kept = '';
+
+        for ($at = 0, $length = strlen($checkpoints); $at < $length; $at += 2 * self::CHECKPOINT_BYTES) {
+            $kept .= substr($checkpoints, $at, self::CHECKPOINT_BYTES);
+        }
+
+        return $kept;
     }
 
     /**
@@ -348,8 +438,16 @@ final class LineIndexedFile
     private static function fingerprint(string $path): array
     {
         clearstatcache(true, $path);
-        $stat = @stat($path);
 
+        return self::describe(@stat($path));
+    }
+
+    /**
+     * @param array{size: int, mtime: int, ino: int}|false $stat From stat() or fstat()
+     * @return array{size: int, mtime: int, ino: int}
+     */
+    private static function describe(array|false $stat): array
+    {
         if ($stat === false) {
             return ['size' => -1, 'mtime' => -1, 'ino' => -1];
         }
