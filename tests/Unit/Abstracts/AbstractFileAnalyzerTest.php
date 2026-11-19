@@ -1557,6 +1557,389 @@ class AbstractFileAnalyzerTest extends TestCase
         }
     }
 
+    // =========================================================================
+    // Overlapping analyzed paths - ShieldCI/analyzers-core#97
+    //
+    // Each setPaths() entry used to be walked on its own, so two entries that
+    // reach the same file yielded it twice and every issue in it was reported
+    // twice. The walk now yields each pathname once, first-seen order.
+    // =========================================================================
+
+    public function testANestedEntryDoesNotYieldItsFilesTwice(): void
+    {
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app', 'app/Http']);
+
+        $expected = [$project . '/app/Http/Controllers/C.php', $project . '/app/Providers/P.php'];
+
+        $this->assertSame($expected, $this->sortedPhpFiles($analyzer));
+        $this->assertSame($expected, $this->pathnamesOf($analyzer->getFilesToAnalyzePublic()));
+    }
+
+    public function testRelativeAndAbsoluteSpellingsOfOneEntryYieldEachFileOnce(): void
+    {
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app', $project . '/app']);
+
+        $this->assertSame(
+            [$project . '/app/Http/Controllers/C.php', $project . '/app/Providers/P.php'],
+            $this->sortedPhpFiles($analyzer)
+        );
+    }
+
+    public function testARepeatedEntryYieldsEachFileOnce(): void
+    {
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($this->overlapAnalyzer(['app', 'app'])));
+    }
+
+    public function testATrailingSlashEntryYieldsEachFileOnce(): void
+    {
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($this->overlapAnalyzer(['app/', 'app'])));
+    }
+
+    public function testADotSlashEntryYieldsEachFileOnce(): void
+    {
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($this->overlapAnalyzer(['app', './app'])));
+    }
+
+    public function testAFileEntryInsideADirectoryEntryYieldsTheFileOnce(): void
+    {
+        $analyzer = $this->overlapAnalyzer(['app/Http/Controllers/C.php', 'app']);
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+    }
+
+    public function testOverlappingEntriesKeepFirstSeenOrder(): void
+    {
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers', 'app']);
+
+        $this->assertSame(
+            [$project . '/app/Providers/P.php', $project . '/app/Http/Controllers/C.php'],
+            $analyzer->getPhpFilesPublic()
+        );
+    }
+
+    public function testAnUnreadableRootGivenWithATrailingSlashIsRecordedOnce(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers/', 'app']);
+
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testASingleEntryStillYieldsEveryFileOnce(): void
+    {
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($this->overlapAnalyzer(['app'])));
+    }
+
+    public function testNonOverlappingEntriesStillYieldBothTrees(): void
+    {
+        $analyzer = $this->overlapAnalyzer(['app/Http', 'app/Providers']);
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+    }
+
+    public function testOverlappingEntriesStillHonourExcludes(): void
+    {
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app', 'app/Http']);
+        $analyzer->setExcludePatterns(['app/Http/*']);
+
+        $this->assertSame([$project . '/app/Providers/P.php'], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAnInteriorDoubleSlashEntryYieldsEachFileOnce(): void
+    {
+        $analyzer = $this->overlapAnalyzer(['app', 'app//Http']);
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+    }
+
+    public function testAnInteriorDoubleSlashFileEntryYieldsTheFileOnce(): void
+    {
+        $analyzer = $this->overlapAnalyzer(['app', 'app/Providers//P.php']);
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+    }
+
+    public function testAnUnreadableRootGivenWithAnInteriorDoubleSlashIsRecordedOnce(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app', 'app//Providers']);
+
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testAnInteriorDoubleSlashEntryHonoursRelativeExcludes(): void
+    {
+        // Whichever entry comes first, its spelling is the one yielded, so the
+        // root itself must be clean: 'app//Http/...' slipped past 'app/Http/*'.
+        $project = $this->testDir . '/unreadable-project';
+
+        foreach ([['app', 'app//Http'], ['app//Http', 'app']] as $paths) {
+            $analyzer = $this->overlapAnalyzer($paths);
+            $analyzer->setExcludePatterns(['app/Http/*']);
+
+            $this->assertSame([$project . '/app/Providers/P.php'], $analyzer->getPhpFilesPublic(), implode(', ', $paths));
+
+            $this->recursiveDelete($project);
+        }
+    }
+
+    public function testABaseWithAnInteriorDoubleSlashKeepsExcludesAndRelativePaths(): void
+    {
+        // setBasePath() stores the base as given. Cleaning the joined root
+        // folded the base too, so yielded paths stopped starting with it and
+        // relative excludes and locations silently stopped applying.
+        $project = $this->unreadableProject();
+        $base = dirname($project) . '//' . basename($project);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($base);
+        $analyzer->setPaths(['app']);
+        $analyzer->setExcludePatterns(['app/Http/*']);
+
+        $files = $analyzer->getPhpFilesPublic();
+
+        $this->assertSame([$base . '/app/Providers/P.php'], $files);
+        $this->assertSame('app/Providers/P.php', $analyzer->getRelativePathPublic($files[0]));
+    }
+
+    public function testABaseWithAnInteriorDoubleSlashDedupsOverlappingEntries(): void
+    {
+        $project = $this->unreadableProject();
+        $base = dirname($project) . '//' . basename($project);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($base);
+        $analyzer->setPaths(['app', 'app//Http', $base . '/app']);
+
+        $files = $analyzer->getPhpFilesPublic();
+        sort($files);
+
+        $this->assertSame([$base . '/app/Http/Controllers/C.php', $base . '/app/Providers/P.php'], $files);
+    }
+
+    public function testABaseWithLeadingSeparatorsKeepsExcludesAndRelativePaths(): void
+    {
+        $project = $this->unreadableProject();
+        $base = '//' . $project;
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($base);
+        $analyzer->setPaths(['app']);
+        $analyzer->setExcludePatterns(['app/Http/*']);
+
+        $files = $analyzer->getPhpFilesPublic();
+
+        $this->assertSame([$base . '/app/Providers/P.php'], $files);
+        $this->assertSame('app/Providers/P.php', $analyzer->getRelativePathPublic($files[0]));
+    }
+
+    public function testABaseWithAnInteriorDoubleSlashStillHidesAnExcludedUnreadableDirectory(): void
+    {
+        // recordUnreadablePath() probes the excludes with the relative path,
+        // which only exists while the root still starts with the stored base.
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+        $base = dirname($project) . '//' . basename($project);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($base);
+        $analyzer->setPaths(['app']);
+        $analyzer->setExcludePatterns(['app/Providers/*']);
+
+        $this->assertSame([$base . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testAPosixBackslashDirectoryNameIsStillScanned(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('A backslash is a separator on Windows, not a filename byte.');
+        }
+
+        $project = $this->testDir . '/backslash-project';
+        mkdir($project . '/weird\\', 0777, true);
+        mkdir($project . '/weird');
+        file_put_contents($project . '/weird\\/W.php', "<?php\n");
+        file_put_contents($project . '/weird/Other.php', "<?php\n");
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['weird\\']);
+
+        $this->assertSame([$project . '/weird\\/W.php'], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAbsoluteEntriesWithStraySeparatorsYieldEachFileOnce(): void
+    {
+        $project = $this->testDir . '/unreadable-project';
+
+        foreach ([$project . '//app', $project . '/app/', $project . '//app//'] as $entry) {
+            $analyzer = $this->overlapAnalyzer(['app', $entry]);
+
+            $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer), $entry);
+
+            $this->recursiveDelete($project);
+        }
+    }
+
+    public function testAnEntryEndingInSlashNewlineScansTheNewlineDirectory(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('A newline is not allowed in a Windows file name.');
+        }
+
+        // "app/\n" names the directory "\n" inside app/. A trim anchored with
+        // a bare '$' also matched before that newline and walked "app\n".
+        $project = $this->testDir . '/newline-project';
+        mkdir($project . "/app/\n", 0777, true);
+        file_put_contents($project . "/app/\n/N.php", "<?php\n");
+        file_put_contents($project . "/app\n", "<?php\n");
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(["app/\n"]);
+
+        $this->assertSame([$project . "/app/\n/N.php"], $this->pathnamesOf($analyzer->getFilesToAnalyzePublic()));
+    }
+
+    public function testADriveShapedPosixEntryWithATrailingSlashIsRecordedOnce(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('C:/ is a drive root on Windows.');
+        }
+
+        // On POSIX 'C:' is an ordinary directory name, so 'C:/' is trimmed
+        // like any other trailing slash.
+        $project = $this->unreadableProject();
+        mkdir($project . '/C:');
+        $this->lock($project . '/C:');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['C:/', 'C:']);
+
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame([$project . '/C:'], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testNormaliseEntryCleansSeparatorsWithoutEmptyingARoot(): void
+    {
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'normaliseEntry');
+
+        // [entry, windows, expected]
+        $cases = [
+            ['app/', false, 'app'],
+            ['app', false, 'app'],
+            ['/p/app//', false, '/p/app'],
+            ['/p//app///Http', false, '/p/app/Http'],
+            ['/', false, '/'],
+            ['//', false, '//'],
+            ['', false, ''],
+            // A backslash is a filename byte on POSIX: neither interior nor
+            // trailing ones are separators there.
+            ['/p/a\\\\b', false, '/p/a\\\\b'],
+            ['/p/x\\', false, '/p/x\\'],
+            ['weird\\', false, 'weird\\'],
+            ['app/\\', false, 'app/\\'],
+            // A leading pair is kept (a UNC root on Windows), extra ones folded.
+            ['//server//share/', false, '//server/share'],
+            ['///p', false, '//p'],
+            ['app\\', true, 'app'],
+            ['C:\\proj\\app\\', true, 'C:\\proj\\app'],
+            ['C:\\proj/\\app//Http', true, 'C:\\proj/app/Http'],
+            ['C:/proj/app/\\', true, 'C:/proj/app'],
+            ['\\\\server\\\\share\\', true, '\\\\server\\share'],
+            ['\\', true, '\\'],
+            ['C:\\', true, 'C:\\'],
+            ['C:/', true, 'C:/'],
+            // A drive root only exists on Windows: on POSIX 'C:' is a name.
+            ['C:/', false, 'C:'],
+            ['app/C:/', false, 'app/C:'],
+            // '$' would also match before a final newline, which is a
+            // filename byte on POSIX.
+            ["app/\n", false, "app/\n"],
+            ["app//\n", false, "app/\n"],
+        ];
+
+        foreach ($cases as [$path, $windows, $expected]) {
+            $this->assertSame(
+                $expected,
+                $method->invoke(null, $path, $windows),
+                sprintf("normaliseEntry('%s', %s)", $path, $windows ? 'windows' : 'posix')
+            );
+        }
+    }
+
+    public function testPathKeyFoldsBackslashesOnWindowsOnly(): void
+    {
+        // RecursiveDirectoryIterator joins with DIRECTORY_SEPARATOR, scan roots
+        // are joined with '/': on Windows one file reached from 'app' and from
+        // 'app/Http' arrives spelled two ways.
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'pathKey');
+
+        $this->assertSame(
+            $method->invoke(null, 'C:\\proj/app\\Http\\Controllers\\C.php', true),
+            $method->invoke(null, 'C:\\proj/app/Http\\Controllers\\C.php', true)
+        );
+        $this->assertSame('C:/proj/app/Http/C.php', $method->invoke(null, 'C:\\proj/app\\Http\\C.php', true));
+
+        // On POSIX 'a\b.php' is one file name and must not collide with 'a/b.php'.
+        $this->assertSame('/p/a\\b.php', $method->invoke(null, '/p/a\\b.php', false));
+        $this->assertNotSame(
+            $method->invoke(null, '/p/a/b.php', false),
+            $method->invoke(null, '/p/a\\b.php', false)
+        );
+    }
+
+    /**
+     * @param  array<string>  $paths
+     */
+    private function overlapAnalyzer(array $paths): ConcreteFileAnalyzer
+    {
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($this->unreadableProject());
+        $analyzer->setPaths($paths);
+
+        return $analyzer;
+    }
+
+    /**
+     * @return array<string>
+     */
+    private function overlapExpected(): array
+    {
+        $project = $this->testDir . '/unreadable-project';
+
+        return [$project . '/app/Http/Controllers/C.php', $project . '/app/Providers/P.php'];
+    }
+
     /**
      * @param  iterable<\SplFileInfo>  $files
      * @return array<string>
