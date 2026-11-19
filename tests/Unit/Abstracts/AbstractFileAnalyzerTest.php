@@ -1127,6 +1127,385 @@ class AbstractFileAnalyzerTest extends TestCase
     }
 
     // =========================================================================
+    // Configured paths that name nothing - ShieldCI/analyzers-core#99
+    //
+    // An entry that was neither a directory nor a file was skipped with a bare
+    // continue: a typo ('ap'), an absolute path outside the base, or a path
+    // behind a directory the walk cannot enter all scanned nothing, recorded
+    // nothing, and the analyzer passed.
+    // =========================================================================
+
+    public function testATypoedEntryIsRecordedAsMissing(): void
+    {
+        $project = $this->unreadableProject();
+
+        $analyzer = new WalkingFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['ap']);
+
+        $result = $analyzer->analyze();
+
+        $this->assertSame('passed', $result->getStatus()->value, $result->getMessage());
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame(['ap'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAnAbsoluteEntryOutsideTheBaseIsRecordedAsMissing(): void
+    {
+        // Still joined onto the base on purpose (#96), so it names nothing -
+        // but now says so, spelled as configured.
+        $project = $this->unreadableProject();
+        $other = $this->testDir . '/other/app';
+        mkdir($other, 0777, true);
+        file_put_contents($other . '/O.php', "<?php\n");
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths([$other]);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame([$other], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAnEntryBehindASearchlessDirectoryRecordsThatDirectory(): void
+    {
+        // app/Providers exists, but 0444 on app stops it being stat'ed - it is
+        // unreachable, not missing, and app is what to fix.
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app', 0444);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project . '/app'], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAnEntryUnderAnUnreadableBaseRecordsTheBase(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAMissingEntryUnderASearchOnlyDirectoryIsMissing(): void
+    {
+        // 0111 cannot be listed but can be searched, so app/Gone can still be
+        // stat'ed: it is not there. A typo, not an unreachable path.
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app', 0111);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Gone']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame(['app/Gone'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAnEntryBehindAnExcludedUnreadableDirectoryIsNotRecorded(): void
+    {
+        // Same exclude rule as an unreadable directory met during the walk.
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app', 0444);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers']);
+        $analyzer->setExcludePatterns(['app/*']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAMissingEntryIsRecordedOnce(): void
+    {
+        // Every spelling of one location - repeated, trailing separator,
+        // './', absolute inside the base - is one missing entry, recorded in
+        // the first spelling met after normalising.
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['ap', 'ap', 'ap/', './ap', $project . '/ap']);
+
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame(['ap'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAMissingEntryIsRecordedWithItsSeparatorsNormalised(): void
+    {
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app//Gone/', 'lib']);
+
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame(['app/Gone', 'lib'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testTheMissingRecordDescribesTheLatestWalkOnly(): void
+    {
+        // AnalyzerManager caches analyzer instances: a path created between
+        // runs must not stay reported against the next one.
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['lib']);
+
+        $analyzer->getPhpFilesPublic();
+        $this->assertSame(['lib'], $analyzer->getMissingPathsPublic());
+
+        mkdir($project . '/lib');
+        file_put_contents($project . '/lib/L.php', "<?php\n");
+
+        $this->assertSame([$project . '/lib/L.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAValidEntryBesideAMissingOneStillYieldsItsFiles(): void
+    {
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['ap', 'app/Http', 'lib/X.php']);
+
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame(['ap', 'lib/X.php'], $analyzer->getMissingPathsPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testValidEntriesRecordNothingMissing(): void
+    {
+        $project = $this->unreadableProject();
+
+        foreach ([[], [''], ['app'], ['app/Providers/P.php']] as $paths) {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($project);
+            $analyzer->setPaths($paths);
+
+            $this->assertNotSame([], $analyzer->getPhpFilesPublic(), json_encode($paths) ?: '');
+            $this->assertSame([], $analyzer->getMissingPathsPublic(), json_encode($paths) ?: '');
+        }
+    }
+
+    public function testAnUnreadableSubdirectoryIsStillRecordedAsUnreadableNotMissing(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app']);
+
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAMissingBaseRecordsTheDefaultEntryAsMissing(): void
+    {
+        // The default scan root is spelled '' - the same as setPaths(['']) -
+        // and that is what is recorded when the base itself is gone.
+        foreach ([[], ['']] as $paths) {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($this->testDir . '/no-such-project');
+            $analyzer->setPaths($paths);
+
+            $this->assertSame([], $analyzer->getPhpFilesPublic());
+            $this->assertSame([''], $analyzer->getMissingPathsPublic(), json_encode($paths) ?: '');
+            $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+        }
+    }
+
+    public function testAMissingEntryUnderAnExcludedTreeIsNotRecorded(): void
+    {
+        // Every file it could hold would be excluded anyway.
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['vendor/gone', 'lib']);
+        $analyzer->setExcludePatterns(['vendor/*']);
+
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame(['lib'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAMissingFileEntryExcludedLiterallyIsNotRecorded(): void
+    {
+        // The NUL probe only matches wildcards; a literal exclude of the file
+        // itself covers the entry just as fully.
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['lib/X.php']);
+        $analyzer->setExcludePatterns(['lib/X.php']);
+
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAMissingFileEntryExcludedByItsAbsolutePathIsNotRecorded(): void
+    {
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['lib/X.php']);
+        $analyzer->setExcludePatterns([$project . '/lib/X.php']);
+
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testALiteralExcludeOfANonPhpEntryDoesNotHideIt(): void
+    {
+        // As with an unreadable directory, 'lib' excludes no file below it,
+        // so a missing 'lib' is still reported.
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['lib']);
+        $analyzer->setExcludePatterns(['lib']);
+
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame(['lib'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testABlockedEntryTheExcludesCoverDoesNotReportItsBlocker(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app', 0444);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers']);
+        $analyzer->setExcludePatterns(['app/Providers/*']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testABlockedFileEntryExcludedLiterallyDoesNotReportItsBlocker(): void
+    {
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app', 0444);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers/P.php']);
+        $analyzer->setExcludePatterns(['app/Providers/P.php']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAnEntryUnderAFileIsRecordedAsMissing(): void
+    {
+        // The nearest existing ancestor is a file, not a directory it cannot
+        // enter, so nothing is unreadable.
+        $project = $this->unreadableProject();
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Providers/P.php/x']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame(['app/Providers/P.php/x'], $analyzer->getMissingPathsPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testAnEntryNamingSomethingOtherThanAFileOrDirectoryIsNotMissing(): void
+    {
+        // A link to a device names something; it is not a PHP file, but it is
+        // not a typo either.
+        if (! @symlink('/dev/null', $this->testDir . '/null')) {
+            $this->markTestSkipped('symlink() is not available here');
+        }
+
+        try {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($this->testDir);
+            $analyzer->setPaths(['null']);
+
+            $this->assertSame([], $analyzer->getPhpFilesPublic());
+            $this->assertSame([], $analyzer->getMissingPathsPublic());
+            $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+        } finally {
+            unlink($this->testDir . '/null');
+        }
+    }
+
+    public function testADanglingSymlinkEntryIsRecordedAsMissing(): void
+    {
+        if (! @symlink($this->testDir . '/gone', $this->testDir . '/dangling')) {
+            $this->markTestSkipped('symlink() is not available here');
+        }
+
+        try {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($this->testDir);
+            $analyzer->setPaths(['dangling']);
+
+            $this->assertSame([], $analyzer->getPhpFilesPublic());
+            $this->assertSame(['dangling'], $analyzer->getMissingPathsPublic());
+        } finally {
+            unlink($this->testDir . '/dangling');
+        }
+    }
+
+    public function testAMissingEntryUnderARelativeBaseIsRecorded(): void
+    {
+        // dirname() of a relative path bottoms out at '.', not '/'.
+        $cwd = getcwd();
+        $this->assertIsString($cwd);
+        chdir($this->testDir);
+
+        try {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath('src');
+            $analyzer->setPaths(['Gone', 'File1.php']);
+
+            $this->assertSame(['src/File1.php'], $analyzer->getPhpFilesPublic());
+            $this->assertSame(['Gone'], $analyzer->getMissingPathsPublic());
+
+            $analyzer->setBasePath('no-such-dir/deeper');
+            $analyzer->setPaths(['x']);
+            $analyzer->getPhpFilesPublic();
+            $this->assertSame(['x'], $analyzer->getMissingPathsPublic());
+        } finally {
+            chdir($cwd);
+        }
+    }
+
+    // =========================================================================
     // Absolute entries in the analyzed paths - ShieldCI/analyzers-core#96
     //
     // PathHelper::join() strips a segment's leading separators, so an absolute
@@ -2037,6 +2416,14 @@ class ConcreteFileAnalyzer extends AbstractFileAnalyzer
     public function getUnreadablePathsPublic(): array
     {
         return $this->getUnreadablePaths();
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function getMissingPathsPublic(): array
+    {
+        return $this->getMissingPaths();
     }
 }
 
