@@ -38,7 +38,7 @@ class CodeSnippet
      *
      * @param string $filePath Absolute path to the file
      * @param int $targetLine The line number where the issue occurs
-     * @param int $contextLines Number of lines to show before and after (default: 8)
+     * @param int $contextLines Number of lines to show before and after (default: 8); a negative count means 0
      * @return self|null Returns null if the path is missing, not a regular file, or can't be read
      */
     public static function fromFile(
@@ -70,7 +70,7 @@ class CodeSnippet
      * @param string $filePath The path to record on the snippet
      * @param LineIndexedFile $file The indexed file
      * @param int $targetLine The line number where the issue occurs
-     * @param int $contextLines Number of lines to show before and after (default: 8)
+     * @param int $contextLines Number of lines to show before and after (default: 8); a negative count means 0
      */
     public static function fromIndexedFile(
         string $filePath,
@@ -78,6 +78,10 @@ class CodeSnippet
         int $targetLine,
         int $contextLines = 8
     ): self {
+        // A negative count would put the window's start after its end and leave no lines,
+        // so it means 0: the target line alone. fromFile() comes through here too.
+        $contextLines = max($contextLines, 0);
+
         [$startLine, $endLine] = self::calculateBoundsWithSmartExpansion(
             $file,
             $targetLine,

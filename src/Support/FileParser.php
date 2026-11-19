@@ -567,7 +567,7 @@ class FileParser
      *
      * @param  string  $filePath  Path to the file
      * @param  int  $line  Target line number (1-indexed)
-     * @param  int  $contextLines  Number of context lines before and after (default: 2)
+     * @param  int  $contextLines  Number of context lines before and after (default: 2); a negative count means 0
      * @return string|null  Code snippet as string with newlines, or null if file cannot be read
      */
     public static function getCodeSnippet(string $filePath, int $line, int $contextLines = 2): ?string

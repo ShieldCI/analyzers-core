@@ -384,8 +384,7 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
             try {
                 $showSnippets = config('shieldci.report.show_code_snippets', true);
                 if ($showSnippets) {
-                    $configLines = config('shieldci.report.snippet_context_lines', 8);
-                    $snippetLines = $contextLines ?? (is_numeric($configLines) ? (int) $configLines : 8);
+                    $snippetLines = $contextLines ?? self::configContextLines(config('shieldci.report.snippet_context_lines', 8));
                     $codeSnippet = $this->runDepth === 0
                         ? CodeSnippet::fromFile($filePath, $lineNumber, $snippetLines)
                         : $this->snippetFromCache($filePath, $lineNumber, $snippetLines);
@@ -405,6 +404,28 @@ abstract class AbstractAnalyzer implements AnalyzerInterface
             metadata: $metadata,
             codeSnippet: $codeSnippet
         );
+    }
+
+    /**
+     * The snippet_context_lines config value as a line count, or the default of 8 if it is invalid.
+     *
+     * Invalid means non-numeric, negative, or a float an int cannot hold (NAN, INF, beyond
+     * PHP_INT_MAX). These are checked before the cast: (int) turns -0.5 and NAN into 0, wraps
+     * -1e19 to a huge positive count, and on PHP 8.5 warns for a float it cannot represent.
+     */
+    private static function configContextLines(mixed $value): int
+    {
+        if (! is_numeric($value)) {
+            return 8;
+        }
+
+        $number = +$value;
+
+        if (is_float($number) && (! is_finite($number) || $number >= PHP_INT_MAX)) {
+            return 8;
+        }
+
+        return $number >= 0 ? (int) $number : 8;
     }
 
     /**
