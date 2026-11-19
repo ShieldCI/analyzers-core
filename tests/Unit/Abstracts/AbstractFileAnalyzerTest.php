@@ -300,6 +300,16 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertStringContainsString('// Line 6', $snippet);
     }
 
+    public function testGetCodeSnippetWithNegativeContextReturnsTheTargetLine(): void
+    {
+        $file = $this->testDir . '/negative-context.php';
+        file_put_contents($file, "<?php\n// Line 2\n// Line 3\n// Line 4\n// Line 5\n// Line 6\n");
+
+        // Was "" (#101): a negative count is clamped to 0, the target line alone.
+        $this->assertSame("// Line 4\n", FileParser::getCodeSnippet($file, 4, -2));
+        $this->assertSame("// Line 4\n", FileParser::getCodeSnippet($file, 4, 0));
+    }
+
     public function testGetCodeSnippetReturnsNullForNonExistentFile(): void
     {
         $snippet = FileParser::getCodeSnippet('/non/existent/file.php', 1);

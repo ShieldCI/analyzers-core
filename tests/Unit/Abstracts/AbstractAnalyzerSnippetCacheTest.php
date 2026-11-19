@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Tests\Unit\Abstracts;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use ShieldCI\AnalyzersCore\Abstracts\AbstractAnalyzer;
@@ -348,6 +349,132 @@ class AbstractAnalyzerSnippetCacheTest extends TestCase
 
         $this->assertNull($issues[0]->codeSnippet);
         $this->assertSame(0, CountingStreamWrapper::$opens[$path] ?? 0);
+    }
+
+    public function testNegativeConfigContextFallsBackToTheDefault(): void
+    {
+        // A negative snippet_context_lines is invalid config, like a non-numeric one, so the
+        // default of 8 applies. It used to reach CodeSnippet and give a snippet with no lines (#101).
+        $path = $this->makeFile($this->commentSource(25));
+
+        foreach ([-2, '-2', -1, PHP_INT_MIN] as $configLines) {
+            config(['shieldci.report.snippet_context_lines' => $configLines]);
+
+            $this->assertContextWindow($path, 8, range(2, 18), var_export($configLines, true));
+        }
+    }
+
+    public function testValidAndNonNumericConfigContextIsUnchanged(): void
+    {
+        $path = $this->makeFile($this->commentSource(25));
+
+        foreach ([[0, 0, [10]], [8, 8, range(2, 18)], ['abc', 8, range(2, 18)]] as [$configLines, $expected, $keys]) {
+            config(['shieldci.report.snippet_context_lines' => $configLines]);
+
+            $this->assertContextWindow($path, $expected, $keys, var_export($configLines, true));
+        }
+    }
+
+    /**
+     * A config value an int cannot hold faithfully also falls back to 8. Casting it first
+     * turned -0.5 and NAN into 0 and wrapped -1e19 to a huge positive count, and on PHP 8.5
+     * the cast of a non-finite or out-of-range float warns.
+     */
+    #[DataProvider('unrepresentableConfigContextLines')]
+    public function testUnrepresentableConfigContextFallsBackToTheDefault(mixed $configLines): void
+    {
+        config(['shieldci.report.snippet_context_lines' => $configLines]);
+
+        $this->assertContextWindow($this->makeFile($this->commentSource(25)), 8, range(2, 18), var_export($configLines, true));
+    }
+
+    /**
+     * @return array<string, array{mixed}>
+     */
+    public static function unrepresentableConfigContextLines(): array
+    {
+        return [
+            '-1e19' => [-1e19],
+            '-INF' => [-INF],
+            'NAN' => [NAN],
+            'INF' => [INF],
+            '-0.5' => [-0.5],
+            "'-0.5'" => ['-0.5'],
+            '1e30' => [1e30],
+            "'1e30'" => ['1e30'],
+        ];
+    }
+
+    /**
+     * @param  list<int>  $keys
+     */
+    #[DataProvider('representableConfigContextLines')]
+    public function testRepresentableConfigContextIsUsed(mixed $configLines, int $contextLines, array $keys): void
+    {
+        config(['shieldci.report.snippet_context_lines' => $configLines]);
+
+        $this->assertContextWindow($this->makeFile($this->commentSource(25)), $contextLines, $keys, var_export($configLines, true));
+    }
+
+    /**
+     * @return array<string, array{mixed, int, list<int>}>
+     */
+    public static function representableConfigContextLines(): array
+    {
+        return [
+            'PHP_INT_MAX' => [PHP_INT_MAX, PHP_INT_MAX, range(1, 26)],
+            "'1e3'" => ['1e3', 1000, range(1, 26)],
+            "'2.5'" => ['2.5', 2, range(8, 12)],
+            "'0.5'" => ['0.5', 0, [10]],
+            "'-0'" => ['-0', 0, [10]],
+        ];
+    }
+
+    public function testExplicitNegativeContextShowsOnlyTheTargetLine(): void
+    {
+        // An explicit argument bypasses config, so it is clamped to 0 by CodeSnippet instead.
+        $path = $this->makeFile($this->commentSource(25));
+
+        foreach ([-2, PHP_INT_MIN] as $contextLines) {
+            $inRun = (new SnippetTargetsAnalyzer([[$path, 10]], $contextLines))->analyze()->getIssues()[0];
+            $direct = (new SnippetTargetsAnalyzer([]))->exposedCreateIssueWithSnippet($path, 10, $contextLines);
+
+            foreach (['in-run' => $inRun, 'direct' => $direct] as $label => $issue) {
+                $this->assertSame([10 => '// Line 10'], $issue->codeSnippet?->getLines(), "{$label}, {$contextLines}");
+                $this->assertSame(0, $issue->codeSnippet->getContextLines(), "{$label}, {$contextLines}");
+            }
+        }
+    }
+
+    /**
+     * Assert the config-driven snippet for line 10 of $path, inside a run and outside one.
+     *
+     * @param  list<int>  $keys  The line numbers the snippet should show.
+     */
+    private function assertContextWindow(string $path, int $contextLines, array $keys, string $label): void
+    {
+        $inRun = (new SnippetTargetsAnalyzer([[$path, 10]]))->analyze()->getIssues()[0];
+        $direct = (new SnippetTargetsAnalyzer([]))->exposedCreateIssueWithSnippet($path, 10);
+
+        foreach (['in-run' => $inRun, 'direct' => $direct] as $where => $issue) {
+            $this->assertNotNull($issue->codeSnippet, "{$where}, config {$label}");
+            $this->assertSame($keys, array_keys($issue->codeSnippet->getLines()), "{$where}, config {$label}");
+            $this->assertSame($contextLines, $issue->codeSnippet->getContextLines(), "{$where}, config {$label}");
+        }
+    }
+
+    /**
+     * `<?php` then `// Line N` on each line N, so no signature moves the snippet window.
+     */
+    private function commentSource(int $totalLines): string
+    {
+        $lines = ['<?php'];
+
+        for ($n = 2; $n <= $totalLines; $n++) {
+            $lines[] = "// Line {$n}";
+        }
+
+        return implode("\n", $lines)."\n";
     }
 
     private function makeFile(string $content): string

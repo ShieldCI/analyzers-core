@@ -8,6 +8,7 @@ use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Enums\Severity;
 use ShieldCI\AnalyzersCore\Formatters\JsonFormatter;
 use ShieldCI\AnalyzersCore\Results\AnalysisResult;
+use ShieldCI\AnalyzersCore\Support\LineIndexedFile;
 use ShieldCI\AnalyzersCore\ValueObjects\{CodeSnippet, Issue, Location};
 
 class CodeSnippetTest extends TestCase
@@ -175,6 +176,39 @@ PHP;
         // Should only have the target line
         $this->assertCount(1, $lines);
         $this->assertArrayHasKey(10, $lines);
+    }
+
+    public function test_negative_context_lines_show_only_the_target_line(): void
+    {
+        // A negative count used to put the window's start after its end, so the snippet came
+        // back with no lines at all (#101). It is clamped to 0: just the target line.
+        foreach ([-1, -2, -20, PHP_INT_MIN] as $contextLines) {
+            $snippet = CodeSnippet::fromFile($this->testFile, 10, $contextLines);
+
+            $this->assertNotNull($snippet);
+            $this->assertSame(
+                [10 => '        return $variable; // Line 10 - target line'],
+                $snippet->getLines(),
+                "Context {$contextLines} should show only the target line"
+            );
+            $this->assertSame(0, $snippet->getContextLines());
+            $this->assertSame(0, $snippet->toArray()['context_lines']);
+        }
+    }
+
+    public function test_from_indexed_file_clamps_negative_context_lines(): void
+    {
+        $file = LineIndexedFile::open($this->testFile);
+        $this->assertNotNull($file);
+
+        try {
+            $snippet = CodeSnippet::fromIndexedFile($this->testFile, $file, 10, -2);
+        } finally {
+            $file->close();
+        }
+
+        $this->assertSame([10 => '        return $variable; // Line 10 - target line'], $snippet->getLines());
+        $this->assertSame(0, $snippet->getContextLines());
     }
 
     public function test_snippet_with_large_context_lines(): void
