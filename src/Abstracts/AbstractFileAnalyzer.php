@@ -59,6 +59,13 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     private array $unreadableKeys = [];
 
     /**
+     * Configured entries the latest walk found naming nothing.
+     *
+     * @var list<string>
+     */
+    private array $missingPaths = [];
+
+    /**
      * Set the base path.
      *
      * Trims the same charlist as PathHelper, so a Windows base_path() handed in
@@ -167,6 +174,13 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * and from 'app/Http' arrives spelled two ways. With a single scan root
      * no pathname can repeat, so nothing is tracked.
      *
+     * An entry that is neither a directory nor a file is recorded rather than
+     * skipped in silence (#99). A typo ('ap'), an absolute path outside the
+     * base, or a path behind a directory the walk cannot enter all used to
+     * scan nothing, record nothing, and let the analyzer pass. One the walk
+     * cannot reach records the directory in the way (getUnreadablePaths());
+     * anything else is missing (getMissingPaths()).
+     *
      * @return iterable<SplFileInfo>
      */
     protected function getFilesToAnalyze(): iterable
@@ -178,16 +192,24 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         $paths = $this->paths === [] ? [''] : $this->paths;
         $this->unreadablePaths = [];
         $this->unreadableKeys = [];
+        $this->missingPaths = [];
         $track = count($paths) > 1;
         /** @var array<string, true> $yielded */
         $yielded = [];
+        /** @var array<string, true> $missingKeys */
+        $missingKeys = [];
 
         foreach ($paths as $path) {
-            $fullPath = self::scanRoot($basePath, self::normaliseEntry($path));
+            $entry = self::normaliseEntry($path);
+            $fullPath = self::scanRoot($basePath, $entry);
 
             if (! is_dir($fullPath)) {
-                if (is_file($fullPath) && ! ($track && self::seenBefore($yielded, $fullPath))) {
-                    yield new SplFileInfo($fullPath);
+                if (is_file($fullPath)) {
+                    if (! ($track && self::seenBefore($yielded, $fullPath))) {
+                        yield new SplFileInfo($fullPath);
+                    }
+                } else {
+                    $this->recordUnscannableEntry($entry, $fullPath, $missingKeys);
                 }
 
                 continue;
@@ -319,6 +341,120 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     }
 
     /**
+     * Configured entries the latest getFilesToAnalyze() walk found naming
+     * nothing (#99).
+     *
+     * Spelled as configured once normaliseEntry() has cleaned them, so 'ap/'
+     * is recorded as 'ap'; the default scan root is spelled '', as
+     * setPaths(['']) is, and is only missing when the base path itself is.
+     * Each entry once, in config order, under the first spelling seen; the
+     * comparison is the walk's pathname key, so separator, './' and absolute
+     * spellings of one location fold together but a '..' spelling does not.
+     * An entry the exclude patterns fully cover - every PHP file under it, or
+     * a '.php' entry matched itself - is not recorded, and neither is a
+     * directory blocking it (excludesEntry()). An entry the
+     * walk cannot reach because a directory above it cannot be entered is not
+     * missing either: that directory is recorded in getUnreadablePaths()
+     * instead. Nor is one naming something that is neither a file nor a
+     * directory (a link to a device, a FIFO).
+     *
+     * The record resets when a walk starts, so on a cached instance it never
+     * carries an entry created since the last run - but it also describes
+     * only that walk: read it after the walk you care about, and know that a
+     * walk abandoned part-way has recorded only the entries it reached.
+     * Subclasses that replace getFilesToAnalyze() record nothing here.
+     *
+     * @return list<string>
+     */
+    protected function getMissingPaths(): array
+    {
+        return $this->missingPaths;
+    }
+
+    /**
+     * Record a configured entry that is neither a directory nor a file.
+     *
+     * @param array<string, true> $missingKeys
+     */
+    private function recordUnscannableEntry(string $entry, string $fullPath, array &$missingKeys): void
+    {
+        // Silenced like realpath() in remainderUnderBase(): under open_basedir
+        // every stat outside the allowed list warns, and this one can climb
+        // above the base path.
+        if (@file_exists($fullPath) || $this->excludesEntry($fullPath)) {
+            return;
+        }
+
+        $blocker = $this->blockingDirectory($fullPath);
+
+        if ($blocker !== null) {
+            $this->recordUnreadablePath($blocker);
+
+            return;
+        }
+
+        if (! self::seenBefore($missingKeys, $fullPath)) {
+            $this->missingPaths[] = $entry;
+        }
+    }
+
+    /**
+     * Whether the excludes would drop everything an unscannable entry could
+     * yield, so neither it nor the directory blocking it is worth reporting.
+     *
+     * The entry may be a directory or a file, and it is covered either way:
+     * as a directory when the excludes drop every PHP file inside it (the
+     * probe), as a file when they match the entry's own path in either
+     * spelling. The second applies only to a '.php' entry - only that would
+     * be analyzed as a file, and a literal 'lib' excludes no file below a
+     * 'lib' directory, the same reason a literal directory exclude does not
+     * hide an unreadable directory.
+     */
+    private function excludesEntry(string $fullPath): bool
+    {
+        if ($this->excludesEveryPhpFileIn($fullPath)) {
+            return true;
+        }
+
+        return str_ends_with($fullPath, '.php')
+            && $this->matchesExcludePattern(ltrim($this->getRelativePath($fullPath), '/'), $fullPath);
+    }
+
+    /**
+     * The directory that hides $fullPath from the walk, or null when nothing
+     * does and $fullPath is simply missing.
+     *
+     * A path cannot be stat'ed below a directory that cannot be searched, so
+     * every ancestor under the blocking one looks missing too: the nearest
+     * ancestor that does exist is the one to judge. dirname() stops at '/'
+     * (or a drive root) for an absolute path and at '.' for a relative one.
+     *
+     * Only the search bit blocks a stat, so this is narrower than
+     * canEnterDirectory(): under a search-only (0111) directory the entry
+     * could be stat'ed and is genuinely missing, while 0444 and 0000 block.
+     * Windows has no search bit, so the same split as canEnterDirectory()
+     * applies and readability stands in for it there.
+     */
+    private function blockingDirectory(string $fullPath): ?string
+    {
+        $dir = dirname($fullPath);
+
+        while (! @file_exists($dir) && dirname($dir) !== $dir) {
+            $dir = dirname($dir);
+        }
+
+        if (! @is_dir($dir)) {
+            return null;
+        }
+
+        if (DIRECTORY_SEPARATOR === '\\') {
+            return is_readable($dir) ? null : $dir; // @codeCoverageIgnore
+        }
+
+        return is_executable($dir) ? null : $dir;
+    }
+
+    /**
      * Whether the walk can list a directory and stat what is in it.
      *
      * Read permission alone is not enough: a 0444 directory lists its entries
@@ -341,19 +477,26 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
 
     private function recordUnreadablePath(string $path): void
     {
-        // Not recorded if the excludes would drop a PHP file of any name inside
-        // it. The probe is named with a NUL byte, which no real filename or
-        // literal pattern holds, so only a wildcard ('vendor/*', '*.php') can
-        // match it. The directory is skipped either way; only the report differs.
-        $probe = $path.'/'."\0.php";
-
-        if ($this->matchesExcludePattern(ltrim($this->getRelativePath($probe), '/'), $probe)) {
+        // The directory is skipped either way; only the report differs.
+        if ($this->excludesEveryPhpFileIn($path)) {
             return;
         }
 
         if (! self::seenBefore($this->unreadableKeys, $path)) {
             $this->unreadablePaths[] = $path;
         }
+    }
+
+    /**
+     * Whether the excludes would drop a PHP file of any name inside $path.
+     * The probe is named with a NUL byte, which no real filename or literal
+     * pattern holds, so only a wildcard ('vendor/*', '*.php') can match it.
+     */
+    private function excludesEveryPhpFileIn(string $path): bool
+    {
+        $probe = $path.'/'."\0.php";
+
+        return $this->matchesExcludePattern(ltrim($this->getRelativePath($probe), '/'), $probe);
     }
 
     /**
