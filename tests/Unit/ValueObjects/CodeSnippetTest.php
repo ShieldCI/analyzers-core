@@ -1228,6 +1228,30 @@ PHP;
         );
     }
 
+    public function test_constructor_clamps_negative_context_lines(): void
+    {
+        // fromFile() already clamped; a snippet built directly kept the negative count.
+        foreach ([-1, -5, PHP_INT_MIN] as $contextLines) {
+            $snippet = new CodeSnippet('x', 10, [10 => 'y'], $contextLines);
+
+            $this->assertSame(0, $snippet->getContextLines(), "Context {$contextLines}");
+            $this->assertSame(0, $snippet->toArray()['context_lines'], "Context {$contextLines}");
+            $this->assertSame([10 => 'y'], $snippet->getLines(), "Context {$contextLines}");
+        }
+    }
+
+    public function test_constructor_keeps_zero_and_positive_context_lines(): void
+    {
+        foreach ([0, 1, 8, PHP_INT_MAX] as $contextLines) {
+            $snippet = new CodeSnippet('x', 10, [], $contextLines);
+
+            $this->assertSame($contextLines, $snippet->getContextLines());
+            $this->assertSame($contextLines, $snippet->toArray()['context_lines']);
+        }
+
+        $this->assertSame(8, (new CodeSnippet('x', 10))->getContextLines());
+    }
+
     private function truncated(string $line): string
     {
         $snippet = CodeSnippet::fromFile($this->writeTemp($line."\n"), 1, 0);
