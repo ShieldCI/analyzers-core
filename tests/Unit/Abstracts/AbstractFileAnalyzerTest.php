@@ -1814,10 +1814,11 @@ class AbstractFileAnalyzerTest extends TestCase
         }
     }
 
-    public function testAMiscasedRemainderIsKeptAsTyped(): void
+    public function testAMiscasedRemainderIsRespelledToItsOnDiskNames(): void
     {
         // Only the base portion is matched by identity; what follows it is
-        // joined on as typed, as for any other absolute entry.
+        // joined on and then respelled to its on-disk names, as for a
+        // relative entry (#104).
         $t = $this->caseFixture();
         $this->requireCaseInsensitive($t);
 
@@ -1825,7 +1826,7 @@ class AbstractFileAnalyzerTest extends TestCase
         $analyzer->setBasePath($t . '/proj');
         $analyzer->setPaths([$t . '/PROJ/APP/Providers']);
 
-        $this->assertSame([$t . '/proj/APP/Providers/P.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$t . '/proj/app/Providers/P.php'], $analyzer->getPhpFilesPublic());
         $this->assertSame([], $analyzer->getMissingPathsPublic());
     }
 
