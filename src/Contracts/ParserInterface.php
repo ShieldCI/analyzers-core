@@ -14,12 +14,17 @@ interface ParserInterface
     /**
      * Parse a PHP file and return AST.
      *
+     * @phpstan-impure An implementation may cache, and a RecordingParserInterface writes its
+     *                 failure log here, so state read before the call may not hold after it.
+     *
      * @return array<Node>
      */
     public function parseFile(string $filePath): array;
 
     /**
      * Parse PHP code string and return AST.
+     *
+     * @phpstan-impure See parseFile().
      *
      * @return array<Node>
      */

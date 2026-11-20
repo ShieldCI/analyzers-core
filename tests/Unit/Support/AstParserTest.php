@@ -7,8 +7,10 @@ namespace ShieldCI\AnalyzersCore\Tests\Unit\Support;
 use PhpParser\Node\{Expr, Stmt};
 use PhpParser\{ParserFactory, PhpVersion};
 use PHPUnit\Framework\TestCase;
+use ShieldCI\AnalyzersCore\Contracts\RecordingParserInterface;
 use ShieldCI\AnalyzersCore\Enums\ParseFailureCause;
 use ShieldCI\AnalyzersCore\Support\AstParser;
+use ShieldCI\AnalyzersCore\Tests\Support\CountingStreamWrapper;
 
 class AstParserTest extends TestCase
 {
@@ -40,6 +42,7 @@ PHP;
     protected function tearDown(): void
     {
         parent::tearDown();
+        CountingStreamWrapper::unregister();
         if (is_dir($this->testDir)) {
             $this->recursiveDelete($this->testDir);
         }
@@ -1319,5 +1322,619 @@ PHP;
         $this->parser->recordRecovery($absent);
 
         $this->assertSame([$absent], array_column($this->parser->failures(), 'path'));
+    }
+
+    // --- Recovering a partial AST from a file that would not parse ---
+
+    /**
+     * A missing semicolon: php-parser's error recovery rebuilds the whole class, including
+     * the statement after the broken line.
+     */
+    private const MISSING_SEMICOLON = "<?php\nclass Broken\n{\n    public function index()\n    {\n        \$a = 1\n        \$this->render();\n    }\n}\n";
+
+    /**
+     * A method left unclosed: recovery has nothing it can rebuild and returns null.
+     */
+    private const MISSING_BRACE = "<?php\nclass B\n{\n    public function i(\n}\n";
+
+    /**
+     * Pin a file's mtime so a rewrite keeps the same AST cache key. Without this a rewrite
+     * that happens to cross a second boundary would miss the cache by accident, and a test
+     * asserting "not served from the cache" would pass for the wrong reason.
+     */
+    private function writeWithPinnedMtime(string $file, string $code): void
+    {
+        file_put_contents($file, $code);
+        touch($file, 1_700_000_000);
+        clearstatcache(true, $file);
+    }
+
+    public function testParseFileRecoveringRebuildsAFileWithAMissingSemicolon(): void
+    {
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, self::MISSING_SEMICOLON);
+
+        $ast = $this->parser->parseFileRecovering($file);
+
+        $this->assertNotEmpty($ast);
+        $this->assertCount(1, $this->parser->findClasses($ast));
+        $this->assertCount(1, $this->parser->findMethodCalls($ast, 'render'));
+        $this->assertTrue($this->parser->hasFailure($file));
+        $this->assertSame([$file], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringRecordsExactlyWhatParseFileRecords(): void
+    {
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, self::MISSING_SEMICOLON);
+
+        $plain = new AstParser();
+        $plain->parseFile($file);
+
+        $this->parser->parseFileRecovering($file);
+
+        $this->assertEquals($plain->failures(), $this->parser->failures());
+        $this->assertSame(ParseFailureCause::SyntaxError, $this->parser->failures()[0]->cause);
+    }
+
+    public function testParseFileRecoveringDoesNotCacheARecoveredAst(): void
+    {
+        // Same mtime both times, so a cached copy would be served. A recovered AST is
+        // partial, and caching it would hand the fix's author the broken file's AST.
+        $file = $this->testDir . '/Broken.php';
+        $this->writeWithPinnedMtime($file, self::MISSING_SEMICOLON);
+
+        $this->assertCount(0, $this->parser->findMethodCalls($this->parser->parseFileRecovering($file), 'flush'));
+
+        $this->writeWithPinnedMtime($file, str_replace('$a = 1', '$a = 1; $this->flush();', self::MISSING_SEMICOLON));
+
+        $this->assertCount(1, $this->parser->findMethodCalls($this->parser->parseFileRecovering($file), 'flush'));
+    }
+
+    public function testParseFileRecoveringRecoversAgainOnEveryCall(): void
+    {
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, self::MISSING_SEMICOLON);
+
+        $first = $this->parser->parseFileRecovering($file);
+        $second = $this->parser->parseFileRecovering($file);
+
+        $this->assertNotEmpty($second);
+        $this->assertEquals($first, $second);
+        $this->assertCount(1, $this->parser->failures());
+        $this->assertSame([$file], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringAnnotatesAFailureParseFileRecordedFirst(): void
+    {
+        // The failure is already in the log, so record() adds nothing this time. Recovery
+        // must key on this parse having failed, not on the log having grown.
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, self::MISSING_SEMICOLON);
+
+        $this->parser->parseFile($file);
+        $this->assertSame([], $this->parser->recoveries());
+
+        $this->assertNotEmpty($this->parser->parseFileRecovering($file));
+        $this->assertCount(1, $this->parser->failures());
+        $this->assertSame([$file], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringReturnsNothingWhenNothingCanBeRebuilt(): void
+    {
+        $file = $this->testDir . '/Unclosed.php';
+        file_put_contents($file, self::MISSING_BRACE);
+
+        $this->assertSame([], $this->parser->parseFileRecovering($file));
+        $this->assertTrue($this->parser->hasFailure($file));
+        $this->assertSame(5, $this->parser->failures()[0]->line);
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringTakesTheOrdinaryPathForACleanFile(): void
+    {
+        $file = $this->testDir . '/Good.php';
+        $this->writeWithPinnedMtime($file, '<?php class Good { public function a() {} }');
+
+        $plain = new AstParser();
+        $ast = $this->parser->parseFileRecovering($file);
+
+        $this->assertEquals($plain->parseFile($file), $ast);
+        $this->assertSame([], $this->parser->failures());
+        $this->assertSame([], $this->parser->recoveries());
+
+        // Cached exactly as parseFile() caches it: same mtime, so the rewrite is not seen.
+        $this->writeWithPinnedMtime($file, '<?php class Other {}');
+        $this->assertSame($ast, $this->parser->parseFileRecovering($file));
+    }
+
+    public function testParseFileRecoveringTreatsAnEmptyFileAsAParse(): void
+    {
+        $file = $this->testDir . '/Empty.php';
+        file_put_contents($file, '');
+
+        $this->assertSame([], $this->parser->parseFileRecovering($file));
+        $this->assertSame([], $this->parser->failures());
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringRecordsAMissingFileAsUnreadableOnce(): void
+    {
+        $absent = $this->testDir . '/absent.php';
+
+        $this->assertSame([], $this->parser->parseFileRecovering($absent));
+        $this->assertSame([], $this->parser->parseFileRecovering($absent));
+
+        $failures = $this->parser->failures();
+        $this->assertCount(1, $failures);
+        $this->assertSame('File does not exist.', $failures[0]->message);
+        $this->assertSame(ParseFailureCause::Unreadable, $failures[0]->cause);
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringRecordsADirectoryAsUnreadable(): void
+    {
+        $this->assertSame([], $this->parser->parseFileRecovering($this->testDir));
+
+        $failures = $this->parser->failures();
+        $this->assertCount(1, $failures);
+        $this->assertSame('Path is not a file.', $failures[0]->message);
+        $this->assertSame(ParseFailureCause::Unreadable, $failures[0]->cause);
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringIgnoresAStaleFailureForAFileThatNowParses(): void
+    {
+        // The log is run-scoped and keeps the first sighting, so the record from the broken
+        // contents outlives the fix. A clean parse must not be annotated as a recovery.
+        $file = $this->testDir . '/Fixed.php';
+        $this->writeWithPinnedMtime($file, self::MISSING_BRACE);
+        $this->parser->parseFile($file);
+
+        $this->writeWithPinnedMtime($file, "<?php\nclass B\n{\n    public function i() { \$this->render(); }\n}\n");
+        $this->parser->clearCache();
+
+        $ast = $this->parser->parseFileRecovering($file);
+
+        $this->assertCount(1, $this->parser->findMethodCalls($ast, 'render'));
+        $this->assertTrue($this->parser->hasFailure($file));
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringRecordsBothAgainAfterResetFailures(): void
+    {
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, self::MISSING_SEMICOLON);
+
+        $this->parser->parseFileRecovering($file);
+        $this->parser->resetFailures();
+
+        $this->assertNotEmpty($this->parser->parseFileRecovering($file));
+        $this->assertCount(1, $this->parser->failures());
+        $this->assertSame([$file], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringHonoursASubclassThatStubsParseFile(): void
+    {
+        // Consumers stub parseFile() in their own suites. The stub's answer is the answer:
+        // nothing it did failed, so there is nothing to recover from.
+        $parser = new class () extends AstParser {
+            public function parseFile(string $filePath): array
+            {
+                return [new Stmt\Nop()];
+            }
+        };
+
+        $file = $this->testDir . '/Unclosed.php';
+        file_put_contents($file, self::MISSING_BRACE);
+
+        $this->assertEquals([new Stmt\Nop()], $parser->parseFileRecovering($file));
+        $this->assertSame([], $parser->failures());
+        $this->assertSame([], $parser->recoveries());
+    }
+
+    public function testParseCodeRecoveringRebuildsCodeUnderItsOrigin(): void
+    {
+        $ast = $this->parser->parseCodeRecovering(self::MISSING_SEMICOLON, '/app/Broken.php');
+
+        $this->assertCount(1, $this->parser->findMethodCalls($ast, 'render'));
+        $this->assertSame(['/app/Broken.php'], array_column($this->parser->failures(), 'path'));
+        $this->assertSame(['/app/Broken.php'], $this->parser->recoveries());
+    }
+
+    public function testParseCodeRecoveringKeysAnOriginLessRecoveryByTheCodeHash(): void
+    {
+        $this->assertNotEmpty($this->parser->parseCodeRecovering(self::MISSING_SEMICOLON));
+
+        $this->assertNull($this->parser->failures()[0]->path);
+        $this->assertSame(['code:' . md5(self::MISSING_SEMICOLON)], $this->parser->recoveries());
+    }
+
+    public function testParseCodeRecoveringRecordsExactlyWhatParseCodeRecordsWithATranslatedLine(): void
+    {
+        $calls = 0;
+        $translate = function (int $line) use (&$calls): int {
+            $calls++;
+
+            return $line * 100;
+        };
+
+        $plain = new AstParser();
+        $plain->parseCode(self::MISSING_SEMICOLON, '/resources/views/x.blade.php', fn (int $line) => $line * 100);
+
+        $this->assertNotEmpty($this->parser->parseCodeRecovering(self::MISSING_SEMICOLON, '/resources/views/x.blade.php', $translate));
+
+        $this->assertEquals($plain->failures(), $this->parser->failures());
+        $this->assertSame(700, $this->parser->failures()[0]->line);
+        $this->assertSame(1, $calls);
+    }
+
+    public function testParseCodeRecoveringDoesNotCallTheTranslatorOnASuccessfulParse(): void
+    {
+        $called = false;
+
+        $ast = $this->parser->parseCodeRecovering("<?php\n\$a = 1;\n", '/resources/views/ok.blade.php', function (int $line) use (&$called) {
+            $called = true;
+
+            return $line;
+        });
+
+        $this->assertNotEmpty($ast);
+        $this->assertFalse($called);
+        $this->assertSame([], $this->parser->failures());
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testParseCodeRecoveringReturnsNothingWhenNothingCanBeRebuilt(): void
+    {
+        $this->assertSame([], $this->parser->parseCodeRecovering(self::MISSING_BRACE, '/app/Unclosed.php'));
+
+        $this->assertTrue($this->parser->hasFailure('/app/Unclosed.php'));
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testParseCodeRecoveringDoesNotAnnotateARecoveryThatRebuiltNoStatements(): void
+    {
+        // Recovery can succeed with nothing in it, as it does for a stray parenthesis.
+        // Annotating that would tell a reporter something was salvaged when nothing was.
+        $this->assertSame([], $this->parser->parseCodeRecovering('<?php )', '/app/Stray.php'));
+
+        $this->assertTrue($this->parser->hasFailure('/app/Stray.php'));
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testParseCodeRecoveringIgnoresAStaleFailureUnderItsOrigin(): void
+    {
+        $this->parser->parseCode(self::MISSING_BRACE, '/app/Fixed.php');
+
+        $this->assertNotEmpty($this->parser->parseCodeRecovering('<?php class B {}', '/app/Fixed.php'));
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testParseCodeRecoveringKeepsOneFailurePerKeyAcrossRepeatedCalls(): void
+    {
+        for ($i = 0; $i < 3; $i++) {
+            $this->parser->parseCodeRecovering(self::MISSING_SEMICOLON, '/app/Broken.php');
+        }
+
+        $this->assertCount(1, $this->parser->failures());
+        $this->assertSame(['/app/Broken.php'], $this->parser->recoveries());
+    }
+
+    // --- Review round 1: recovery regressions ---
+
+    /**
+     * Analysed by PHPStan as well as run. Without @phpstan-impure on the recovering methods,
+     * level 9 remembers recoveries() and hasFailure() across the call and reports the inner
+     * branches as dead, so a consumer writing exactly this gets errors on correct code.
+     */
+    public function testStaticAnalysisSeesTheRecoveringMethodsChangeTheLogs(): void
+    {
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, self::MISSING_SEMICOLON);
+        $reached = [];
+
+        if ($this->parser->recoveries() === []) {
+            $this->parser->parseFileRecovering($file);
+
+            if ($this->parser->recoveries() !== []) {
+                $reached[] = 'file';
+            }
+        }
+
+        if (! $this->parser->hasFailure('/app/Code.php')) {
+            $this->parser->parseCodeRecovering(self::MISSING_SEMICOLON, '/app/Code.php');
+
+            if ($this->parser->hasFailure('/app/Code.php')) {
+                $reached[] = 'code';
+            }
+        }
+
+        $this->assertSame(['file', 'code'], $reached);
+    }
+
+    public function testStaticAnalysisSeesParsingThroughTheContractChangeTheLog(): void
+    {
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, self::MISSING_BRACE);
+
+        $this->assertTrue(self::parsingRecordsAFailure($this->parser, $file));
+        $this->assertTrue(self::parsingCodeRecordsAFailure(new AstParser(), self::MISSING_BRACE));
+        $this->assertTrue(self::annotatingRecordsARecovery($this->parser, $file));
+    }
+
+    private static function annotatingRecordsARecovery(RecordingParserInterface $parser, string $file): bool
+    {
+        if ($parser->recoveries() === []) {
+            $parser->recordRecovery($file);
+
+            if ($parser->recoveries() !== []) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Typed against the contract, not the class: @phpstan-impure on AstParser alone does not
+     * reach a caller holding a RecordingParserInterface.
+     */
+    private static function parsingRecordsAFailure(RecordingParserInterface $parser, string $file): bool
+    {
+        if (! $parser->hasFailure($file)) {
+            $parser->parseFile($file);
+
+            if ($parser->hasFailure($file)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function parsingCodeRecordsAFailure(RecordingParserInterface $parser, string $code): bool
+    {
+        if ($parser->failures() === []) {
+            $parser->parseCode($code);
+
+            if ($parser->failures() !== []) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function testARecoveryThatRebuiltOnlyAByteOrderMarkIsNotARecovery(): void
+    {
+        // The BOM before <?php is inline HTML. Rebuilding it salvages no PHP at all.
+        $this->assertSame([], $this->parser->parseCodeRecovering("\xEF\xBB\xBF<?php )", '/app/Bom.php'));
+
+        $this->assertTrue($this->parser->hasFailure('/app/Bom.php'));
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testARecoveryThatRebuiltOnlyInlineHtmlIsNotARecovery(): void
+    {
+        $file = $this->testDir . '/view.php';
+        file_put_contents($file, "<html>\n<?php )");
+
+        $this->assertSame([], $this->parser->parseFileRecovering($file));
+
+        $this->assertTrue($this->parser->hasFailure($file));
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testARecoveryThatRebuiltOnlyAnEmptyStatementIsNotARecovery(): void
+    {
+        $this->assertSame([], $this->parser->parseCodeRecovering('<?php /* note */ ; )', '/app/Nop.php'));
+
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    public function testInlineHtmlAlongsideRebuiltPhpIsKept(): void
+    {
+        $ast = $this->parser->parseCodeRecovering("<html>\n" . self::MISSING_SEMICOLON, '/app/Mixed.php');
+
+        $this->assertInstanceOf(Stmt\InlineHTML::class, $ast[0]);
+        $this->assertCount(1, $this->parser->findMethodCalls($ast, 'render'));
+        $this->assertSame(['/app/Mixed.php'], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringRecoversTheCodeThatFailedNotTheFileOnDisk(): void
+    {
+        // Consumers substitute fixtures in parseCode() in their own suites. Recovery has to
+        // work on the bytes that failed, or it analyses something nobody parsed.
+        $parser = new class () extends AstParser {
+            public function parseCode(string $code, ?string $origin = null, ?callable $translateLine = null): array
+            {
+                return parent::parseCode("<?php\n\$fixture = 1\n\$this->fromFixture();\n", $origin, $translateLine);
+            }
+        };
+
+        $file = $this->testDir . '/Disk.php';
+        file_put_contents($file, "<?php\n\$disk = 1\n\$this->fromDisk();\n");
+
+        $ast = $parser->parseFileRecovering($file);
+
+        $this->assertCount(1, $parser->findMethodCalls($ast, 'fromFixture'));
+        $this->assertCount(0, $parser->findMethodCalls($ast, 'fromDisk'));
+        $this->assertSame([$file], $parser->recoveries());
+    }
+
+    public function testParseFileRecoveringReadsTheFileOnce(): void
+    {
+        // A second read can return different bytes (a file rewritten mid-run, a stream that
+        // is not a plain file), and then a clean parse would be recorded as a recovery.
+        CountingStreamWrapper::register();
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, self::MISSING_SEMICOLON);
+
+        $this->assertNotEmpty($this->parser->parseFileRecovering(CountingStreamWrapper::url($file)));
+
+        $this->assertSame([$file => 1], CountingStreamWrapper::$opens);
+        $this->assertSame([CountingStreamWrapper::url($file)], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringFollowsAPathTheSubclassNormalised(): void
+    {
+        // The failure is recorded under the spelling parseFile() actually parsed, so the
+        // recovery has to be recorded under that same key rather than the caller's spelling.
+        $parser = new class () extends AstParser {
+            public function parseFile(string $filePath): array
+            {
+                return parent::parseFile(realpath($filePath) ?: $filePath);
+            }
+        };
+
+        $file = $this->testDir . '/N.php';
+        file_put_contents($file, self::MISSING_SEMICOLON);
+        $real = (string) realpath($file);
+
+        $ast = $parser->parseFileRecovering($this->testDir . '/./N.php');
+
+        $this->assertCount(1, $parser->findClasses($ast));
+        $this->assertTrue($parser->hasFailure($real));
+        $this->assertSame([$real], $parser->recoveries());
+    }
+
+    public function testATranslatorThatParsesSomethingElseDoesNotDerailTheOuterRecovery(): void
+    {
+        // The translator runs inside the outer parse, before its failure is noted, so the
+        // outer failure is the one the outer call recovers. A nested recovering call is
+        // recovered and recorded on its own.
+        $inner = "<?php\n\$inner = 1\n\$this->fromInner();\n";
+        $parser = $this->parser;
+
+        $ast = $parser->parseCodeRecovering(
+            self::MISSING_SEMICOLON,
+            '/app/Outer.php',
+            function (int $line) use ($parser, $inner): int {
+                $parser->parseCodeRecovering($inner, '/app/Inner.php');
+                $parser->parseCode('<?php class Unclosed {', '/app/Unclosed.php');
+
+                return $line;
+            }
+        );
+
+        $this->assertCount(1, $parser->findMethodCalls($ast, 'render'));
+        $this->assertCount(0, $parser->findMethodCalls($ast, 'fromInner'));
+        $this->assertSame(['/app/Inner.php', '/app/Outer.php'], $parser->recoveries());
+    }
+
+    // --- Review round 2 ---
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function headerOnlyRecoveries(): iterable
+    {
+        yield 'declare' => ['<?php declare(strict_types=1); )'];
+        yield 'empty declare block' => ['<?php declare(ticks=1) { } )'];
+        yield 'namespace' => ['<?php namespace A; )'];
+        yield 'braced namespace' => ['<?php namespace A { } )'];
+        yield 'import' => ['<?php use A\B; )'];
+        yield 'group import' => ['<?php use A\{B, C}; )'];
+        yield 'halt compiler' => ['<?php ) __halt_compiler(); junk'];
+        yield 'namespace holding only an import' => ['<?php namespace A; use B\C; )'];
+    }
+
+    /**
+     * @dataProvider headerOnlyRecoveries
+     */
+    public function testARecoveryThatRebuiltOnlyFileHeadersIsNotARecovery(string $code): void
+    {
+        // Headers describe how the rest of the file is read; with the rest gone there is
+        // nothing to analyse, and recording a recovery would claim otherwise.
+        $this->assertSame([], $this->parser->parseCodeRecovering($code, '/app/Header.php'));
+
+        $this->assertTrue($this->parser->hasFailure('/app/Header.php'));
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function codeInsideHeaders(): iterable
+    {
+        yield 'class in a namespace' => [
+            "<?php namespace A; class K { public function a() { \$x = 1\n \$this->r(); } }",
+            'r',
+        ];
+        yield 'statements in a declare block' => ["<?php declare(ticks=1) { \$x = 1\n \$this->r(); }", 'r'];
+        yield 'statements after an import' => ["<?php use A\\B;\n\$x = 1\n\$this->r();\n", 'r'];
+    }
+
+    /**
+     * @dataProvider codeInsideHeaders
+     */
+    public function testCodeRebuiltInsideAHeaderIsARecovery(string $code, string $method): void
+    {
+        $ast = $this->parser->parseCodeRecovering($code, '/app/Body.php');
+
+        $this->assertCount(1, $this->parser->findMethodCalls($ast, $method));
+        $this->assertSame(['/app/Body.php'], $this->parser->recoveries());
+    }
+
+    public function testParseFileRecoveringRecoversNothingFromAnUnclosedMethodBody(): void
+    {
+        $file = $this->testDir . '/UnclosedBody.php';
+        file_put_contents($file, "<?php\nclass B\n{\n    public function i()\n    {\n        \$x = 1;\n}\n");
+
+        $this->assertSame([], $this->parser->parseFileRecovering($file));
+        $this->assertTrue($this->parser->hasFailure($file));
+        $this->assertSame([], $this->parser->recoveries());
+    }
+
+    private function retainedFailure(AstParser $parser): mixed
+    {
+        return (new \ReflectionProperty(AstParser::class, 'lastFailure'))->getValue($parser);
+    }
+
+    public function testAPlainParseDoesNotRetainTheCodeThatFailed(): void
+    {
+        // Only a recovering call needs the failed bytes. A plain parse keeping them would pin
+        // the last broken file's source in memory for the rest of the run.
+        $this->parser->parseCode(self::MISSING_SEMICOLON, '/app/Big.php');
+        $this->assertNull($this->retainedFailure($this->parser));
+
+        $file = $this->testDir . '/Broken.php';
+        file_put_contents($file, self::MISSING_SEMICOLON);
+        $this->parser->parseFile($file);
+        $this->assertNull($this->retainedFailure($this->parser));
+    }
+
+    public function testARecoveringCallLeavesNothingRetained(): void
+    {
+        $this->parser->parseCodeRecovering(self::MISSING_SEMICOLON, '/app/Broken.php');
+
+        $this->assertNull($this->retainedFailure($this->parser));
+    }
+
+    public function testARecoveringCallThatThrowsLeavesNothingRetained(): void
+    {
+        // A subclass's parseFile() may throw after the parse failed. The failed bytes must not
+        // outlive the call, and the next plain parse must not start retaining them either.
+        $parser = new class () extends AstParser {
+            public function parseFile(string $filePath): array
+            {
+                parent::parseCode("<?php\n\$a = 1\n\$this->x();\n", $filePath);
+
+                throw new \RuntimeException('stubbed');
+            }
+        };
+
+        try {
+            $parser->parseFileRecovering('/app/Throws.php');
+            $this->fail('The subclass exception should propagate.');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('stubbed', $e->getMessage());
+        }
+
+        $this->assertNull($this->retainedFailure($parser));
+
+        $parser->parseCode(self::MISSING_SEMICOLON, '/app/Later.php');
+        $this->assertNull($this->retainedFailure($parser));
     }
 }
