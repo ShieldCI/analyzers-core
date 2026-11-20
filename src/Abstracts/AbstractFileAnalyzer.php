@@ -882,23 +882,43 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * symlinked spelling of the base (/var vs /private/var on macOS) is still
      * recognised. The realpath branch is limited to such entries because a
      * relative one would resolve against the working directory. No case
-     * folding: that would be wrong on case-sensitive filesystems.
+     * folding below the drive letter: that would be wrong on case-sensitive
+     * filesystems. A miscased spelling of the base is still recognised where
+     * the filesystem says it is the same directory (step 2).
      *
      * Order matters, and each step exists because the one after it resolves
      * more than it should:
      * 1. The entry as text against the base as given - cheap, and the common
      *    case.
-     * 2. The entry's prefixes, shortest first, until one's realpath() equals
-     *    realpath(base); the rest of the entry is the remainder as typed.
-     *    This finds the base however it is reached (/var vs /private/var, a
-     *    second link to the project) without resolving anything below it.
+     * 2. The entry's prefixes, shortest first, until one is the base: its
+     *    realpath() equals realpath(base), or failing that it is the same
+     *    directory (sameDirectory()). The rest of the entry is the remainder
+     *    as typed. This finds the base however it is reached (/var vs
+     *    /private/var, a second link to the project) without resolving
+     *    anything below it. The identity check is for case-insensitive
+     *    filesystems (macOS APFS, Windows NTFS by default), where realpath()
+     *    keeps the case it was given: with base '/t/proj', the entry
+     *    '/t/PROJ/app' resolved to '/t/PROJ', never matched, and was scanned
+     *    as nothing and recorded missing although the directory exists. On a
+     *    case-sensitive filesystem '/t/PROJ' is another directory, or none,
+     *    so nothing changes there. A prefix that is the base but leaves a
+     *    remainder with '..' does not end the walk: '/t/PROJ/../proj/x'
+     *    matches at '/t/PROJ', is refused there, and is claimed at
+     *    '/t/PROJ/../proj'. Every prefix that matches is the base itself and
+     *    a '..' remainder is always refused, so going on cannot claim a path
+     *    outside it.
      * 3. realpath() of the whole entry, for a symlink from outside the base
      *    that points into it, where no prefix resolves to the base.
      * Resolving the whole entry any earlier resolves every symlink inside the
      * base too, so 'applink' came back as 'app' and excludes written against
      * 'applink/*' stopped applying.
+     *
+     * $sameDirectory replaces sameDirectory() in tests only, so the identity
+     * branch can be exercised on a case-sensitive filesystem as well.
+     *
+     * @param (\Closure(string, string): bool)|null $sameDirectory
      */
-    private static function remainderUnderBase(string $path, string $basePath): ?string
+    private static function remainderUnderBase(string $path, string $basePath, ?\Closure $sameDirectory = null): ?string
     {
         if (preg_match('#^(?:[/\\\\]|[A-Za-z]:[/\\\\])#', $basePath) === 1) {
             $remainder = self::relativeRemainder($path, $basePath);
@@ -924,18 +944,20 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         }
 
         // Shortest prefix first, one realpath() each, stopping at the first
-        // that resolves to the base. The rest of the entry is kept as typed.
+        // that is the base and leaves a remainder without '..'. The rest of
+        // the entry is kept as typed.
         preg_match_all('#[/\\\\]+#', $path, $separators, PREG_OFFSET_CAPTURE);
+        $sameDirectory ??= self::sameDirectory(...);
 
         foreach ([...$separators[0], ['', strlen($path)]] as [, $offset]) {
-            if ($offset > 0 && @realpath(substr($path, 0, $offset)) === $realBase) {
+            $realPrefix = $offset > 0 ? @realpath(substr($path, 0, $offset)) : false;
+
+            if ($realPrefix !== false && ($realPrefix === $realBase || $sameDirectory($realPrefix, $realBase))) {
                 $remainder = self::relativeRemainder($realBase.'/'.substr($path, $offset), $realBase);
 
                 if ($remainder !== null) {
                     return $remainder;
                 }
-
-                break;
             }
         }
 
@@ -945,9 +967,36 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     }
 
     /**
+     * Whether two paths that realpath() has already resolved name the same
+     * directory, by device and inode: on a case-insensitive filesystem
+     * '/t/PROJ' and '/t/proj' are one directory that realpath() spells two
+     * ways. Only resolved paths are passed, so stat() is never asked about a
+     * missing path or one outside open_basedir - realpath() has already
+     * answered false for those - and adds no warning the walk did not have.
+     * It is silenced all the same, like every realpath() above, for a path
+     * removed in between. An inode of 0 means the platform reported none
+     * (older Windows builds), and would make every path on a drive the
+     * base, so it never matches.
+     */
+    private static function sameDirectory(string $realPath, string $realBase): bool
+    {
+        $path = @stat($realPath);
+        $base = @stat($realBase);
+
+        return $path !== false && $base !== false && $path['ino'] !== 0
+            && $path['dev'] === $base['dev'] && $path['ino'] === $base['ino'];
+    }
+
+    /**
      * Strip $basePath off $path on a segment boundary, comparing both with
      * forward slashes, repeated separators collapsed and '.' segments dropped.
-     * The boundary is what stops base '/p' from claiming '/proj/x'. The POSIX
+     * The boundary is what stops base '/p' from claiming '/proj/x'. On
+     * Windows a drive letter is upper-cased, since Windows never tells 'c:'
+     * from 'C:': 'c:\proj\app' under base 'C:\proj' used to be refused, and
+     * a drive-letter entry never reaches the realpath() steps that could have
+     * matched it. Only the letter is folded: the case of the rest of a path
+     * is the filesystem's business, not this comparison's. On POSIX 'c:' and
+     * 'C:' are two ordinary directories, so nothing is folded there. The POSIX
      * root '/' claims nothing: joining onto it already answers the path
      * itself. A drive root ('C:\') normalises to 'C:' and does claim what
      * lies below it, which joins back to the same path.
@@ -958,10 +1007,15 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * That leaves '..' to the realpath() comparison, which resolves it, so an
      * entry that stays inside the base is still claimed.
      */
-    private static function relativeRemainder(string $path, string $basePath): ?string
+    private static function relativeRemainder(string $path, string $basePath, bool $windows = DIRECTORY_SEPARATOR === '\\'): ?string
     {
-        $normalise = static function (string $value): string {
+        $normalise = static function (string $value) use ($windows): string {
             $value = str_replace('\\', '/', $value);
+
+            if ($windows && preg_match('#^[a-z]:#', $value) === 1) {
+                $value = strtoupper($value[0]).substr($value, 1);
+            }
+
             $segments = array_filter(
                 explode('/', $value),
                 static fn (string $segment): bool => $segment !== '' && $segment !== '.'
