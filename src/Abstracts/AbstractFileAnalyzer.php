@@ -66,6 +66,30 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     private array $missingPaths = [];
 
     /**
+     * Directory listings onDiskSpelling() has read while the walk respells
+     * its roots, keyed by the directory with a trailing '/', so entries
+     * sharing a parent list it once (#104). An unlistable directory is kept
+     * as []. Released as soon as every root is spelled: AnalyzerManager
+     * caches analyzer instances, and a listing kept past that is a whole
+     * directory held for the life of the process.
+     *
+     * @var array<string, list<string>>
+     */
+    private array $listings = [];
+
+    /**
+     * For each scan root the latest walk respelled (#104), the spellings its
+     * entries were typed in, so an exclude written in that spelling still
+     * applies (typedSpellings()). It outlives the walk, because subclasses
+     * collect the walk and filter it afterwards, but not a reconfiguration:
+     * setPaths() and setBasePath() clear it, since it describes roots
+     * derived from both.
+     *
+     * @var array<string, array<string, true>>
+     */
+    private array $typedRoots = [];
+
+    /**
      * Set the base path.
      *
      * Trims the same charlist as PathHelper, so a Windows base_path() handed in
@@ -77,6 +101,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     public function setBasePath(string $path): static
     {
         $this->basePath = rtrim($path, '/\\');
+        $this->typedRoots = [];
 
         return $this;
     }
@@ -89,6 +114,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     public function setPaths(array $paths): static
     {
         $this->paths = $paths;
+        $this->typedRoots = [];
 
         return $this;
     }
@@ -159,7 +185,20 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * subclasses that iterate this walk directly get it too. It compares
      * pathnames, not realpath(): a symlinked spelling ('applink' for 'app')
      * still yields its own pathnames, which excludes written against it rely
-     * on, and so do '..' and case variants, which only resolution could match.
+     * on, and so do '..' spellings, which only resolution could match.
+     *
+     * Case variants are matched before the walk instead (#104). On a
+     * case-insensitive filesystem 'app' and 'App' name one directory, but the
+     * walk yielded each file under the spelling typed, so ['app', 'App']
+     * reported everything twice and an 'app/Http/*' exclude missed the
+     * 'App/...' copies. onDiskSpelling() rewrites each scan root's part below
+     * the base to the names the directory lists, which is the spelling the
+     * iterator already yields for everything beneath it, so the pathname
+     * dedup applies unchanged. Excludes are matched against the on-disk
+     * pathname and against it re-spelled under the entry as typed
+     * (isExcludedPath()), so both 'app/Http/*' and an 'App/Http/*' written to
+     * match an 'App' entry apply. On a case-sensitive filesystem a typed
+     * name that exists is always listed as typed, so nothing changes.
      *
      * Each configured entry is cleaned first (normaliseEntry()): repeated and
      * trailing separators are folded, so 'app//Http' and 'app/Providers/' walk
@@ -193,16 +232,27 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         $this->unreadablePaths = [];
         $this->unreadableKeys = [];
         $this->missingPaths = [];
+        $this->listings = [];
+        $this->typedRoots = [];
         $track = count($paths) > 1;
         /** @var array<string, true> $yielded */
         $yielded = [];
         /** @var array<string, true> $missingKeys */
         $missingKeys = [];
+        /** @var list<array{string, string}> $roots */
+        $roots = [];
 
         foreach ($paths as $path) {
             $entry = self::normaliseEntry($path);
-            $fullPath = self::scanRoot($basePath, $entry);
+            $roots[] = [$entry, self::scanRoot($basePath, $entry)];
+        }
 
+        // Every root is spelled before the first file is yielded, so the
+        // excludes know each entry's typed spelling (typedSpellings()) however
+        // the caller consumes the walk.
+        $roots = $this->respellRoots($basePath, $roots);
+
+        foreach ($roots as [$entry, $fullPath]) {
             if (! is_dir($fullPath)) {
                 if (is_file($fullPath)) {
                     if (! ($track && self::seenBefore($yielded, $fullPath))) {
@@ -252,6 +302,60 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     }
 
     /**
+     * Each [entry, scan root] with the root respelled to its on-disk names
+     * (onDiskSpelling(), #104), recording in $typedRoots the typed spelling
+     * of every root that changed.
+     *
+     * The whole step runs under a temporary error handler that swallows
+     * every warning, so no host handler sees one. '@' alone does not do
+     * that: it only lowers error_reporting(), and a handler that ignores it
+     * (one that throws for every warning) still runs. And respelling stats
+     * and lists directories the walk itself never touches - the base's
+     * siblings, a base outside open_basedir, a link out of it - where
+     * open_basedir warns on every stat. Guarding each call missed some (a
+     * file_exists() guard warns too), so the step is fenced as a whole: a
+     * call that warns answers false, and the segment keeps its typed
+     * spelling, as when it cannot be matched. scandir() alone throws a
+     * ValueError instead for a path holding a NUL byte, which neither '@'
+     * nor a handler stops; listing() catches that one and answers the same
+     * way. The handler is installed once
+     * per walk and removed before the first file is yielded, so the
+     * caller's own handler is in charge while files are analysed. The
+     * directory listings are released here too, however the step ends.
+     *
+     * @param list<array{string, string}> $roots
+     * @return list<array{string, string}>
+     */
+    private function respellRoots(string $basePath, array $roots): array
+    {
+        set_error_handler(static fn (): bool => true);
+
+        try {
+            foreach ($roots as $i => [$entry, $typed]) {
+                $fullPath = $this->onDiskSpelling($basePath, $typed);
+                $this->typedRoots[$fullPath][$typed] = true;
+                $roots[$i] = [$entry, $fullPath];
+            }
+        } finally {
+            restore_error_handler();
+            $this->listings = [];
+        }
+
+        // Every root is recorded above and the ones spelled as typed are
+        // dropped here, rather than recording only the respelled ones: the
+        // same result, with no line that only a case-insensitive filesystem
+        // reaches. An empty map keeps excludes free of per-file work.
+        foreach ($this->typedRoots as $root => $spellings) {
+            unset($spellings[$root]);
+            $this->typedRoots[$root] = $spellings;
+        }
+
+        $this->typedRoots = array_filter($this->typedRoots);
+
+        return $roots;
+    }
+
+    /**
      * Whether $path was already in $seen, adding it if not.
      *
      * @param array<string, true> $seen
@@ -279,6 +383,161 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     private static function pathKey(string $path, bool $windows = DIRECTORY_SEPARATOR === '\\'): string
     {
         return $windows ? str_replace('\\', '/', $path) : $path;
+    }
+
+    /**
+     * $fullPath with each segment below $basePath spelled the way its
+     * directory lists it (#104), so 'App/http' under '/srv/p' walks as
+     * '/srv/p/app/Http' where the disk folds case.
+     *
+     * Only the part below the base is touched: yielded paths must keep
+     * starting with the base exactly as stored, or relativeTo() misses. A path
+     * not under it - the base itself, or a scan root that ended up elsewhere -
+     * comes back as given. Segments are rewritten left to right, each listed
+     * with scandir() and matched by listedSpelling(); the first one that
+     * cannot be matched (it names nothing, or its directory cannot be listed
+     * or searched) is kept as typed along with everything after it, which is
+     * all a missing or unreachable entry needs - the walk records it from
+     * there as before. A '.' or '..' segment stops the respelling too: it and
+     * everything after it stay as typed, and nothing at or past it is listed,
+     * since '<base>/..' may be outside open_basedir. The work is per entry and
+     * segment, never per file.
+     *
+     * Separators are kept where they were typed. On Windows both '/' and '\'
+     * separate, as in normaliseEntry(); on POSIX '\' is a filename byte.
+     * The walk calls this only inside respellRoots(), whose temporary error
+     * handler keeps every warning these filesystem calls raise from the
+     * host's handler; respellRoots() says why. The calls are '@'-silenced
+     * as well, for direct callers.
+     */
+    private function onDiskSpelling(string $basePath, string $fullPath, bool $windows = DIRECTORY_SEPARATOR === '\\'): string
+    {
+        $base = rtrim($basePath, '/\\');
+
+        if (! str_starts_with($fullPath, $base.'/')) {
+            return $fullPath;
+        }
+
+        /** @var list<string> $parts segments at even offsets, the separators between them at odd ones */
+        $parts = preg_split($windows ? '#([/\\\\])#' : '#(/)#', substr($fullPath, strlen($base) + 1), -1, PREG_SPLIT_DELIM_CAPTURE);
+        $dir = $base;
+        $spelled = '';
+
+        foreach ($parts as $i => $part) {
+            if ($i % 2 === 1) {
+                $spelled .= $part;
+
+                continue;
+            }
+
+            // Nothing at or past a '.' or '..' is listed: '<base>/..' can lie
+            // outside open_basedir, where even is_dir() warns.
+            $name = $part === '.' || $part === '..' ? null : self::listedSpelling(
+                $part,
+                $this->listings[$dir.'/'] ??= self::listing($dir.'/'),
+                static fn (string $name): ?string => self::fileIdentity($dir.'/'.$name)
+            );
+
+            if ($name === null) {
+                return $base.'/'.$spelled.implode('', array_slice($parts, $i));
+            }
+
+            $spelled .= $name;
+            $dir .= '/'.$name;
+        }
+
+        return $base.'/'.$spelled;
+    }
+
+    /**
+     * The name in $listing that $segment reaches, or null when that cannot be
+     * told.
+     *
+     * A segment listed exactly is its own spelling - always so on a
+     * case-sensitive filesystem, where a typed 'App' beside an on-disk 'app'
+     * names nothing and stays that way. Otherwise the listed names that are
+     * the same file as the segment ($identity: lstat() dev and inode, null
+     * when it cannot be stat'ed) are the candidates, and exactly one must
+     * remain or the segment stays as typed. lstat() rather than stat(), so a
+     * link to 'app' named 'applink' is not mistaken for 'app' itself.
+     *
+     * The ASCII case variants of the segment are tried first, and only they
+     * are stat'ed: one miscased segment in a directory of thousands costs two
+     * lstat() calls, not one per sibling. That also settles hard links (the
+     * case variant is the name meant) and hosts whose lstat() reports no inode
+     * (older Windows builds report 0 for every name). Only when no variant is
+     * the same file is every listed name compared by identity, because the
+     * filesystem's folding is not strtolower(): APFS folds Unicode case and
+     * normalisation too, so NFC 'café' typed for an NFD 'café' on disk has no
+     * ASCII variant.
+     *
+     * @param array<string> $listing
+     * @param callable(string): (string|null) $identity
+     */
+    private static function listedSpelling(string $segment, array $listing, callable $identity): ?string
+    {
+        if (in_array($segment, $listing, true)) {
+            return $segment;
+        }
+
+        // An empty segment would stat as its directory and come back as '.'.
+        if ($segment === '') {
+            return null;
+        }
+
+        $typed = $identity($segment);
+
+        if ($typed === null) {
+            return null;
+        }
+
+        $isTyped = static fn (string $name): bool => $identity($name) === $typed;
+        $variants = array_filter($listing, static fn (string $name): bool => strcasecmp($name, $segment) === 0);
+        $same = array_values(array_filter($variants, $isTyped));
+
+        // '.' and '..' are never candidates: neither is a name inside the
+        // directory, and stat()ing '<dir>/..' only reaches further out.
+        if ($same === []) {
+            $same = array_values(array_filter(
+                $listing,
+                static fn (string $name): bool => $name !== '.' && $name !== '..' && $isTyped($name)
+            ));
+        }
+
+        return count($same) === 1 ? $same[0] : null;
+    }
+
+    /**
+     * lstat() dev and inode of $path, or null when it cannot be stat'ed:
+     * missing, behind a directory that cannot be searched, or outside
+     * open_basedir. A dangling link still has an identity, the link's own.
+     * Warnings are kept from the host by respellRoots(). Unlike scandir(),
+     * lstat() answers false for a path holding a NUL byte rather than
+     * throwing, so nothing needs catching here.
+     */
+    private static function fileIdentity(string $path): ?string
+    {
+        $stat = @lstat($path);
+
+        return $stat === false ? null : $stat['dev'].':'.$stat['ino'];
+    }
+
+    /**
+     * scandir() of $dir, or [] when it cannot be listed: not a directory,
+     * unreadable, or outside open_basedir. Warnings are kept from the host
+     * by respellRoots(). A NUL byte in $dir (a base path holding one) makes
+     * scandir() throw a ValueError rather than warn; that is caught the same
+     * way, and only that - master never called scandir() and passed.
+     *
+     * @return list<string>
+     */
+    private static function listing(string $dir): array
+    {
+        try {
+            return @scandir($dir) ?: [];
+        } catch (\ValueError) {
+            return [];
+        }
     }
 
     /**
@@ -350,6 +609,10 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * Each entry once, in config order, under the first spelling seen; the
      * comparison is the walk's pathname key, so separator, './' and absolute
      * spellings of one location fold together but a '..' spelling does not.
+     * So do case variants on a case-insensitive filesystem, as far as the
+     * entry exists (#104): 'App/Missing' and 'app/Missing' are recorded once,
+     * as 'App/Missing' - the record keeps the configured spelling, since a
+     * name that is not on disk has no other.
      * An entry the exclude patterns fully cover - every PHP file under it, or
      * a '.php' entry matched itself - is not recorded, and neither is a
      * directory blocking it (excludesEntry()). An entry the
@@ -416,8 +679,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
             return true;
         }
 
-        return str_ends_with($fullPath, '.php')
-            && $this->matchesExcludePattern(ltrim($this->getRelativePath($fullPath), '/'), $fullPath);
+        return str_ends_with($fullPath, '.php') && $this->isExcludedPath($fullPath);
     }
 
     /**
@@ -494,9 +756,66 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      */
     private function excludesEveryPhpFileIn(string $path): bool
     {
-        $probe = $path.'/'."\0.php";
+        return $this->isExcludedPath($path.'/'."\0.php");
+    }
 
-        return $this->matchesExcludePattern(ltrim($this->getRelativePath($probe), '/'), $probe);
+    /**
+     * Whether the exclude patterns cover $path - the one test every exclude
+     * check in this class goes through, for subclasses that judge files
+     * shouldAnalyzeFile() declines (it answers false for anything not
+     * '.php', JavaScript or Blade sources included).
+     *
+     * $path is a pathname as getFilesToAnalyze() yields it, or one built the
+     * same way (the base path as stored, then the rest). A pattern is a glob
+     * where '*' matches any run of characters, '/' included, and '?' one
+     * character, anchored at both ends. It matches when it matches $path
+     * relative to the base path ('vendor/*') or $path itself, for patterns
+     * written against absolute paths - as shouldAnalyzeFile() explains. The
+     * extension is not checked.
+     *
+     * Paths under a scan root the latest walk respelled to its on-disk names
+     * (#104) are also tried in each spelling the root's entries were typed
+     * in: ['App'] beside 'App/Http/*' excludes the 'app/Http/...' files the
+     * walk yields, as it did when the walk yielded 'App/Http/...'. A file
+     * under a root reached by several entries is excluded by a pattern in any
+     * of their spellings - they all name it. That part reflects the latest
+     * walk until setPaths() or setBasePath() is called; with no walk since,
+     * only the path as given is tried.
+     */
+    protected function isExcludedPath(string $path): bool
+    {
+        foreach ([$path, ...$this->typedSpellings($path)] as $spelling) {
+            if ($this->matchesExcludePattern(ltrim($this->getRelativePath($spelling), '/'), $spelling)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * $path re-spelled under the typed spelling of every respelled scan root
+     * it lies under - string work only, and none when no entry was miscased,
+     * so it costs nothing per file in the common case. The root must end on
+     * a segment boundary: '/' or the iterator's DIRECTORY_SEPARATOR.
+     *
+     * @return list<string>
+     */
+    private function typedSpellings(string $path): array
+    {
+        $spellings = [];
+
+        foreach ($this->typedRoots as $root => $typedRoots) {
+            $rest = (string) substr($path, strlen($root));
+
+            if (str_starts_with($path, $root) && ($rest === '' || $rest[0] === '/' || $rest[0] === DIRECTORY_SEPARATOR)) {
+                foreach (array_keys($typedRoots) as $typed) {
+                    $spellings[] = $typed.$rest;
+                }
+            }
+        }
+
+        return $spellings;
     }
 
     /**
@@ -681,13 +1000,11 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
             return false;
         }
 
-        $path = $file->getPathname();
         // Exclude patterns are written relative to the base path ('vendor/*'),
         // so match the relative path; also match the absolute pathname for
-        // patterns that relied on it ('*/vendor/*').
-        $relativePath = ltrim($this->getRelativePath($path), '/');
-
-        return ! $this->matchesExcludePattern($relativePath, $path);
+        // patterns that relied on it ('*/vendor/*'). isExcludedPath() also tries
+        // the spelling of the entry that reached the file (#104).
+        return ! $this->isExcludedPath($file->getPathname());
     }
 
     /**
