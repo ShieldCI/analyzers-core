@@ -913,6 +913,9 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * base too, so 'applink' came back as 'app' and excludes written against
      * 'applink/*' stopped applying.
      *
+     * An entry or base holding a NUL byte never reaches steps 2 and 3: it
+     * names nothing on any filesystem, and realpath() throws for it (#105).
+     *
      * $sameDirectory replaces sameDirectory() in tests only, so the identity
      * branch can be exercised on a case-sensitive filesystem as well.
      *
@@ -936,7 +939,14 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         // under open_basedir it warns for any path outside the allowed list,
         // and a host that turns warnings into exceptions (Laravel's
         // HandleExceptions) would fail an analysis that the pre-#96 walk,
-        // which never called realpath(), passed.
+        // which never called realpath(), passed. A path holding a NUL byte
+        // names nothing, and realpath() throws a ValueError for it rather than
+        // warn, which neither '@' nor a handler stops (#105); it is answered
+        // before any is called.
+        if (str_contains($path, "\0") || str_contains($basePath, "\0")) {
+            return null;
+        }
+
         $realBase = @realpath($basePath);
 
         if ($realBase === false) {

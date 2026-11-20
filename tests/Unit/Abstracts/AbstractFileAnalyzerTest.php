@@ -3455,6 +3455,72 @@ class AbstractFileAnalyzerTest extends TestCase
         $this->assertNull($fileIdentity->invoke(null, $this->testDir . "/p\0x/app"));
     }
 
+    /**
+     * realpath() throws a ValueError for a path holding a NUL byte, as
+     * scandir() and lstat() do, so an absolute entry or a base with one used
+     * to end the analysis in an Error result (#105).
+     */
+    private function nulByteAnalyzer(): WalkingFileAnalyzer
+    {
+        mkdir($this->testDir . '/app');
+        file_put_contents($this->testDir . '/app/A.php', "<?php\n");
+
+        $analyzer = new WalkingFileAnalyzer();
+        $analyzer->setBasePath($this->testDir);
+
+        return $analyzer;
+    }
+
+    public function testAnAbsoluteEntryHoldingANulByteIsRecordedMissing(): void
+    {
+        $analyzer = $this->nulByteAnalyzer();
+        $analyzer->setPaths(["/no\0where"]);
+
+        $result = $analyzer->analyze();
+
+        $this->assertSame(Status::Passed, $result->getStatus(), $result->getMessage());
+        $this->assertSame('0 files analyzed', $result->getMessage());
+        $this->assertSame(["/no\0where"], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAnAbsoluteEntryHoldingANulByteLeavesTheOtherEntriesWalked(): void
+    {
+        $analyzer = $this->nulByteAnalyzer();
+        $analyzer->setPaths(['app', "/no\0where"]);
+
+        $result = $analyzer->analyze();
+
+        $this->assertSame(Status::Passed, $result->getStatus(), $result->getMessage());
+        $this->assertSame('1 files analyzed', $result->getMessage());
+        $this->assertSame(['app/A.php'], $this->relativePhpFiles($analyzer));
+        $this->assertSame(["/no\0where"], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAnAbsoluteEntryUnderABasePathHoldingANulByteStillPasses(): void
+    {
+        $analyzer = $this->nulByteAnalyzer();
+        $analyzer->setBasePath($this->testDir . "\0x");
+        $analyzer->setPaths(['/app']);
+
+        $result = $analyzer->analyze();
+
+        $this->assertSame(Status::Passed, $result->getStatus(), $result->getMessage());
+        $this->assertSame('0 files analyzed', $result->getMessage());
+    }
+
+    public function testRemainderUnderBaseAnswersNullForANulBytePath(): void
+    {
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'remainderUnderBase');
+        mkdir($this->testDir . '/app');
+
+        $this->assertNull($method->invoke(null, "/no\0where", $this->testDir));
+        $this->assertNull($method->invoke(null, '/app', $this->testDir . "\0x"));
+        // The lexical step answers first, and still claims such an entry.
+        $this->assertSame("ap\0p", $method->invoke(null, $this->testDir . "/ap\0p", $this->testDir));
+        // Control: an entry free of NUL bytes is still claimed through realpath().
+        $this->assertSame('app', $method->invoke(null, '/' . $this->testDir . '/app', $this->testDir));
+    }
+
     public function testRespellingLeavesTheCallersHandlerInChargeOfTheWalk(): void
     {
         $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
