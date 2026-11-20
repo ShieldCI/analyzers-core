@@ -24,6 +24,12 @@ class PlatformDetector
      * 2. Package directory existence (detects Vapor installation)
      * 3. Configuration file existence (detects Vapor project setup)
      *
+     * The two filesystem probes run quietly (probeQuietly()): a base path
+     * outside open_basedir, or a vendor/laravel/vapor-core linked out of
+     * it, is refused without a warning reaching the host's handler. A
+     * refused probe answers false - nothing past open_basedir can be seen -
+     * so a refused vapor-core falls to the vapor.yml probe (#120).
+     *
      * @param  string  $basePath  The application base path
      * @return bool True if Laravel Vapor is detected
      *
@@ -39,14 +45,14 @@ class PlatformDetector
         // Check if vapor-core package exists in vendor
         $vaporCorePath = $basePath.DIRECTORY_SEPARATOR.'vendor'.DIRECTORY_SEPARATOR.'laravel'.DIRECTORY_SEPARATOR.'vapor-core';
 
-        if (is_dir($vaporCorePath)) {
+        if (self::probeQuietly(static fn (): bool => is_dir($vaporCorePath))) {
             return true;
         }
 
         // Check for vapor.yml configuration file (indicates Vapor project)
         $vaporConfigPath = $basePath.DIRECTORY_SEPARATOR.'vapor.yml';
 
-        return file_exists($vaporConfigPath);
+        return self::probeQuietly(static fn (): bool => file_exists($vaporConfigPath));
     }
 
     /**
@@ -102,6 +108,11 @@ class PlatformDetector
      * for Cloud-specific logic; use this only for checks that are genuinely
      * "not applicable inside any container" (e.g. OS-level hardening analyzers).
      *
+     * Both probes sit under '/', which open_basedir never allows, and there
+     * each stat warns. They run quietly (probeQuietly()), so no host handler
+     * sees the warning. A refused probe answers false, so the method answers
+     * from whatever it can see (#120).
+     *
      * @param  string  $dockerEnvPath  Override for testing (default: /.dockerenv)
      * @param  string  $cgroupPath     Override for testing (default: /proc/self/cgroup)
      */
@@ -110,12 +121,12 @@ class PlatformDetector
         string $cgroupPath = '/proc/self/cgroup',
     ): bool {
         // Docker daemon creates this file in every container
-        if (file_exists($dockerEnvPath)) {
+        if (self::probeQuietly(static fn (): bool => file_exists($dockerEnvPath))) {
             return true;
         }
 
         // Fallback: cgroup inspection (Linux only)
-        if (is_readable($cgroupPath)) {
+        if (self::probeQuietly(static fn (): bool => is_readable($cgroupPath))) {
             $cgroup = file_get_contents($cgroupPath);
             if ($cgroup !== false) {
                 return str_contains($cgroup, 'docker')
@@ -141,5 +152,26 @@ class PlatformDetector
     public static function isLaravelCloud(): bool
     {
         return getenv('LARAVEL_CLOUD') === '1';
+    }
+
+    /**
+     * Run a filesystem probe under a temporary error handler that swallows
+     * every warning, so no host handler sees one - an open_basedir refusal
+     * included. '@' alone does not do that: it only lowers error_reporting(),
+     * and a handler that ignores it (one that throws for every warning)
+     * still runs. A probe that warns answers false. The caller's handler is
+     * back in place however the probe ends.
+     *
+     * @param  \Closure(): bool  $probe
+     */
+    private static function probeQuietly(\Closure $probe): bool
+    {
+        set_error_handler(static fn (): bool => true);
+
+        try {
+            return $probe();
+        } finally {
+            restore_error_handler();
+        }
     }
 }

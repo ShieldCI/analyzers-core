@@ -76,7 +76,7 @@ class PlatformDetectorTest extends TestCase
         $items = array_diff(scandir($dir) ?: [], ['.', '..']);
         foreach ($items as $item) {
             $path = $dir . DIRECTORY_SEPARATOR . $item;
-            if (is_dir($path)) {
+            if (is_dir($path) && ! is_link($path)) {
                 $this->removeDirectory($path);
             } else {
                 unlink($path);
@@ -469,6 +469,247 @@ YAML;
         );
 
         $this->assertFalse($result);
+    }
+
+    /**
+     * '/' is never inside an application's open_basedir, so both default
+     * probes are refused: the answer is false, and no warning reaches a
+     * handler that throws for it (#120).
+     */
+    public function test_is_docker_answers_false_under_open_basedir_with_a_laravel_style_handler(): void
+    {
+        $answer = $this->isDockerUnderOpenBasedir('laravel');
+
+        $this->assertSame('false', $answer['result'], $answer['output']);
+    }
+
+    /**
+     * A handler that throws for every warning, '@'-silenced or not, is not
+     * reached either.
+     */
+    public function test_is_docker_answers_false_under_open_basedir_with_a_strict_handler(): void
+    {
+        $answer = $this->isDockerUnderOpenBasedir('strict');
+
+        $this->assertSame('false', $answer['result'], $answer['output']);
+    }
+
+    /**
+     * Without a handler, no open_basedir warning is printed.
+     */
+    public function test_is_docker_prints_no_warning_under_open_basedir_without_a_handler(): void
+    {
+        $answer = $this->isDockerUnderOpenBasedir('none');
+
+        $this->assertSame('false', $answer['result'], $answer['output']);
+        $this->assertStringNotContainsString('open_basedir', $answer['output']);
+    }
+
+    /**
+     * Control: probes inside open_basedir still detect Docker.
+     */
+    public function test_is_docker_still_detects_docker_from_allowed_paths_under_open_basedir(): void
+    {
+        $dockerEnv = $this->testDir . '/.dockerenv';
+        touch($dockerEnv);
+        $cgroup = $this->testDir . '/cgroup';
+        file_put_contents($cgroup, "12:devices:/docker/abc123\n");
+
+        $answer = $this->isDockerUnderOpenBasedir('strict', $dockerEnv, $this->testDir . '/no-cgroup');
+        $this->assertSame('true', $answer['result'], $answer['output']);
+
+        $answer = $this->isDockerUnderOpenBasedir('strict', $this->testDir . '/no-dockerenv', $cgroup);
+        $this->assertSame('true', $answer['result'], $answer['output']);
+    }
+
+    /**
+     * A refused /.dockerenv does not stop an allowed cgroup file from
+     * answering.
+     */
+    public function test_is_docker_falls_back_to_an_allowed_cgroup_when_dockerenv_is_refused(): void
+    {
+        $cgroup = $this->testDir . '/cgroup';
+        file_put_contents($cgroup, "12:devices:/docker/abc123\n");
+
+        $answer = $this->isDockerUnderOpenBasedir('strict', '/.dockerenv', $cgroup);
+
+        $this->assertSame('true', $answer['result'], $answer['output']);
+    }
+
+    /**
+     * A base path outside open_basedir: both Vapor probes are refused, so
+     * the answer is false, and no warning reaches the host's handler, nor
+     * is one printed without a handler.
+     */
+    public function test_is_laravel_vapor_answers_false_for_a_base_outside_open_basedir(): void
+    {
+        $project = $this->testDir . '/proj';
+        $allowed = $this->testDir . '/allowed';
+        mkdir($project . '/vendor/laravel/vapor-core', 0777, true);
+        touch($project . '/vapor.yml');
+        mkdir($allowed);
+
+        foreach (['laravel', 'strict', 'none'] as $handler) {
+            $answer = $this->detectUnderOpenBasedir('isLaravelVapor', ['basePath' => $project], $handler, [$allowed]);
+
+            $this->assertSame('false', $answer['result'], $handler . "\n" . $answer['output']);
+            $this->assertStringNotContainsString('open_basedir', $answer['output'], $handler);
+        }
+    }
+
+    /**
+     * A vendor/laravel/vapor-core linked out of open_basedir is refused,
+     * which answers false: the answer falls to the vapor.yml probe.
+     */
+    public function test_is_laravel_vapor_falls_back_to_vapor_yml_when_vapor_core_links_out_of_open_basedir(): void
+    {
+        $project = $this->testDir . '/proj';
+        $outside = $this->testDir . '/outside/vapor-core';
+        mkdir($project . '/vendor/laravel', 0777, true);
+        mkdir($outside, 0777, true);
+        symlink($outside, $project . '/vendor/laravel/vapor-core');
+
+        foreach (['laravel', 'strict', 'none'] as $handler) {
+            $answer = $this->detectUnderOpenBasedir('isLaravelVapor', ['basePath' => $project], $handler, [$project]);
+
+            $this->assertSame('false', $answer['result'], $handler . "\n" . $answer['output']);
+            $this->assertStringNotContainsString('open_basedir', $answer['output'], $handler);
+        }
+
+        touch($project . '/vapor.yml');
+
+        foreach (['laravel', 'strict', 'none'] as $handler) {
+            $answer = $this->detectUnderOpenBasedir('isLaravelVapor', ['basePath' => $project], $handler, [$project]);
+
+            $this->assertSame('true', $answer['result'], $handler . "\n" . $answer['output']);
+            $this->assertStringNotContainsString('open_basedir', $answer['output'], $handler);
+        }
+    }
+
+    /**
+     * Control: an allowed vapor-core directory or vapor.yml still detects
+     * Vapor under open_basedir.
+     */
+    public function test_is_laravel_vapor_still_detects_vapor_from_allowed_paths_under_open_basedir(): void
+    {
+        $withCore = $this->testDir . '/with-core';
+        $withYml = $this->testDir . '/with-yml';
+        mkdir($withCore . '/vendor/laravel/vapor-core', 0777, true);
+        mkdir($withYml);
+        touch($withYml . '/vapor.yml');
+
+        foreach ([$withCore, $withYml] as $project) {
+            $answer = $this->detectUnderOpenBasedir('isLaravelVapor', ['basePath' => $project], 'strict', [$project]);
+
+            $this->assertSame('true', $answer['result'], $project . "\n" . $answer['output']);
+        }
+    }
+
+    /**
+     * isDocker() under open_basedir (detectUnderOpenBasedir()), with the
+     * test directory allowed. Null paths keep isDocker()'s defaults.
+     *
+     * @return array{result: string, output: string}
+     */
+    private function isDockerUnderOpenBasedir(string $handler, ?string $dockerEnvPath = null, ?string $cgroupPath = null): array
+    {
+        return $this->detectUnderOpenBasedir(
+            'isDocker',
+            array_filter(['dockerEnvPath' => $dockerEnvPath, 'cgroupPath' => $cgroupPath], static fn (?string $path): bool => $path !== null),
+            $handler,
+            [$this->testDir],
+        );
+    }
+
+    /**
+     * Run PlatformDetector::$method(...$args) in a php subprocess whose
+     * open_basedir allows only the repository and $allowed, under $handler:
+     * 'laravel' throws for warnings error_reporting() lets through, 'strict'
+     * throws for every warning, 'none' installs nothing. Answers 'true',
+     * 'false' or 'threw: <message>', and the child's whole output.
+     *
+     * A subprocess because open_basedir cannot be loosened again in this
+     * process (see AbstractFileAnalyzerTest::analyzeUnderOpenBasedir()).
+     *
+     * @param  array<string, string>  $args
+     * @param  array<string>  $allowed
+     * @return array{result: string, output: string}
+     */
+    private function detectUnderOpenBasedir(string $method, array $args, string $handler, array $allowed): array
+    {
+        $repo = dirname(__DIR__, 3);
+
+        // The repository is allowed wholesale for the autoloader: a fixture
+        // inside it would make the control cases pass for the wrong reason.
+        $this->assertFalse(
+            str_starts_with((string) realpath($this->testDir) . '/', (string) realpath($repo) . '/'),
+            'the fixture must not sit inside the repository, which open_basedir allows'
+        );
+
+        $basedirs = [$repo];
+
+        foreach ($allowed as $dir) {
+            $basedirs[] = $dir;
+            $basedirs[] = (string) realpath($dir);
+        }
+
+        $script = <<<'PHP'
+            [, $repo, $method, $handler, $args] = $argv;
+            require $repo . '/vendor/autoload.php';
+
+            error_reporting(E_ALL);
+            $installed = match ($handler) {
+                'laravel' => static function (int $severity, string $message): bool {
+                    if (error_reporting() & $severity) {
+                        throw new ErrorException($message, 0, $severity);
+                    }
+
+                    return false;
+                },
+                'strict' => static function (int $severity, string $message): bool {
+                    throw new ErrorException($message, 0, $severity);
+                },
+                default => null,
+            };
+
+            if ($installed !== null) {
+                set_error_handler($installed);
+            }
+
+            try {
+                $result = ShieldCI\AnalyzersCore\Support\PlatformDetector::$method(...json_decode($args, true));
+                echo "\nRESULT> ", $result ? 'true' : 'false', "\n";
+            } catch (Throwable $e) {
+                echo "\nRESULT> threw: ", $e->getMessage(), "\n";
+            }
+
+            echo "HANDLER> ", set_error_handler(null) === $installed ? 'kept' : 'changed', "\n";
+            PHP;
+
+        $command = implode(' ', array_map('escapeshellarg', [
+            PHP_BINARY,
+            '-d', 'open_basedir=' . implode(PATH_SEPARATOR, $basedirs),
+            '-d', 'display_errors=stderr',
+            '-d', 'display_startup_errors=0',
+            '-d', 'xdebug.mode=off',
+            '-r', $script, $repo, $method, $handler, (string) json_encode($args),
+        ])) . ' 2>&1';
+
+        exec($command, $output, $status);
+        $all = implode("\n", $output);
+        $this->assertSame(0, $status, $all);
+
+        $answers = [];
+
+        foreach (['RESULT', 'HANDLER'] as $marker) {
+            $lines = array_values(preg_grep('/^' . $marker . '> /', $output) ?: []);
+            $this->assertCount(1, $lines, $marker . "\n" . $all);
+            $answers[$marker] = substr($lines[0], strlen($marker) + 2);
+        }
+
+        $this->assertSame('kept', $answers['HANDLER'], $method . '() replaced the caller\'s error handler: ' . $all);
+
+        return ['result' => $answers['RESULT'], 'output' => $all];
     }
 
     // =================================================================
