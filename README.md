@@ -287,6 +287,26 @@ so the file is not fully analysed even for the caller that recovered it. Removin
 would trade a false skip for a false pass. `recoveries()` returns the annotated paths, always
 a subset of `failures()`, so a reporter can say "would not parse, partially recovered".
 
+When the recovery you want is php-parser's own, ask the shared parser for it rather than
+building a second one, so the failure lands in the same log:
+
+```php
+$ast = $parser->parseFileRecovering($file);   // or parseCodeRecovering($code, $origin)
+```
+
+A file that parses takes the ordinary `parseFile()` path, cache included. Only when the parse
+fails are the bytes that failed parsed again with error recovery; the failure is recorded
+exactly as `parseFile()` would record it, and `recordRecovery()` is called for you when any
+PHP was rebuilt. A missing semicolon typically recovers the whole class; an unclosed method
+body or parameter list recovers nothing. Nor does a recovery that rebuilt only inline HTML
+(a byte-order mark counts) or file headers such as `declare`, `namespace` and `use` with
+nothing after them. Both return `[]`. A recovered AST is never cached.
+
+A recovered AST may be partial — the broken region is dropped and `Expr\Error` nodes can
+remain — and nothing tells you so per call. `hasFailure()` and `recoveries()` describe the
+run, not this call: the log keeps the first sighting, so a file fixed mid-run reports a
+failure next to a complete AST.
+
 When parsing generated code, pass the real source path as the origin and a translator for
 the line. The translator runs only if the parse fails, since the failing line is not known
 until then:

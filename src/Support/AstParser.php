@@ -40,6 +40,35 @@ class AstParser implements RecordingParserInterface
     private array $recoveries = [];
 
     /**
+     * The last parse failure: the key it was recorded under and the code that failed.
+     *
+     * The *Recovering() methods clear this, parse, and take it back. They cannot read the log
+     * instead: record() keeps the first sighting, so a file that failed earlier in the run
+     * leaves the log unchanged when it fails again, and a record from contents since fixed
+     * would claim a clean parse had failed. Left null by a parseFile() served from the cache,
+     * by an unreadable path that never reached parseCode(), and by a subclass that stubs
+     * either method -- none of which produced a failed parse to recover from.
+     *
+     * The code is kept so recovery works on the bytes that actually failed: a second read can
+     * differ, and a subclass may have parsed something other than the file. The key is kept so
+     * the recovery lands where the failure did, even if a subclass respelled the path. Set
+     * only after a line translator has run, so a translator that parses something itself
+     * cannot leave its own failure here in place of the outer one.
+     *
+     * Set only while a recovering call is in progress, and released when it ends, so a plain
+     * parse never pins a broken file's source in memory for the rest of the run.
+     *
+     * @var array{key: string, code: string}|null
+     */
+    private ?array $lastFailure = null;
+
+    /**
+     * How many *Recovering() calls are in progress: more than one when a line translator
+     * makes a recovering call of its own.
+     */
+    private int $recoveringDepth = 0;
+
+    /**
      * @param  Parser|null  $parser  Defaults to the newest version the installed parser
      *                                supports. Injectable so a caller can pin a version,
      *                                which is the only way to exercise UnsupportedSyntax.
@@ -148,6 +177,8 @@ class AstParser implements RecordingParserInterface
      * Holding both lets a reporter say "would not parse, partially recovered" instead of
      * choosing between a false skip and a false pass.
      *
+     * @phpstan-impure Writes the recovery log.
+     *
      * @return bool Whether there was a failure under $path to annotate.
      */
     public function recordRecovery(string $path): bool
@@ -172,6 +203,9 @@ class AstParser implements RecordingParserInterface
     }
 
     /**
+     * @phpstan-impure Writes the AST cache and the failure log, so two calls with the same
+     *                 path need not agree, and the *Recovering() methods read state back.
+     *
      * @return array<Node>
      */
     public function parseFile(string $filePath): array
@@ -215,9 +249,10 @@ class AstParser implements RecordingParserInterface
 
         // A failed parse is not cached, so every parse of a broken file reaches parseCode()
         // and the failure log can be rebuilt after resetFailures() without clearCache()
-        // first. Gated on the log rather than on an empty AST: a subclass that recovers a
-        // partial AST after parent::parseCode() fails returns nodes, and those must not be
-        // cached either, while an empty file parses cleanly and is.
+        // first. Gated on the log rather than on an empty AST: parseFileRecovering() returns
+        // a partial AST after this parse fails, and that must never be cached -- it would be
+        // served to plain parseFile() callers as if the file had parsed -- while an empty
+        // file parses cleanly and is.
         if (! isset($this->failures[$filePath])) {
             $this->astCache[$cacheKey] = $ast;
         }
@@ -238,6 +273,8 @@ class AstParser implements RecordingParserInterface
      *        the source path up front but cannot know which line will fail until it does, so
      *        this is invoked lazily — only on failure, and only when a line was reported.
      * @return array<Node>
+     *
+     * @phpstan-impure Writes the failure log.
      */
     public function parseCode(string $code, ?string $origin = null, ?callable $translateLine = null): array
     {
@@ -259,7 +296,12 @@ class AstParser implements RecordingParserInterface
                 $line = $translateLine($line);
             }
 
-            $this->record($origin ?? 'code:' . md5($code), new ParseFailure(
+            $key = $origin ?? 'code:' . md5($code);
+            if ($this->recoveringDepth > 0) {
+                $this->lastFailure = ['key' => $key, 'code' => $code];
+            }
+
+            $this->record($key, new ParseFailure(
                 $origin,
                 $line > 0 ? $line : null,
                 $e->getRawMessage(),
@@ -268,6 +310,143 @@ class AstParser implements RecordingParserInterface
 
             return [];
         }
+    }
+
+    /**
+     * parseFile(), falling back to an error-recovering parse when the file will not parse.
+     *
+     * For an analyzer that would rather see most of a broken file than none of it. Recovery
+     * runs on this instance, with the parser it already holds, so the failure lands in the
+     * same run-wide log as every other caller's and a reporter sees one record per file.
+     *
+     * A file that parses takes exactly the parseFile() path, cache included, and a subclass
+     * that stubs parseFile() is honoured. Only when this call's parse failed is the code that
+     * failed -- not a second read of the file -- parsed again with error recovery. The failure
+     * is recorded exactly as parseFile() records it, and a result that rebuilt any PHP is
+     * annotated with recordRecovery() under the key the failure was recorded under.
+     *
+     * A recovered AST is partial: php-parser drops the region it could not rebuild and may
+     * leave Expr\Error nodes where an expression was missing. It is never cached, so each
+     * call recovers afresh and plain parseFile() callers never receive it. The return value
+     * does not say which kind it is, and hasFailure() and recoveries() cannot either: they
+     * describe the run and keep the first sighting, so a file fixed mid-run, or code recorded
+     * earlier under the same key, reports a failure next to a complete AST.
+     *
+     * Returns [] for an unreadable path, and for a file recovery rebuilt no PHP from: nothing,
+     * or only inline HTML (a byte-order mark before <?php is one), empty statements and file
+     * headers -- declare, namespace and use statements and __halt_compiler() -- with nothing
+     * inside or after them. Those leave only the failure; handing them back would look like a
+     * salvaged file.
+     *
+     * @phpstan-impure Writes the failure and recovery logs, like parseFile().
+     *
+     * @return array<Node>
+     */
+    public function parseFileRecovering(string $filePath): array
+    {
+        return $this->recovering(fn (): array => $this->parseFile($filePath));
+    }
+
+    /**
+     * parseCode(), falling back to an error-recovering parse when the code will not parse.
+     *
+     * The twin of parseFileRecovering() for code that never was a file, such as a compiled
+     * template, with the same semantics. The failure is keyed and recorded exactly as
+     * parseCode() would, and so is the recovery: under $origin, or under 'code:' plus an md5
+     * of $code when there is none.
+     *
+     * @phpstan-impure Writes the failure and recovery logs, like parseCode().
+     *
+     * @param  (callable(int): int)|null  $translateLine  As for parseCode().
+     * @return array<Node>
+     */
+    public function parseCodeRecovering(string $code, ?string $origin = null, ?callable $translateLine = null): array
+    {
+        return $this->recovering(fn (): array => $this->parseCode($code, $origin, $translateLine));
+    }
+
+    /**
+     * Run a strict parse with failure retention on, then recover the code if it failed.
+     *
+     * @param  callable(): array<Node>  $parse
+     * @return array<Node>
+     */
+    private function recovering(callable $parse): array
+    {
+        $this->lastFailure = null;
+        $this->recoveringDepth++;
+
+        try {
+            $ast = $parse();
+        } catch (\Throwable $e) {
+            $this->lastFailure = null;
+
+            throw $e;
+        } finally {
+            $this->recoveringDepth--;
+        }
+
+        return $this->recoverIfFailed($ast);
+    }
+
+    /**
+     * Hand back $ast if the parse that produced it did not fail, or recover the code that did.
+     *
+     * The collected errors are discarded: the failure is already recorded from the strict
+     * parse, which reports the first error just as a reader of the file would meet it.
+     *
+     * @param  array<Node>  $ast
+     * @return array<Node>
+     */
+    private function recoverIfFailed(array $ast): array
+    {
+        $failure = $this->lastFailure;
+        $this->lastFailure = null;
+
+        if ($failure === null) {
+            return $ast;
+        }
+
+        $recovered = $this->parser->parse($failure['code'], new ErrorHandler\Collecting()) ?? [];
+
+        if (! $this->rebuiltPhp($recovered)) {
+            return [];
+        }
+
+        $this->recordRecovery($failure['key']);
+
+        return $recovered;
+    }
+
+    /**
+     * Whether $stmts hold anything to analyse beyond inline HTML, empty statements and file
+     * headers. A header counts only for the code inside it: a namespace or declare block is
+     * searched, an import or __halt_compiler() never counts on its own.
+     *
+     * @param  array<Node>  $stmts
+     */
+    private function rebuiltPhp(array $stmts): bool
+    {
+        foreach ($stmts as $stmt) {
+            if ($stmt instanceof Stmt\Namespace_ || $stmt instanceof Stmt\Declare_) {
+                if ($this->rebuiltPhp($stmt->stmts ?? [])) {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if (! $stmt instanceof Stmt\InlineHTML
+                && ! $stmt instanceof Stmt\Nop
+                && ! $stmt instanceof Stmt\Use_
+                && ! $stmt instanceof Stmt\GroupUse
+                && ! $stmt instanceof Stmt\HaltCompiler
+            ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

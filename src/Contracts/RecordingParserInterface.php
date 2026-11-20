@@ -57,6 +57,9 @@ interface RecordingParserInterface extends ParserInterface
     /**
      * Note that a caller recovered usable syntax from a file that would not parse.
      *
+     * @phpstan-impure Writes the recovery log, so recoveries() read before the call may not
+     *                 hold after it.
+     *
      * @return bool Whether the path was recorded -- false when no failure is on file for it.
      */
     public function recordRecovery(string $path): bool;
