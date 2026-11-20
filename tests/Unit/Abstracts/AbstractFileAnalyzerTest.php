@@ -3466,6 +3466,307 @@ class AbstractFileAnalyzerTest extends TestCase
     }
 
     // =========================================================================
+    // Case variants below a directory that cannot be listed -
+    // ShieldCI/analyzers-core#112
+    //
+    // A directory at 0111 can be entered but not listed, so its names could
+    // not be respelled and each variant kept its typed spelling: every file
+    // below came out once per spelling, and an exclude written in one missed
+    // the other's copies.
+    // =========================================================================
+
+    public function testCaseVariantEntriesBelowAnUnlistableDirectoryYieldEachFileOnce(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app', 0111);
+
+        $analyzer = $this->caseAnalyzer(['app/Providers', 'app/providers']);
+
+        $this->assertSame([$project . '/app/Providers/P.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testExcludesInEitherSpellingApplyBelowAnUnlistableDirectory(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app', 0111);
+
+        foreach ([['app/Providers', 'app/providers'], ['app/providers', 'app/Providers']] as $paths) {
+            foreach (['app/Providers/*', 'app/providers/*'] as $exclude) {
+                $analyzer = $this->caseAnalyzer($paths);
+                $analyzer->setExcludePatterns([$exclude]);
+
+                $this->assertSame([], $analyzer->getPhpFilesPublic(), implode(', ', $paths) . ' - ' . $exclude);
+            }
+        }
+    }
+
+    public function testCaseVariantEntriesUnderAnUnlistableBaseYieldEachFileOnce(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $this->lock($project, 0111);
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($this->caseAnalyzer(['app', 'App'])));
+
+        // The base cannot be listed, so the on-disk 'app' is never read:
+        // the first spelling is the one yielded, still once per file.
+        $this->assertSame(
+            [$project . '/App/Http/Controllers/C.php', $project . '/App/Providers/P.php'],
+            $this->sortedPhpFiles($this->caseAnalyzer(['App', 'app']))
+        );
+    }
+
+    public function testSegmentsBelowAnUnlistableDirectoryAreStillRespelled(): void
+    {
+        // Only app is unlistable: Providers lists, so 'sub' is respelled to
+        // its on-disk 'Sub' whichever spelling reached Providers.
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        mkdir($project . '/app/Providers/Sub');
+        file_put_contents($project . '/app/Providers/Sub/S.php', "<?php\n");
+        $this->lock($project . '/app', 0111);
+        $expected = [$project . '/app/Providers/Sub/S.php'];
+
+        $this->assertSame($expected, $this->caseAnalyzer(['app/Providers/sub'])->getPhpFilesPublic());
+        $this->assertSame($expected, $this->caseAnalyzer(['app/Providers/Sub', 'app/providers/sub'])->getPhpFilesPublic());
+    }
+
+    public function testAMissingEntryBesideACaseVariantBelowAnUnlistableDirectoryIsMissing(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app', 0111);
+
+        $analyzer = $this->caseAnalyzer(['app/Gone', 'app/Providers', 'app/providers/Gone', 'app/providers']);
+
+        $this->assertSame([$project . '/app/Providers/P.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+        $this->assertSame(['app/Gone', 'app/providers/Gone'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testHardLinkedFilesBelowAnUnlistableDirectoryAreEachYielded(): void
+    {
+        // One inode under two names that are not case variants of each other:
+        // two entries, never folded into one. Runs on any filesystem.
+        $project = $this->unreadableProject();
+        file_put_contents($project . '/app/a.php', "<?php\n");
+
+        if (! @link($project . '/app/a.php', $project . '/app/b.php')) {
+            $this->markTestSkipped('link() is not available here');
+        }
+
+        $this->lock($project . '/app', 0111);
+        $analyzer = $this->caseAnalyzer(['app/a.php', 'app/b.php']);
+
+        $this->assertSame([$project . '/app/a.php', $project . '/app/b.php'], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAFoldBelowAnUnlistableDirectoryNeverChangesTheExtension(): void
+    {
+        // shouldAnalyzeFile() judges '.php' byte for byte, so folding
+        // 'x.php' into an earlier 'X.PHP' would drop the file.
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        file_put_contents($project . '/app/x.php', "<?php\n");
+        $this->lock($project . '/app', 0111);
+
+        foreach ([['app/X.PHP', 'app/x.php'], ['app/x.php', 'app/X.PHP']] as $paths) {
+            $this->assertSame([$project . '/app/x.php'], $this->caseAnalyzer($paths)->getPhpFilesPublic(), implode(', ', $paths));
+        }
+
+        // The same extension is still folded: one file, once.
+        $this->assertSame([$project . '/app/x.php'], $this->caseAnalyzer(['app/x.php', 'app/X.php'])->getPhpFilesPublic());
+    }
+
+    public function testCaseVariantHardLinksBelowAnUnlistableDirectoryAreNotFoldedWhereNamesKeepCase(): void
+    {
+        // Two names the volume keeps apart, one inode.
+        $project = $this->caseSensitiveHardLinks('X.php', 'x.php');
+
+        $this->assertSame(
+            [$project . '/app/X.php', $project . '/app/x.php'],
+            $this->caseAnalyzer(['app/X.php', 'app/x.php'])->getPhpFilesPublic()
+        );
+    }
+
+    public function testAnUppercaseExtensionHardLinkBelowAnUnlistableDirectoryDoesNotSwallowItsLowercaseLink(): void
+    {
+        $project = $this->caseSensitiveHardLinks('Y.PHP', 'y.php');
+
+        $this->assertSame([$project . '/app/y.php'], $this->caseAnalyzer(['app/Y.PHP', 'app/y.php'])->getPhpFilesPublic());
+    }
+
+    public function testAThirdCaseVariantHardLinkDoesNotMakeAVolumeLookCaseFolding(): void
+    {
+        // P.PHP is one more link of the file, not 'P.php' folded.
+        $project = $this->caseSensitiveHardLinks('P.php', 'p.php', 'P.PHP');
+
+        $this->assertSame(
+            [$project . '/app/P.php', $project . '/app/p.php'],
+            $this->caseAnalyzer(['app/P.php', 'app/p.php'])->getPhpFilesPublic()
+        );
+
+        $analyzer = $this->caseAnalyzer(['app/P.php', 'app/p.php']);
+        $analyzer->setExcludePatterns(['app/P.php']);
+
+        $this->assertSame([$project . '/app/p.php'], $analyzer->getPhpFilesPublic());
+    }
+
+    /**
+     * $others hard-linked to $first under an app locked at 0111, on a
+     * case-sensitive volume only.
+     */
+    private function caseSensitiveHardLinks(string $first, string ...$others): string
+    {
+        $this->requireCaseSensitiveFilesystem();
+        $project = $this->unreadableProject();
+        file_put_contents($project . '/app/' . $first, "<?php\n");
+
+        foreach ($others as $other) {
+            if (! @link($project . '/app/' . $first, $project . '/app/' . $other)) {
+                $this->markTestSkipped('link() is not available here');
+            }
+        }
+
+        $this->lock($project . '/app', 0111);
+
+        return $project;
+    }
+
+    public function testACaseVariantOfALaterHardLinkBelowAnUnlistableDirectoryIsFolded(): void
+    {
+        // 'B.php' is 'b.php', not 'a.php', though all three are one inode.
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        file_put_contents($project . '/app/a.php', "<?php\n");
+
+        if (! @link($project . '/app/a.php', $project . '/app/b.php')) {
+            $this->markTestSkipped('link() is not available here');
+        }
+
+        $this->lock($project . '/app', 0111);
+        $analyzer = $this->caseAnalyzer(['app/a.php', 'app/b.php', 'app/B.php']);
+
+        $this->assertSame([$project . '/app/a.php', $project . '/app/b.php'], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAHardLinkedFileBelowAnUnlistableDirectoryIsFoldedWhenEveryCaseWasSeen(): void
+    {
+        // Every case of 'p.php' is typed, and q.php is a second link. On a
+        // case-sensitive volume P.PHP and P.php name nothing.
+        $project = $this->unreadableProject();
+        file_put_contents($project . '/app/p.php', "<?php\n");
+
+        if (! @link($project . '/app/p.php', $project . '/app/q.php')) {
+            $this->markTestSkipped('link() is not available here');
+        }
+
+        $this->lock($project . '/app', 0111);
+
+        $this->assertSame(
+            [$project . '/app/p.php'],
+            $this->caseAnalyzer(['app/P.PHP', 'app/p.php', 'app/P.php'])->getPhpFilesPublic()
+        );
+    }
+
+    public function testCaseVariantsOfALinkToADirectoryBelowAnUnlistableDirectoryYieldEachFileOnce(): void
+    {
+        // lstat() sees a link, but the walk descends into a directory, so
+        // the extension-like '.D' does not keep the spellings apart. On a
+        // case-sensitive volume 'lib.d' names nothing.
+        $project = $this->unreadableProject();
+        mkdir($project . '/real');
+        file_put_contents($project . '/real/R.php', "<?php\n");
+
+        if (! @symlink('../real', $project . '/app/Lib.D')) {
+            $this->markTestSkipped('symlink() is not available here');
+        }
+
+        try {
+            $this->lock($project . '/app', 0111);
+
+            $this->assertSame(
+                [$project . '/app/Lib.D/R.php'],
+                $this->caseAnalyzer(['app/Lib.D', 'app/lib.d'])->getPhpFilesPublic()
+            );
+        } finally {
+            // Removed here: the cleanup would follow it into real.
+            chmod($project . '/app', 0755);
+            unlink($project . '/app/Lib.D');
+        }
+    }
+
+    public function testAnUnlistedSpellingFoldsByWhatTheNameIs(): void
+    {
+        // Runs on any volume: each call is handed the stat of a name already
+        // seen, as a case-insensitive volume would answer for its variant.
+        $dir = $this->testDir . '/src';
+        mkdir($dir . '/Sub');
+        mkdir($dir . '/Other');
+        $spelling = new \ReflectionMethod(AbstractFileAnalyzer::class, 'unlistedSpelling');
+        $analyzer = new ConcreteFileAnalyzer();
+        $stat = static fn (string $name): array => lstat($dir . '/' . $name) ?: [];
+
+        // A directory has one name.
+        $this->assertSame('Sub', $spelling->invoke($analyzer, $dir, 'Sub', $stat('Sub')));
+        $this->assertSame('Sub', $spelling->invoke($analyzer, $dir, 'Other', $stat('Sub')));
+
+        // So does a file with one link, but never across an extension.
+        $this->assertSame('File1.php', $spelling->invoke($analyzer, $dir, 'File1.php', $stat('File1.php')));
+        $this->assertSame('File1.php', $spelling->invoke($analyzer, $dir, 'FILE1.php', $stat('File1.php')));
+        $this->assertSame('File1.PHP', $spelling->invoke($analyzer, $dir, 'File1.PHP', $stat('File1.php')));
+
+        // A file with more links folds only to a case variant, and only
+        // where the volume folds case.
+        $this->assertTrue(link($dir . '/File1.php', $dir . '/Link.php'));
+        $this->assertSame('Link.php', $spelling->invoke($analyzer, $dir, 'Link.php', $stat('Link.php')));
+        $this->assertSame(
+            $this->isCaseInsensitiveFilesystem() ? 'Link.php' : 'link.php',
+            $spelling->invoke($analyzer, $dir, 'link.php', $stat('Link.php'))
+        );
+    }
+
+    public function testWhetherAVolumeFoldsCaseIsAskedOfADirectory(): void
+    {
+        $folds = new \ReflectionMethod(AbstractFileAnalyzer::class, 'foldsCase');
+
+        $this->assertSame($this->isCaseInsensitiveFilesystem(), $folds->invoke(null, $this->testDir . '/src'));
+        // The nearest lettered segment answers for those without letters.
+        mkdir($this->testDir . '/src/1');
+        $this->assertSame($this->isCaseInsensitiveFilesystem(), $folds->invoke(null, $this->testDir . '/src/1'));
+        // With no lettered segment there is nothing to ask: no fold.
+        $this->assertFalse($folds->invoke(null, '/1/2'));
+    }
+
+    public function testNonAsciiVariantsBelowAnUnlistableDirectoryYieldEachFileOnce(): void
+    {
+        $project = $this->unreadableProject();
+        mkdir($project . "/app/\u{00c9}t\u{00e9}");
+        file_put_contents($project . "/app/\u{00c9}t\u{00e9}/E.php", "<?php\n");
+        mkdir($project . "/app/cafe\u{0301}");
+        file_put_contents($project . "/app/cafe\u{0301}/C.php", "<?php\n");
+
+        if (! is_dir($project . "/app/\u{00e9}t\u{00e9}") || ! is_dir($project . "/app/caf\u{00e9}")) {
+            $this->markTestSkipped('needs a filesystem that folds Unicode case and normalisation (APFS)');
+        }
+
+        $this->lock($project . '/app', 0111);
+
+        $this->assertSame(
+            [$project . "/app/\u{00c9}t\u{00e9}/E.php"],
+            $this->caseAnalyzer(["app/\u{00c9}t\u{00e9}", "app/\u{00e9}t\u{00e9}"])->getPhpFilesPublic()
+        );
+        $this->assertSame(
+            [$project . "/app/cafe\u{0301}/C.php"],
+            $this->caseAnalyzer(["app/cafe\u{0301}", "app/caf\u{00e9}"])->getPhpFilesPublic()
+        );
+    }
+
+    // =========================================================================
     // Paths open_basedir refuses - ShieldCI/analyzers-core#106
     // =========================================================================
 
@@ -4062,6 +4363,13 @@ class AbstractFileAnalyzerTest extends TestCase
     {
         if (! $this->isCaseInsensitiveFilesystem()) {
             $this->markTestSkipped('needs a case-insensitive filesystem (APFS, NTFS), where App and app are one directory');
+        }
+    }
+
+    private function requireCaseSensitiveFilesystem(): void
+    {
+        if ($this->isCaseInsensitiveFilesystem()) {
+            $this->markTestSkipped('needs a case-sensitive filesystem, where App and app are two names');
         }
     }
 

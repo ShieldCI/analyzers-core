@@ -78,6 +78,16 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     private array $listings = [];
 
     /**
+     * For each directory onDiskSpelling() found unlistable, the spellings
+     * the walk reached each file in it under, keyed by the directory with a
+     * trailing '/' and then by lstat() dev and inode (#112). Released with
+     * $listings, for the same reason.
+     *
+     * @var array<string, array<string, list<string>>>
+     */
+    private array $unlistedSpellings = [];
+
+    /**
      * For each scan root the latest walk respelled (#104), the spellings its
      * entries were typed in, so an exclude written in that spelling still
      * applies (typedSpellings()). It outlives the walk, because subclasses
@@ -192,13 +202,15 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * walk yielded each file under the spelling typed, so ['app', 'App']
      * reported everything twice and an 'app/Http/*' exclude missed the
      * 'App/...' copies. onDiskSpelling() rewrites each scan root's part below
-     * the base to the names the directory lists, which is the spelling the
-     * iterator already yields for everything beneath it, so the pathname
-     * dedup applies unchanged. Excludes are matched against the on-disk
-     * pathname and against it re-spelled under the entry as typed
-     * (isExcludedPath()), so both 'app/Http/*' and an 'App/Http/*' written to
-     * match an 'App' entry apply. On a case-sensitive filesystem a typed
-     * name that exists is always listed as typed, so nothing changes.
+     * the base to the names the directory lists (below one that cannot be
+     * listed, to the first spelling the walk reached the same name in,
+     * #112), which is the spelling the iterator already yields for
+     * everything beneath it, so the pathname dedup applies unchanged.
+     * Excludes are matched against the on-disk pathname and against it
+     * re-spelled under the entry as typed (isExcludedPath()), so both
+     * 'app/Http/*' and an 'App/Http/*' written to match an 'App' entry
+     * apply. On a case-sensitive filesystem a typed name that exists is
+     * always listed as typed, so nothing changes.
      *
      * Each configured entry is cleaned first (normaliseEntry()): repeated and
      * trailing separators are folded, so 'app//Http' and 'app/Providers/' walk
@@ -233,6 +245,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         $this->unreadableKeys = [];
         $this->missingPaths = [];
         $this->listings = [];
+        $this->unlistedSpellings = [];
         $this->typedRoots = [];
         $track = count($paths) > 1;
         /** @var array<string, true> $yielded */
@@ -380,6 +393,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         } finally {
             restore_error_handler();
             $this->listings = [];
+            $this->unlistedSpellings = [];
         }
 
         // Every root is recorded above and the ones spelled as typed are
@@ -461,12 +475,24 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * not under it - the base itself, or a scan root that ended up elsewhere -
      * comes back as given. Segments are rewritten left to right, each listed
      * with scandir() and matched by listedSpelling(); the first one that
-     * cannot be matched (it names nothing, or its directory cannot be listed
-     * or searched) is kept as typed along with everything after it, which is
+     * cannot be matched (it names nothing, or its directory cannot be
+     * searched) is kept as typed along with everything after it, which is
      * all a missing or unreachable entry needs - the walk records it from
-     * there as before. A '.' or '..' segment stops the respelling too: it and
-     * everything after it stay as typed, and nothing at or past it is listed,
-     * since '<base>/..' may be outside open_basedir. The work is per entry and
+     * there as before.
+     *
+     * A directory that can be searched but not listed (0111) lists as [],
+     * yet its names can still be stat'ed (#112). A segment there that names
+     * something takes an earlier spelling the walk reached the same name in
+     * under that directory, or is recorded as typed (unlistedSpelling() says
+     * which spellings are one name); so 'app/Providers' and 'app/providers'
+     * meet in one root, the pathname dedup and the typed spellings apply as
+     * for a listed directory, and the segments after it are respelled from
+     * their own listings. The first spelling is not necessarily the on-disk
+     * one, which cannot be read.
+     *
+     * A '.' or '..' segment stops the respelling too: it and everything
+     * after it stay as typed, and nothing at or past it is listed, since
+     * '<base>/..' may be outside open_basedir. The work is per entry and
      * segment, never per file.
      *
      * Separators are kept where they were typed. On Windows both '/' and '\'
@@ -498,11 +524,19 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
 
             // Nothing at or past a '.' or '..' is listed: '<base>/..' can lie
             // outside open_basedir, where even is_dir() warns.
-            $name = $part === '.' || $part === '..' ? null : self::listedSpelling(
-                $part,
-                $this->listings[$dir.'/'] ??= self::listing($dir.'/'),
-                static fn (string $name): ?string => self::fileIdentity($dir.'/'.$name)
-            );
+            if ($part === '.' || $part === '..') {
+                $name = null;
+            } elseif (($this->listings[$dir.'/'] ??= self::listing($dir.'/')) === [] && $part !== '' && ($stat = @lstat($dir.'/'.$part)) !== false) {
+                // A listable directory always lists '.' and '..', so []
+                // is one that cannot be listed.
+                $name = $this->unlistedSpelling($dir, $part, $stat);
+            } else {
+                $name = self::listedSpelling(
+                    $part,
+                    $this->listings[$dir.'/'],
+                    static fn (string $name): ?string => self::fileIdentity($dir.'/'.$name)
+                );
+            }
 
             if ($name === null) {
                 return $base.'/'.$spelled.implode('', array_slice($parts, $i));
@@ -513,6 +547,74 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         }
 
         return $base.'/'.$spelled;
+    }
+
+    /**
+     * The spelling $segment, a name in $dir that $stat (its lstat()) says
+     * exists, takes when $dir cannot be listed (#112): an earlier spelling
+     * of the same file under $dir that the filesystem folds it to, or else
+     * $segment itself, recorded for the entries after it.
+     *
+     * A directory has one name and a file with one link has one name, so
+     * there the same identity is the same name, however it is folded -
+     * Unicode case and normalisation included. A link to a directory counts
+     * as a directory, since the walk descends into it. A file with more
+     * links may be reached under names the filesystem keeps apart, so it is
+     * folded only to a case variant, and only where the volume folds case
+     * (foldsCase()): its own other cases may be further links. A file is
+     * never folded to a spelling whose extension differs from $segment's,
+     * since shouldAnalyzeFile() judges the extension byte for byte and
+     * 'x.php' folded into an earlier 'X.PHP' would be dropped.
+     *
+     * @param array{dev: int, ino: int, nlink: int} $stat
+     */
+    private function unlistedSpelling(string $dir, string $segment, array $stat): string
+    {
+        $identity = $stat['dev'].':'.$stat['ino'];
+        $isDir = @is_dir($dir.'/'.$segment);
+        $extension = (new SplFileInfo($segment))->getExtension();
+
+        foreach ($this->unlistedSpellings[$dir.'/'][$identity] ?? [] as $spelling) {
+            if ($isDir || $spelling === $segment) {
+                return $spelling;
+            }
+
+            if ((new SplFileInfo($spelling))->getExtension() !== $extension) {
+                continue;
+            }
+
+            if ($stat['nlink'] === 1 || (strcasecmp($spelling, $segment) === 0 && self::foldsCase($dir))) {
+                return $spelling;
+            }
+        }
+
+        $this->unlistedSpellings[$dir.'/'][$identity][] = $segment;
+
+        return $segment;
+    }
+
+    /**
+     * Whether the volume holding $dir folds ASCII case, asked of $dir or the
+     * nearest directory above it whose name has a letter: the same file
+     * reached under that name with its case changed. A directory cannot be
+     * hard-linked, so unlike a file's other cases that answer is never
+     * another link. No lettered name, or one that cannot be stat'ed (above
+     * the base, outside open_basedir), answers no.
+     */
+    private static function foldsCase(string $dir): bool
+    {
+        for ($path = $dir; ($slash = strrpos($path, '/')) !== false; $path = substr($path, 0, $slash)) {
+            $name = substr($path, $slash + 1);
+            $other = strtolower($name) !== $name ? strtolower($name) : strtoupper($name);
+
+            if ($other !== $name) {
+                $identity = self::fileIdentity($path);
+
+                return $identity !== null && self::fileIdentity(substr($path, 0, $slash + 1).$other) === $identity;
+            }
+        }
+
+        return false;
     }
 
     /**
