@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Tests\Unit\Abstracts;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Abstracts\AbstractFileAnalyzer;
 use ShieldCI\AnalyzersCore\Contracts\ResultInterface;
@@ -2080,6 +2081,10 @@ class AbstractFileAnalyzerTest extends TestCase
      * error_reporting() says. A handler that throws would stop at the first
      * prefix outside the allowed list ('/usr', '/private') and never reach
      * the identity check at all.
+     *
+     * The walk now resolves every entry under a handler that swallows those
+     * warnings (#106), so the host sees none ('host'); the realpath()
+     * warnings are recorded from scanRoot() called directly ('warnings').
      */
     public function testTheIdentityCheckAddsNoWarningUnderOpenBasedir(): void
     {
@@ -2120,9 +2125,14 @@ class AbstractFileAnalyzerTest extends TestCase
                 return true;
             });
 
+            $scanRoot = new ReflectionMethod(ShieldCI\AnalyzersCore\Abstracts\AbstractFileAnalyzer::class, 'scanRoot');
+
             foreach (array_slice($argv, 3) as $entry) {
                 $warnings = [];
-                $out[] = $probe->scan($argv[2], $entry) + ['warnings' => $warnings];
+                $result = $probe->scan($argv[2], $entry) + ['host' => $warnings];
+                $warnings = [];
+                $scanRoot->invoke(null, $argv[2], $entry);
+                $out[] = $result + ['warnings' => $warnings];
             }
 
             echo 'SHIELDCI-PROBE ' . json_encode($out) . "\n";
@@ -2147,9 +2157,15 @@ class AbstractFileAnalyzerTest extends TestCase
         $marked = array_values(array_filter($lines, static fn (string $line): bool => str_starts_with($line, 'SHIELDCI-PROBE ')));
         $this->assertSame(0, $status, implode("\n", $lines));
         $this->assertCount(1, $marked, implode("\n", $lines));
-        /** @var list<array{files: list<string>, missing: list<string>, warnings: list<string>}> $record */
+        /** @var list<array{files: list<string>, missing: list<string>, host: list<string>, warnings: list<string>}> $record */
         $record = json_decode(substr($marked[0], strlen('SHIELDCI-PROBE ')), true);
         $appFiles = [$base . '/app/Http/Controllers/C.php', $base . '/app/Providers/P.php'];
+
+        // The walk lets none of them reach the host's handler.
+        foreach ($record as $i => $result) {
+            $this->assertSame([], $result['host'], "entry {$entries[$i]}");
+            unset($record[$i]['host']);
+        }
 
         // Entries that never reach realpath() raise nothing.
         $this->assertSame(['files' => $appFiles, 'missing' => [], 'warnings' => []], $record[0]);
@@ -3254,11 +3270,17 @@ class AbstractFileAnalyzerTest extends TestCase
     }
 
     /**
-     * Run WalkingFileAnalyzer::analyze() over $paths in a php subprocess
-     * whose open_basedir allows only the repository and $allowed, under a
-     * handler that throws for every warning, '@'-silenced or not. Answers
-     * the result as '<status>: <message>' and the files a second walk
-     * yields, relative to $base.
+     * Run $analyzer's analyze() over $paths in a php subprocess whose
+     * open_basedir allows only the repository and $allowed. Answers the
+     * result as '<status>: <message>', the entries that walk recorded
+     * missing, the files a second walk under the same handler yields,
+     * relative to $base, and the child's whole output.
+     *
+     * $handler picks the error handler analyze() runs under: 'strict'
+     * throws for every warning, '@'-silenced or not; 'laravel' throws only
+     * for one error_reporting() lets through, as Laravel's HandleExceptions
+     * does; 'none' installs none, so a warning is printed and an SPL method
+     * that converts it throws instead.
      *
      * Every run also checks that the walk left nothing behind: no directory
      * listings held, and the child's own handler back in place.
@@ -3273,10 +3295,17 @@ class AbstractFileAnalyzerTest extends TestCase
      *
      * @param  array<string>  $paths
      * @param  array<string>  $allowed
-     * @return array{result: string, files: list<string>}
+     * @param  'strict'|'laravel'|'none'  $handler
+     * @param  class-string<ConcreteFileAnalyzer>  $analyzer
+     * @return array{result: string, missing: list<string>, files: list<string>, output: string}
      */
-    private function analyzeUnderOpenBasedir(string $base, array $paths, array $allowed): array
-    {
+    private function analyzeUnderOpenBasedir(
+        string $base,
+        array $paths,
+        array $allowed,
+        string $handler = 'strict',
+        string $analyzer = WalkingFileAnalyzer::class,
+    ): array {
         $repo = dirname(__DIR__, 3);
         $basedirs = [$repo];
 
@@ -3293,23 +3322,37 @@ class AbstractFileAnalyzerTest extends TestCase
         }
 
         $script = <<<'PHP'
-            [, $repo, $base, $paths] = $argv;
+            [, $repo, $base, $paths, $mode, $class] = $argv;
             require $repo . '/vendor/autoload.php';
             require $repo . '/tests/Unit/Abstracts/AbstractFileAnalyzerTest.php';
 
-            $analyzer = new ShieldCI\AnalyzersCore\Tests\Unit\Abstracts\WalkingFileAnalyzer();
+            $analyzer = new $class();
             $analyzer->setBasePath($base);
             $analyzer->setPaths(json_decode($paths, true));
 
             error_reporting(E_ALL);
-            $handler = static function (int $severity, string $message): bool {
-                throw new ErrorException($message, 0, $severity);
+            $handler = match ($mode) {
+                'strict' => static function (int $severity, string $message): bool {
+                    throw new ErrorException($message, 0, $severity);
+                },
+                'laravel' => static function (int $severity, string $message): bool {
+                    if (error_reporting() & $severity) {
+                        throw new ErrorException($message, 0, $severity);
+                    }
+
+                    return false;
+                },
+                'none' => null,
             };
-            set_error_handler($handler);
+
+            if ($handler !== null) {
+                set_error_handler($handler);
+            }
 
             $result = $analyzer->analyze();
             $listings = (new ReflectionProperty(ShieldCI\AnalyzersCore\Abstracts\AbstractFileAnalyzer::class, 'listings'))->getValue($analyzer);
             echo "\nRESULT> ", $result->getStatus()->value, ': ', $result->getMessage(), "\n";
+            echo "MISSING> ", json_encode($analyzer->getMissingPathsPublic()), "\n";
             echo "LISTINGS> ", count($listings), "\n";
             echo "HANDLER> ", set_error_handler(null) === $handler ? 'kept' : 'changed', "\n";
             restore_error_handler();
@@ -3329,7 +3372,7 @@ class AbstractFileAnalyzerTest extends TestCase
             '-d', 'display_errors=stderr',
             '-d', 'display_startup_errors=0',
             '-d', 'xdebug.mode=off',
-            '-r', $script, $repo, $base, (string) json_encode($paths),
+            '-r', $script, $repo, $base, (string) json_encode($paths), $handler, $analyzer,
         ])) . ' 2>&1';
 
         exec($command, $output, $status);
@@ -3338,7 +3381,7 @@ class AbstractFileAnalyzerTest extends TestCase
 
         $answers = [];
 
-        foreach (['RESULT', 'LISTINGS', 'HANDLER', 'FILES'] as $marker) {
+        foreach (['RESULT', 'MISSING', 'LISTINGS', 'HANDLER', 'FILES'] as $marker) {
             $lines = array_values(preg_grep('/^' . $marker . '> /', $output) ?: []);
             $this->assertCount(1, $lines, $marker . "\n" . $all);
             $answers[$marker] = substr($lines[0], strlen($marker) + 2);
@@ -3349,8 +3392,10 @@ class AbstractFileAnalyzerTest extends TestCase
 
         /** @var list<string> $files */
         $files = json_decode($answers['FILES'], true);
+        /** @var list<string> $missing */
+        $missing = json_decode($answers['MISSING'], true);
 
-        return ['result' => $answers['RESULT'], 'files' => $files];
+        return ['result' => $answers['RESULT'], 'missing' => $missing, 'files' => $files, 'output' => $all];
     }
 
     /**
@@ -3418,6 +3463,328 @@ class AbstractFileAnalyzerTest extends TestCase
         } finally {
             unlink($project . '/shared');
         }
+    }
+
+    // =========================================================================
+    // Paths open_basedir refuses - ShieldCI/analyzers-core#106
+    // =========================================================================
+
+    /**
+     * An entry outside open_basedir that exists. file_exists(), is_dir() and
+     * is_file() all warn for it, and under Laravel's handler the first one
+     * ended the analysis in an Error result, so 'app' was never analysed.
+     * The entry is recorded missing, as file_exists() answers with no handler.
+     *
+     * @param  'strict'|'laravel'|'none'  $handler
+     */
+    #[DataProvider('openBasedirHandlers')]
+    public function testAnExistingEntryOutsideOpenBasedirIsRecordedMissing(string $handler): void
+    {
+        $project = $this->openBasedirProject();
+        mkdir($this->testDir . '/outside');
+        file_put_contents($this->testDir . '/outside/O.php', "<?php\n");
+
+        $answer = $this->analyzeUnderOpenBasedir($project, ['app', '../outside'], [$project], $handler, MarkerFileAnalyzer::class);
+
+        $this->assertSame('failed: MARKER in app/A.php', $answer['result'], $answer['output']);
+        $this->assertSame(['../outside'], $answer['missing']);
+        $this->assertSame(['app/A.php'], $answer['files']);
+        $this->assertStringNotContainsString('open_basedir', $answer['output']);
+    }
+
+    /**
+     * The same for an entry outside open_basedir that does not exist:
+     * open_basedir refuses it before the filesystem is asked.
+     *
+     * @param  'strict'|'laravel'|'none'  $handler
+     */
+    #[DataProvider('openBasedirHandlers')]
+    public function testAMissingEntryOutsideOpenBasedirIsRecordedMissing(string $handler): void
+    {
+        $project = $this->openBasedirProject();
+
+        $answer = $this->analyzeUnderOpenBasedir($project, ['app', '../nope'], [$project], $handler, MarkerFileAnalyzer::class);
+
+        $this->assertSame('failed: MARKER in app/A.php', $answer['result'], $answer['output']);
+        $this->assertSame(['../nope'], $answer['missing']);
+        $this->assertSame(['app/A.php'], $answer['files']);
+        $this->assertStringNotContainsString('open_basedir', $answer['output']);
+    }
+
+    /**
+     * A symlink to a directory outside open_basedir, inside a walked
+     * directory. hasChildren() warned for it, which Laravel's handler turned
+     * into an Error result; with no handler, SplFileInfo::isFile() threw.
+     * It is skipped quietly, as a link to a directory is never followed.
+     *
+     * @param  'strict'|'laravel'|'none'  $handler
+     */
+    #[DataProvider('openBasedirHandlers')]
+    public function testALinkToADirectoryOutsideOpenBasedirIsSkipped(string $handler): void
+    {
+        $project = $this->openBasedirProject();
+        mkdir($this->testDir . '/outside');
+        mkdir($project . '/lnk');
+        file_put_contents($project . '/lnk/L.php', "<?php\n");
+        symlink($this->testDir . '/outside', $project . '/lnk/link');
+
+        try {
+            $answer = $this->analyzeUnderOpenBasedir($project, ['lnk', 'app'], [$project], $handler, MarkerFileAnalyzer::class);
+
+            $this->assertSame('failed: MARKER in app/A.php', $answer['result'], $answer['output']);
+            $this->assertSame([], $answer['missing']);
+            $this->assertSame(['app/A.php', 'lnk/L.php'], $answer['files']);
+            $this->assertStringNotContainsString('open_basedir', $answer['output']);
+        } finally {
+            unlink($project . '/lnk/link');
+        }
+    }
+
+    /**
+     * A symlink to a PHP file outside open_basedir is skipped the same way:
+     * it cannot be read, so yielding it would only move the failure into
+     * the analyzer.
+     *
+     * @param  'strict'|'laravel'|'none'  $handler
+     */
+    #[DataProvider('openBasedirHandlers')]
+    public function testALinkToAFileOutsideOpenBasedirIsSkipped(string $handler): void
+    {
+        $project = $this->openBasedirProject();
+        mkdir($this->testDir . '/outside');
+        file_put_contents($this->testDir . '/outside/O.php', "<?php\n// MARKER\n");
+        mkdir($project . '/lnk');
+        symlink($this->testDir . '/outside/O.php', $project . '/lnk/O.php');
+
+        try {
+            $answer = $this->analyzeUnderOpenBasedir($project, ['lnk', 'app'], [$project], $handler, MarkerFileAnalyzer::class);
+
+            $this->assertSame('failed: MARKER in app/A.php', $answer['result'], $answer['output']);
+            $this->assertSame([], $answer['missing']);
+            $this->assertSame(['app/A.php'], $answer['files']);
+            $this->assertStringNotContainsString('open_basedir', $answer['output']);
+        } finally {
+            unlink($project . '/lnk/O.php');
+        }
+    }
+
+    /**
+     * The base path itself outside open_basedir: every entry under it is
+     * refused, and recorded missing rather than failing the analysis.
+     *
+     * @param  'strict'|'laravel'|'none'  $handler
+     */
+    #[DataProvider('openBasedirHandlers')]
+    public function testEntriesUnderABaseWhollyOutsideOpenBasedirAreRecordedMissing(string $handler): void
+    {
+        $project = $this->openBasedirProject();
+        $elsewhere = $this->testDir . '/elsewhere';
+        mkdir($elsewhere);
+
+        $answer = $this->analyzeUnderOpenBasedir($project, ['app'], [$elsewhere], $handler, MarkerFileAnalyzer::class);
+
+        $this->assertSame('passed: no MARKER', $answer['result'], $answer['output']);
+        $this->assertSame(['app'], $answer['missing']);
+        $this->assertSame([], $answer['files']);
+        $this->assertStringNotContainsString('open_basedir', $answer['output']);
+    }
+
+    /**
+     * Under a handler that throws even for an '@'-silenced warning, a
+     * refused link inside a walked directory must still be dropped, never
+     * yielded. Thrown from the filter during next(), the exception was
+     * cleared by CATCH_GET_CHILD (which covers the iterator's whole move,
+     * not just getChildren()), so the link was taken for a leaf and yielded
+     * as a file; met first, at rewind(), it ended the analysis instead.
+     * Which one happened depended on readdir order, so both are pinned:
+     * 'app' meets its links after zero.php, 'only' holds nothing else.
+     */
+    public function testRefusedLinksInAWalkAreDroppedUnderAHandlerThatIgnoresSilencing(): void
+    {
+        $project = $this->openBasedirProject();
+        $outside = $this->testDir . '/outside';
+        mkdir($outside . '/od', 0777, true);
+        file_put_contents($outside . '/O.php', "<?php\n");
+        file_put_contents($project . '/app/zero.php', "<?php\n");
+        mkdir($project . '/only');
+        $links = [
+            $project . '/app/linkdir' => $outside . '/od',
+            $project . '/app/linkfile.php' => $outside . '/O.php',
+            $project . '/only/linkfile.php' => $outside . '/O.php',
+        ];
+
+        foreach ($links as $link => $target) {
+            symlink($target, $link);
+        }
+
+        try {
+            $answer = $this->analyzeUnderOpenBasedir($project, ['app'], [$project]);
+
+            $this->assertSame('passed: 2 files analyzed', $answer['result'], $answer['output']);
+            $this->assertSame(['app/A.php', 'app/zero.php'], $answer['files']);
+
+            $answer = $this->analyzeUnderOpenBasedir($project, ['only'], [$project]);
+
+            $this->assertSame('passed: 0 files analyzed', $answer['result'], $answer['output']);
+            $this->assertSame([], $answer['files']);
+        } finally {
+            array_map('unlink', array_keys($links));
+        }
+    }
+
+    /**
+     * A handler that throws even for an '@'-silenced warning used to get an
+     * Error result for every refused root, since the root stats were only
+     * silenced. They run under a swallow-all handler now, as the respelling
+     * and the walk's filter do.
+     */
+    public function testARefusedRootUnderAHandlerThatIgnoresSilencingIsRecordedMissing(): void
+    {
+        $project = $this->openBasedirProject();
+        mkdir($this->testDir . '/outside');
+
+        $answer = $this->analyzeUnderOpenBasedir($project, ['app', '../outside'], [$project], 'strict', MarkerFileAnalyzer::class);
+
+        $this->assertSame('failed: MARKER in app/A.php', $answer['result'], $answer['output']);
+        $this->assertSame(['../outside'], $answer['missing']);
+    }
+
+    /**
+     * A configured entry that is a link to a directory outside open_basedir.
+     *
+     * @param  'strict'|'laravel'|'none'  $handler
+     */
+    #[DataProvider('openBasedirHandlers')]
+    public function testARootLinkOutOfOpenBasedirIsRecordedMissing(string $handler): void
+    {
+        $project = $this->openBasedirProject();
+        mkdir($this->testDir . '/outside');
+        file_put_contents($this->testDir . '/outside/O.php', "<?php\n// MARKER\n");
+        symlink($this->testDir . '/outside', $project . '/ext');
+
+        try {
+            $answer = $this->analyzeUnderOpenBasedir($project, ['app', 'ext'], [$project], $handler, MarkerFileAnalyzer::class);
+
+            $this->assertSame('failed: MARKER in app/A.php', $answer['result'], $answer['output']);
+            $this->assertSame(['ext'], $answer['missing']);
+            $this->assertSame(['app/A.php'], $answer['files']);
+            $this->assertStringNotContainsString('open_basedir', $answer['output']);
+        } finally {
+            unlink($project . '/ext');
+        }
+    }
+
+    /**
+     * An absolute entry outside the base, which open_basedir also refuses:
+     * remainderUnderBase()'s realpath() warns for it. Recorded missing, as
+     * it is with no open_basedir at all (#99).
+     *
+     * @param  'strict'|'laravel'|'none'  $handler
+     */
+    #[DataProvider('openBasedirHandlers')]
+    public function testAnAbsoluteEntryOutsideOpenBasedirIsRecordedMissing(string $handler): void
+    {
+        if (! is_dir('/usr/lib')) {
+            $this->markTestSkipped('needs /usr/lib');
+        }
+
+        $project = $this->openBasedirProject();
+
+        $answer = $this->analyzeUnderOpenBasedir($project, ['app', '/usr/lib'], [$project], $handler, MarkerFileAnalyzer::class);
+
+        $this->assertSame('failed: MARKER in app/A.php', $answer['result'], $answer['output']);
+        $this->assertSame(['/usr/lib'], $answer['missing']);
+        $this->assertSame(['app/A.php'], $answer['files']);
+        $this->assertStringNotContainsString('open_basedir', $answer['output']);
+    }
+
+    /**
+     * The fences round the walk's filesystem calls (#106) swallow every
+     * warning raised inside them, so nothing a subclass can override may run
+     * inside one: getBasePath() before the walk, isExcludedPath() through
+     * excludesEntry() for a missing entry ('ap') and through
+     * recordUnreadablePath() for an unreadable root ('top') and an
+     * unreadable nested directory ('app/locked'). Each warning the subclass
+     * raises must reach the host's handler.
+     */
+    public function testEverySubclassWarningDuringTheWalkReachesTheHostHandler(): void
+    {
+        mkdir($this->testDir . '/app/locked', 0777, true);
+        mkdir($this->testDir . '/top');
+        file_put_contents($this->testDir . '/app/A.php', "<?php\n");
+        $this->lock($this->testDir . '/app/locked');
+        $this->lock($this->testDir . '/top');
+
+        $analyzer = new WarningFileAnalyzer();
+        $analyzer->setBasePath($this->testDir)->setPaths(['app', 'ap', 'top']);
+
+        /** @var array<string, int> $seen */
+        $seen = [];
+        set_error_handler(static function (int $severity, string $message) use (&$seen): bool {
+            $seen[$message] = ($seen[$message] ?? 0) + 1;
+
+            return true;
+        });
+
+        try {
+            $files = $this->pathnamesOf($analyzer->getFilesToAnalyzePublic());
+        } finally {
+            restore_error_handler();
+        }
+
+        $this->assertSame([$this->testDir . '/app/A.php'], $files);
+        $this->assertSame(['ap'], $analyzer->getMissingPathsPublic());
+        $this->assertSame([$this->testDir . '/app/locked', $this->testDir . '/top'], $analyzer->getUnreadablePathsPublic());
+        $this->assertGreaterThan(0, $analyzer->raised['excluded'] ?? 0);
+        $this->assertGreaterThan(0, $analyzer->raised['base'] ?? 0);
+        $this->assertSame($analyzer->raised['excluded'], $seen['SUBCLASS:excluded'] ?? 0);
+        $this->assertSame($analyzer->raised['base'], $seen['SUBCLASS:base'] ?? 0);
+    }
+
+    /**
+     * @return array<string, array{'strict'|'laravel'|'none'}>
+     */
+    public static function openBasedirHandlers(): array
+    {
+        return [
+            'handler that ignores silencing' => ['strict'],
+            'Laravel-style handler' => ['laravel'],
+            'no handler' => ['none'],
+        ];
+    }
+
+    /**
+     * The fixture the #106 tests share, and their control: with nothing
+     * refused, the finding in app/A.php fires and nothing is missing.
+     */
+    public function testTheOpenBasedirFixtureFindsTheMarkerWhenNothingIsRefused(): void
+    {
+        $project = $this->openBasedirProject();
+        mkdir($project . '/lnk');
+        mkdir($this->testDir . '/outside');
+        symlink($this->testDir . '/outside', $project . '/lnk/link');
+
+        try {
+            $answer = $this->analyzeUnderOpenBasedir($project, ['lnk', 'app'], [$this->testDir], 'laravel', MarkerFileAnalyzer::class);
+
+            $this->assertSame('failed: MARKER in app/A.php', $answer['result'], $answer['output']);
+            $this->assertSame([], $answer['missing']);
+            $this->assertSame(['app/A.php'], $answer['files']);
+        } finally {
+            unlink($project . '/lnk/link');
+        }
+    }
+
+    /**
+     * <testDir>/proj/app/A.php, holding MARKER.
+     */
+    private function openBasedirProject(): string
+    {
+        $project = $this->testDir . '/proj';
+        mkdir($project . '/app', 0777, true);
+        file_put_contents($project . '/app/A.php', "<?php\n// MARKER\n");
+
+        return $project;
     }
 
     public function testANulByteInTheBasePathStillPasses(): void
@@ -3883,5 +4250,54 @@ class WalkingFileAnalyzer extends ConcreteFileAnalyzer
     protected function runAnalysis(): ResultInterface
     {
         return $this->passed(count($this->getPhpFiles()) . ' files analyzed');
+    }
+}
+
+// Fails on every walked file that holds MARKER, as a real analyzer reports a
+// finding, so a test can tell the walk reached the file and analysed it.
+class MarkerFileAnalyzer extends ConcreteFileAnalyzer
+{
+    protected function runAnalysis(): ResultInterface
+    {
+        $found = [];
+
+        foreach ($this->getPhpFiles() as $file) {
+            if (str_contains((string) file_get_contents($file), 'MARKER')) {
+                $found[] = $this->getRelativePath($file);
+            }
+        }
+
+        return $found === []
+            ? $this->passed('no MARKER')
+            : $this->failed('MARKER in ' . implode(', ', $found));
+    }
+}
+
+// Raises a warning from each method a subclass can override on the walk's
+// way, counting them, so a test can tell whether every one reached the host's
+// handler or a fence swallowed some.
+class WarningFileAnalyzer extends ConcreteFileAnalyzer
+{
+    /** @var array<string, int> */
+    public array $raised = [];
+
+    protected function isExcludedPath(string $path): bool
+    {
+        $this->raise('excluded');
+
+        return parent::isExcludedPath($path);
+    }
+
+    protected function getBasePath(): string
+    {
+        $this->raise('base');
+
+        return parent::getBasePath();
+    }
+
+    private function raise(string $what): void
+    {
+        $this->raised[$what] = ($this->raised[$what] ?? 0) + 1;
+        trigger_error('SUBCLASS:' . $what, E_USER_WARNING);
     }
 }
