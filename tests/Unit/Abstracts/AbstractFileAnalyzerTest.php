@@ -7,7 +7,7 @@ namespace ShieldCI\AnalyzersCore\Tests\Unit\Abstracts;
 use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Abstracts\AbstractFileAnalyzer;
 use ShieldCI\AnalyzersCore\Contracts\ResultInterface;
-use ShieldCI\AnalyzersCore\Enums\{Category, Severity};
+use ShieldCI\AnalyzersCore\Enums\{Category, Severity, Status};
 use ShieldCI\AnalyzersCore\Support\FileParser;
 use ShieldCI\AnalyzersCore\ValueObjects\AnalyzerMetadata;
 
@@ -2301,6 +2301,943 @@ class AbstractFileAnalyzerTest extends TestCase
         );
     }
 
+    // =========================================================================
+    // Entries differing only in case - ShieldCI/analyzers-core#104
+    //
+    // On a case-insensitive filesystem (APFS, NTFS) 'app' and 'App' name one
+    // directory, but each entry was walked under its typed spelling, so every
+    // file came out twice and an 'app/Http/*' exclude missed the 'App/...'
+    // copies. The cases that need such a filesystem skip elsewhere; CI runs
+    // on a case-sensitive one, where the rest still pin the helpers down.
+    // =========================================================================
+
+    public function testCaseVariantEntriesYieldEachFileOnce(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $analyzer = $this->caseAnalyzer(['app', 'App']);
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+        $this->assertSame($this->overlapExpected(), $this->pathnamesOf($analyzer->getFilesToAnalyzePublic()));
+    }
+
+    public function testCaseVariantEntriesYieldEachFileOnceWhicheverComesFirst(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($this->caseAnalyzer(['App', 'app'])));
+    }
+
+    public function testANestedCaseVariantEntryYieldsEachFileOnce(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($this->caseAnalyzer(['app', 'App/Http'])));
+    }
+
+    public function testAMiscasedEntryAloneYieldsTheOnDiskSpelling(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($this->caseAnalyzer(['App'])));
+    }
+
+    public function testRelativeExcludesApplyToMiscasedEntries(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $provider = [$this->testDir . '/unreadable-project/app/Providers/P.php'];
+
+        foreach ([['app', 'App'], ['App', 'app'], ['App'], ['APP/http', 'app/providers']] as $paths) {
+            $analyzer = $this->caseAnalyzer($paths);
+            $analyzer->setExcludePatterns(['app/Http/*']);
+
+            $this->assertSame($provider, $analyzer->getPhpFilesPublic(), implode(', ', $paths));
+        }
+    }
+
+    public function testAMiscasedFileEntryYieldsTheFileOnce(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $analyzer = $this->caseAnalyzer(['app/Providers/p.php', 'app']);
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+        $this->assertSame($this->overlapExpected()[1], $analyzer->getPhpFilesPublic()[0]);
+    }
+
+    public function testAMiscasedAbsoluteEntryUnderTheBaseYieldsTheOnDiskSpelling(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->testDir . '/unreadable-project';
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($this->caseAnalyzer([$project . '/App'])));
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($this->caseAnalyzer([$project . '/App', 'app'])));
+    }
+
+    public function testAMiscasedBaseIsKeptAsStored(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $this->unreadableProject();
+        // Yielded paths must keep starting with the base as stored, or
+        // relativeTo() misses and relative excludes stop applying.
+        $base = $this->testDir . '/UNREADABLE-project';
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($base);
+        $analyzer->setPaths(['app', 'App']);
+        $analyzer->setExcludePatterns(['app/Http/*']);
+
+        $this->assertSame([$base . '/app/Providers/P.php'], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAnUnreadableDirectoryReachedThroughCaseVariantsIsRecordedOnce(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app', 'App/providers']);
+
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$project . '/app/Providers'], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testCaseVariantsOfAMissingEntryAreRecordedOnceAsFirstConfigured(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $analyzer = $this->caseAnalyzer(['App/Missing', 'app/Missing']);
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame(['App/Missing'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAMiscasedFileEntryWithAHardLinkBesideItPicksTheCaseVariant(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $analyzer = $this->caseAnalyzer(['app/Providers/p.php', 'app']);
+        $project = $this->testDir . '/unreadable-project';
+        // Q.php is the same file as P.php: matching by identity alone finds
+        // two names, and only P.php is the typed name in another case.
+        link($project . '/app/Providers/P.php', $project . '/app/Providers/Q.php');
+
+        // The file entry is walked first, so its pick is the first path
+        // yielded: 'Q.php' here would mean the hard link was chosen.
+        $files = $analyzer->getPhpFilesPublic();
+        $this->assertSame($project . '/app/Providers/P.php', $files[0]);
+        $this->assertSame(
+            [$project . '/app/Http/Controllers/C.php', $project . '/app/Providers/P.php', $project . '/app/Providers/Q.php'],
+            $this->sortedPhpFiles($analyzer)
+        );
+    }
+
+    public function testAMiscasedSymlinkEntryKeepsTheLinkSpelling(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        symlink($project . '/app', $project . '/applink');
+
+        try {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($project);
+            $analyzer->setPaths(['AppLink', 'applink']);
+            $analyzer->setExcludePatterns(['applink/Http/*']);
+
+            $this->assertSame([$project . '/applink/Providers/P.php'], $analyzer->getPhpFilesPublic());
+        } finally {
+            unlink($project . '/applink');
+        }
+    }
+
+    public function testCaseVariantDirectoriesStayDistinctOnACaseSensitiveFilesystem(): void
+    {
+        if ($this->isCaseInsensitiveFilesystem()) {
+            $this->markTestSkipped('needs a case-sensitive filesystem, where App and app can sit side by side');
+        }
+
+        $project = $this->unreadableProject();
+        mkdir($project . '/App');
+        file_put_contents($project . '/App/U.php', "<?php\n");
+
+        $both = [$project . '/App/U.php', $project . '/app/Http/Controllers/C.php', $project . '/app/Providers/P.php'];
+
+        $this->assertSame($both, $this->sortedPhpFiles($this->caseAnalyzer(['app', 'App'])));
+        $this->assertSame([$project . '/App/U.php'], $this->caseAnalyzer(['App'])->getPhpFilesPublic());
+    }
+
+    public function testAMiscasedEntryNamesNothingOnACaseSensitiveFilesystem(): void
+    {
+        if ($this->isCaseInsensitiveFilesystem()) {
+            $this->markTestSkipped('needs a case-sensitive filesystem');
+        }
+
+        $analyzer = $this->caseAnalyzer(['App', 'app/providers']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame(['App', 'app/providers'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testOnDiskSpellingLeavesWhatItCannotMatchAsTyped(): void
+    {
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+        $project = $this->unreadableProject();
+
+        // [base, full path, expected]
+        $cases = [
+            // The base itself, and anything not under it, is never touched.
+            [$project, $project, $project],
+            [$project, $this->testDir . '/src', $this->testDir . '/src'],
+            // Already on-disk spelling.
+            [$project, $project . '/app/Http/Controllers', $project . '/app/Http/Controllers'],
+            [$project . '/', $project . '/app/Providers/P.php', $project . '/app/Providers/P.php'],
+            // A segment that names nothing keeps itself and the rest as typed.
+            [$project, $project . '/app/Nope/Deeper', $project . '/app/Nope/Deeper'],
+            // A '..' segment stops the respelling: it and the rest stay as typed.
+            [$project, $project . '/app/../app/Http', $project . '/app/../app/Http'],
+            // A root base: every path is under it.
+            ['/', $this->testDir, $this->testDir],
+        ];
+
+        foreach ($cases as [$base, $path, $expected]) {
+            $this->assertSame($expected, $method->invoke(new ConcreteFileAnalyzer(), $base, $path, false), "onDiskSpelling('{$base}', '{$path}')");
+        }
+    }
+
+    public function testOnDiskSpellingKeepsTheTypedRestBelowAnUnreadableDirectory(): void
+    {
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app');
+
+        $this->assertSame($project . '/app/providers', $method->invoke(new ConcreteFileAnalyzer(), $project, $project . '/app/providers', false));
+    }
+
+    public function testOnDiskSpellingRewritesMiscasedSegments(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+        $project = $this->unreadableProject();
+
+        $this->assertSame($project . '/app/Http', $method->invoke(new ConcreteFileAnalyzer(), $project, $project . '/APP/hTTP', false));
+        $this->assertSame($project . '/app/Nope/x', $method->invoke(new ConcreteFileAnalyzer(), $project, $project . '/App/Nope/x', false));
+        // Nothing at or past a '.' or '..' is listed or respelled.
+        $this->assertSame($project . '/app/../APP', $method->invoke(new ConcreteFileAnalyzer(), $project, $project . '/App/../APP', false));
+        // On Windows '\' separates too, and is kept where it was typed. On
+        // POSIX 'App\Http' is one name, which does not exist.
+        $this->assertSame($project . '/app\\Http', $method->invoke(new ConcreteFileAnalyzer(), $project, $project . '/App\\HTTP', true));
+        $this->assertSame($project . '/App\\HTTP', $method->invoke(new ConcreteFileAnalyzer(), $project, $project . '/App\\HTTP', false));
+    }
+
+    public function testListedSpellingPicksTheOneSameFileName(): void
+    {
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'listedSpelling');
+        // Stands in for lstat(): the name's file identity, null when it
+        // cannot be stat'ed. 'APP' and 'app' are one file here, as on a
+        // case-insensitive filesystem.
+        $identities = ['app' => '1:10', 'APP' => '1:10', 'App' => '1:10', 'P.php' => '1:20', 'p.php' => '1:20', 'Q.php' => '1:20', 'x' => '1:30', 'É' => '1:40', 'é' => '1:40', 'y' => '1:40'];
+        $identity = static fn (string $name): ?string => $identities[$name] ?? null;
+        // A host whose lstat() leaves ino at 0 (older Windows builds): every
+        // name looks like the same file, so the name has to decide.
+        $blind = static fn (string $name): ?string => in_array(strtolower($name), ['.', '..', 'app', 'apple', 'p.php'], true) ? '1:0' : null;
+
+        // [segment, listing, identity, expected]
+        $cases = [
+            ['app', ['.', '..', 'app', 'x'], $identity, 'app'],
+            // On a case-sensitive filesystem a listed name is never folded.
+            ['App', ['.', '..', 'app', 'App'], $identity, 'App'],
+            ['APP', ['.', '..', 'app', 'x'], $identity, 'app'],
+            // Same file under two names (a hard link): the case variant wins.
+            ['p.php', ['.', '..', 'P.php', 'Q.php'], $identity, 'P.php'],
+            // Same file under names that are no ASCII case variant: unsure.
+            ['É', ['.', '..', 'é', 'y'], $identity, null],
+            // Unique by identity even where ASCII folding cannot see it.
+            ['É', ['.', '..', 'é', 'x'], $identity, 'é'],
+            // The typed name cannot be stat'ed: missing, or behind a
+            // directory that cannot be searched.
+            ['nope', ['.', '..', 'app'], $identity, null],
+            // It can, but no listed name is that file (an unreadable parent
+            // lists nothing).
+            ['x', [], $identity, null],
+            ['APP', ['.', '..', 'P.php'], $identity, null],
+            ['APP', ['.', '..', 'app', 'apple'], $blind, 'app'],
+            ['p.php', ['.', '..', 'app', 'apple'], $blind, null],
+            // An empty segment is never matched, though '.' is its directory.
+            ['', ['.', '..', 'app'], static fn (string $name): string => in_array($name, ['', '.'], true) ? '1:1' : '1:2', null],
+        ];
+
+        foreach ($cases as $i => [$segment, $listing, $fn, $expected]) {
+            $this->assertSame($expected, $method->invoke(null, $segment, $listing, $fn), "case {$i}: listedSpelling('{$segment}')");
+        }
+    }
+
+    public function testTheIdentityFallbackNeverStatsDotOrDotDot(): void
+    {
+        // '<dir>/..' may be outside open_basedir, where even file_exists()
+        // warns. A stub answering null for them would hide the call, so
+        // record every name asked about instead.
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'listedSpelling');
+        $calls = [];
+        $identity = static function (string $name) use (&$calls): string {
+            $calls[] = $name;
+
+            return in_array($name, ['É', 'é'], true) ? '1:40' : '1:' . crc32($name);
+        };
+
+        $this->assertSame('é', $method->invoke(null, 'É', ['.', '..', 'é', 'x'], $identity));
+        $this->assertSame(['É', 'é', 'x'], $calls);
+    }
+
+    public function testListedSpellingStatsOnlyTheCaseVariantsWhenOneIsTheFile(): void
+    {
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'listedSpelling');
+        $listing = ['.', '..', 'Target.php'];
+
+        for ($i = 0; $i < 1000; $i++) {
+            $listing[] = "f{$i}.php";
+        }
+
+        $calls = [];
+        $identity = static function (string $name) use (&$calls): string {
+            $calls[] = $name;
+
+            return strcasecmp($name, 'target.php') === 0 ? '1:1' : '1:' . crc32($name);
+        };
+
+        // One lstat for the typed name, one for its one case variant - not
+        // one per sibling.
+        $this->assertSame('Target.php', $method->invoke(null, 'target.php', $listing, $identity));
+        $this->assertSame(['target.php', 'Target.php'], $calls);
+    }
+
+    public function testFileIdentityAnswersNullOnlyForANameThatIsNotThere(): void
+    {
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'fileIdentity');
+        $project = $this->unreadableProject();
+        symlink($project . '/nowhere', $project . '/dangling');
+
+        try {
+            $this->assertNull($method->invoke(null, $project . '/missing'));
+            $this->assertNull($method->invoke(null, $project . '/missing/deeper'));
+
+            $stat = lstat($project . '/app');
+            $this->assertIsArray($stat);
+            $this->assertSame($stat['dev'] . ':' . $stat['ino'], $method->invoke(null, $project . '/app'));
+            // A dangling link names something: the link itself.
+            $this->assertIsString($method->invoke(null, $project . '/dangling'));
+            $this->assertNotSame($method->invoke(null, $project . '/app'), $method->invoke(null, $project . '/dangling'));
+        } finally {
+            unlink($project . '/dangling');
+        }
+    }
+
+    public function testExcludesAlsoMatchTheTypedSpellingOfARespelledRoot(): void
+    {
+        // Set by hand so this runs on a case-sensitive filesystem too, where
+        // no walk ever respells a root.
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath('/p');
+        (new \ReflectionProperty(AbstractFileAnalyzer::class, 'typedRoots'))
+            ->setValue($analyzer, ['/p/app' => ['/p/App' => true, '/p/APP' => true]]);
+        $typedSpellings = new \ReflectionMethod(AbstractFileAnalyzer::class, 'typedSpellings');
+
+        $this->assertSame(['/p/App/Http/C.php', '/p/APP/Http/C.php'], $typedSpellings->invoke($analyzer, '/p/app/Http/C.php'));
+        $this->assertSame(['/p/App', '/p/APP'], $typedSpellings->invoke($analyzer, '/p/app'));
+        // Only on a segment boundary: 'apple.php' is not under 'app'.
+        $this->assertSame([], $typedSpellings->invoke($analyzer, '/p/apple.php'));
+        $this->assertSame([], $typedSpellings->invoke($analyzer, '/p/src/A.php'));
+
+        $analyzer->setExcludePatterns(['APP/Http/*']);
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic(new \SplFileInfo('/p/app/Http/C.php')));
+        $this->assertTrue($analyzer->shouldAnalyzeFilePublic(new \SplFileInfo('/p/app/Providers/P.php')));
+
+        $analyzer->setExcludePatterns(['app/Http/*']);
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic(new \SplFileInfo('/p/app/Http/C.php')));
+    }
+
+    public function testAMissingEntryUnderAThrowingErrorHandlerIsStillRecorded(): void
+    {
+        $project = $this->unreadableProject();
+        file_put_contents($project . '/app/A.php', "<?php\n");
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app', 'app/Repositories']);
+
+        $this->withThrowingErrorHandler(function () use ($analyzer, $project): void {
+            $this->assertContains($project . '/app/A.php', $analyzer->getPhpFilesPublic());
+            $this->assertSame(['app/Repositories'], $analyzer->getMissingPathsPublic());
+        });
+    }
+
+    public function testAnEntryBehindALockedDirectoryUnderAThrowingErrorHandlerIsStillRecorded(): void
+    {
+        $project = $this->unreadableProject();
+        mkdir($project . '/app/Locked/Sub', 0777, true);
+        $this->lock($project . '/app/Locked');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['app/Locked/Sub']);
+
+        $this->withThrowingErrorHandler(function () use ($analyzer, $project): void {
+            $this->assertSame([], $analyzer->getPhpFilesPublic());
+            $this->assertSame([$project . '/app/Locked'], $analyzer->getUnreadablePathsPublic());
+        });
+    }
+
+    public function testAnExcludeSpelledLikeAMiscasedEntryStillApplies(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $analyzer = $this->caseAnalyzer(['App']);
+        $analyzer->setExcludePatterns(['App/Http/*']);
+
+        // Excluded under the typed spelling, yielded under the on-disk one.
+        $this->assertSame([$this->overlapExpected()[1]], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAnOnDiskExcludeStillAppliesToAMiscasedEntry(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $analyzer = $this->caseAnalyzer(['APP/HTTP', 'App/providers']);
+        $analyzer->setExcludePatterns(['app/Http/*']);
+
+        $this->assertSame([$this->overlapExpected()[1]], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAMissingMiscasedEntryExcludedInItsOwnSpellingIsNotRecorded(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $analyzer = $this->caseAnalyzer(['App/Missing']);
+        $analyzer->setExcludePatterns(['App/Missing/*']);
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAnUnreadableDirectoryExcludedInTheEntrysSpellingIsNotRecorded(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = $this->caseAnalyzer(['App']);
+        $analyzer->setExcludePatterns(['App/Providers/*']);
+
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testAnExcludeTypedInTheEntrysUnicodeNormalisationStillApplies(): void
+    {
+        // Gated on normalisation folding below, not on case: case-sensitive
+        // APFS still folds normalisation, so this respells there too.
+        $project = $this->unreadableProject();
+        $nfd = "cafe\u{0301}";
+        $nfc = "caf\u{00e9}";
+        mkdir($project . '/' . $nfd);
+        file_put_contents($project . '/' . $nfd . '/X.php', "<?php\n");
+
+        if (! is_dir($project . '/' . $nfc)) {
+            $this->markTestSkipped('needs a normalisation-insensitive filesystem (APFS)');
+        }
+
+        $analyzer = $this->caseAnalyzer([$nfc]);
+        $this->assertSame([$project . '/' . $nfd . '/X.php'], $analyzer->getPhpFilesPublic());
+
+        $analyzer->setExcludePatterns([$nfc . '/*']);
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testRespellingListsEachDirectoryOnce(): void
+    {
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $onDiskSpelling = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+        $project = $this->unreadableProject();
+        $analyzer = new ConcreteFileAnalyzer();
+
+        foreach (['app/Http', 'app/Providers', 'app/Http/Controllers'] as $entry) {
+            $onDiskSpelling->invoke($analyzer, $project, $project . '/' . $entry, false);
+        }
+
+        $this->assertSame(
+            [$project . '/', $project . '/app/', $project . '/app/Http/'],
+            array_keys((array) $listings->getValue($analyzer))
+        );
+    }
+
+    public function testTheWalkReleasesItsListings(): void
+    {
+        // AnalyzerManager caches analyzer instances: a listing held past the
+        // walk is a whole directory kept in memory for the process's life.
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $analyzer = $this->caseAnalyzer(['app/Http/Controllers/C.php', 'app/Providers/P.php']);
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+        $this->assertSame([], $listings->getValue($analyzer));
+    }
+
+    public function testNothingAtOrPastADotDotSegmentIsListed(): void
+    {
+        // '<base>/app/..' may lie outside open_basedir, where even is_dir()
+        // warns; '..' stays as typed, and so does everything after it.
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $onDiskSpelling = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+        $project = $this->unreadableProject();
+        $analyzer = new ConcreteFileAnalyzer();
+
+        $this->assertSame($project . '/app/../app/Http', $onDiskSpelling->invoke($analyzer, $project, $project . '/app/../app/Http', false));
+        $this->assertSame($project . '/./app', $onDiskSpelling->invoke($analyzer, $project, $project . '/./app', false));
+        // Only the base, to find 'app': the '..' stops it before 'app/' is read.
+        $this->assertSame([$project . '/'], array_keys((array) $listings->getValue($analyzer)));
+    }
+
+    /**
+     * A '..' entry reaching a sibling of the base that open_basedir allows,
+     * under a handler that throws even for '@'-silenced warnings: the base's
+     * parent is outside open_basedir, and is_dir() on it warns.
+     */
+    public function testADotDotEntryStaysQuietUnderOpenBasedir(): void
+    {
+        $project = $this->testDir . '/proj';
+        $other = $this->testDir . '/other';
+        mkdir($project . '/app/Http', 0777, true);
+        mkdir($other);
+        file_put_contents($project . '/app/A.php', "<?php\n");
+        file_put_contents($project . '/app/Http/H.php', "<?php\n");
+        file_put_contents($other . '/O.php', "<?php\n");
+
+        $this->assertSame(
+            'passed: 3 files analyzed',
+            $this->analyzeUnderOpenBasedir($project, ['app', '../other'], [$project, $other])['result']
+        );
+    }
+
+    /**
+     * An entry typed in NFC for a directory stored in NFD has no ASCII case
+     * variant on disk, so it is matched by file identity - which must not
+     * stat '.' or '..': '<base>/..' is outside open_basedir here.
+     */
+    public function testANormalisationVariantEntryStaysQuietUnderOpenBasedir(): void
+    {
+        $project = $this->testDir . '/proj';
+        mkdir($project . "/cafe\u{0301}", 0777, true);
+        file_put_contents($project . "/cafe\u{0301}/X.php", "<?php\n");
+
+        // Gated on normalisation folding, not on case: case-sensitive APFS
+        // still folds it.
+        if (! is_dir($project . "/caf\u{00e9}")) {
+            $this->markTestSkipped('needs a normalisation-insensitive filesystem (APFS)');
+        }
+
+        foreach (["caf\u{00e9}", "CAF\u{00C9}"] as $entry) {
+            if (! is_dir($project . '/' . $entry)) {
+                continue; // 'CAFÉ' needs case folding as well
+            }
+
+            $this->assertSame('passed: 1 files analyzed', $this->analyzeUnderOpenBasedir($project, [$entry], [$project])['result'], $entry);
+        }
+    }
+
+    /**
+     * Run WalkingFileAnalyzer::analyze() over $paths in a php subprocess
+     * whose open_basedir allows only the repository and $allowed, under a
+     * handler that throws for every warning, '@'-silenced or not. Answers
+     * the result as '<status>: <message>' and the files a second walk
+     * yields, relative to $base.
+     *
+     * Every run also checks that the walk left nothing behind: no directory
+     * listings held, and the child's own handler back in place.
+     *
+     * A subprocess rather than @runInSeparateProcess: that child also runs
+     * tearDown(), which cannot reach the test directory once open_basedir
+     * shuts it out, and would leave the fixture behind. Here the child only
+     * reads; tearDown() runs in this process as usual. Xdebug is turned off
+     * and startup errors kept quiet in the child (both flags are harmless
+     * when no such extension is loaded), and each answer is picked out by a
+     * marker, so a stray notice cannot break the comparison.
+     *
+     * @param  array<string>  $paths
+     * @param  array<string>  $allowed
+     * @return array{result: string, files: list<string>}
+     */
+    private function analyzeUnderOpenBasedir(string $base, array $paths, array $allowed): array
+    {
+        $repo = dirname(__DIR__, 3);
+        $basedirs = [$repo];
+
+        // The repository is allowed wholesale for the autoloader: a fixture
+        // inside it (TMPDIR set under the repo) would make the test a no-op.
+        $this->assertFalse(
+            str_starts_with((string) realpath($base) . '/', (string) realpath($repo) . '/'),
+            'the fixture must not sit inside the repository, which open_basedir allows'
+        );
+
+        foreach ($allowed as $dir) {
+            $basedirs[] = $dir;
+            $basedirs[] = (string) realpath($dir);
+        }
+
+        $script = <<<'PHP'
+            [, $repo, $base, $paths] = $argv;
+            require $repo . '/vendor/autoload.php';
+            require $repo . '/tests/Unit/Abstracts/AbstractFileAnalyzerTest.php';
+
+            $analyzer = new ShieldCI\AnalyzersCore\Tests\Unit\Abstracts\WalkingFileAnalyzer();
+            $analyzer->setBasePath($base);
+            $analyzer->setPaths(json_decode($paths, true));
+
+            error_reporting(E_ALL);
+            $handler = static function (int $severity, string $message): bool {
+                throw new ErrorException($message, 0, $severity);
+            };
+            set_error_handler($handler);
+
+            $result = $analyzer->analyze();
+            $listings = (new ReflectionProperty(ShieldCI\AnalyzersCore\Abstracts\AbstractFileAnalyzer::class, 'listings'))->getValue($analyzer);
+            echo "\nRESULT> ", $result->getStatus()->value, ': ', $result->getMessage(), "\n";
+            echo "LISTINGS> ", count($listings), "\n";
+            echo "HANDLER> ", set_error_handler(null) === $handler ? 'kept' : 'changed', "\n";
+            restore_error_handler();
+
+            try {
+                $files = array_map(static fn (string $file): string => substr($file, strlen($base) + 1), $analyzer->getPhpFilesPublic());
+                sort($files);
+                echo "FILES> ", json_encode($files), "\n";
+            } catch (Throwable $e) {
+                echo "FILES> ", json_encode(['threw: ' . $e->getMessage()]), "\n";
+            }
+            PHP;
+
+        $command = implode(' ', array_map('escapeshellarg', [
+            PHP_BINARY,
+            '-d', 'open_basedir=' . implode(PATH_SEPARATOR, $basedirs),
+            '-d', 'display_errors=stderr',
+            '-d', 'display_startup_errors=0',
+            '-d', 'xdebug.mode=off',
+            '-r', $script, $repo, $base, (string) json_encode($paths),
+        ])) . ' 2>&1';
+
+        exec($command, $output, $status);
+        $all = implode("\n", $output);
+        $this->assertSame(0, $status, $all);
+
+        $answers = [];
+
+        foreach (['RESULT', 'LISTINGS', 'HANDLER', 'FILES'] as $marker) {
+            $lines = array_values(preg_grep('/^' . $marker . '> /', $output) ?: []);
+            $this->assertCount(1, $lines, $marker . "\n" . $all);
+            $answers[$marker] = substr($lines[0], strlen($marker) + 2);
+        }
+
+        $this->assertSame('0', $answers['LISTINGS'], 'directory listings held after the walk: ' . $all);
+        $this->assertSame('kept', $answers['HANDLER'], 'the walk replaced the caller\'s error handler');
+
+        /** @var list<string> $files */
+        $files = json_decode($answers['FILES'], true);
+
+        return ['result' => $answers['RESULT'], 'files' => $files];
+    }
+
+    /**
+     * A sibling the respelling compares by identity is a link out of
+     * open_basedir: even stat()ing it warns (round 4, R1).
+     */
+    public function testARespelledEntryBesideALinkOutOfOpenBasedirStaysQuiet(): void
+    {
+        $project = $this->testDir . '/proj';
+        $outside = $this->testDir . '/outside';
+        mkdir($project . "/cafe\u{0301}", 0777, true);
+        mkdir($outside);
+        file_put_contents($project . "/cafe\u{0301}/X.php", "<?php\n");
+        symlink($outside, $project . '/ext');
+
+        try {
+            if (! is_dir($project . "/caf\u{00e9}")) {
+                $this->markTestSkipped('needs a normalisation-insensitive filesystem (APFS)');
+            }
+
+            $answer = $this->analyzeUnderOpenBasedir($project, ["caf\u{00e9}"], [$project]);
+
+            $this->assertSame('passed: 1 files analyzed', $answer['result']);
+            // The one file, under the on-disk (NFD) name.
+            $this->assertSame(["cafe\u{0301}/X.php"], $answer['files']);
+        } finally {
+            unlink($project . '/ext');
+        }
+    }
+
+    /**
+     * Only the analyzed directory is inside open_basedir, not the base: the
+     * base cannot even be listed to respell 'app' (R2a). Runs anywhere.
+     */
+    public function testEntriesUnderABaseOutsideOpenBasedirStayQuiet(): void
+    {
+        $project = $this->unreadableProject();
+
+        foreach ([['app'], ['app/Http', 'app/Providers']] as $paths) {
+            $answer = $this->analyzeUnderOpenBasedir($project, $paths, [$project . '/app']);
+
+            $this->assertSame('passed: 2 files analyzed', $answer['result'], implode(', ', $paths));
+            $this->assertSame(['app/Http/Controllers/C.php', 'app/Providers/P.php'], $answer['files']);
+        }
+    }
+
+    /**
+     * An entry through a symlink whose target is only partly inside
+     * open_basedir: listing the link's directory warns (R2b). Runs anywhere.
+     */
+    public function testAnEntryThroughALinkOutOfOpenBasedirStaysQuiet(): void
+    {
+        $project = $this->testDir . '/proj';
+        $outside = $this->testDir . '/outside';
+        mkdir($project);
+        mkdir($outside . '/lib', 0777, true);
+        file_put_contents($outside . '/lib/L.php', "<?php\n");
+        symlink($outside, $project . '/shared');
+
+        try {
+            $answer = $this->analyzeUnderOpenBasedir($project, ['shared/lib'], [$project, $outside . '/lib']);
+
+            $this->assertSame('passed: 1 files analyzed', $answer['result']);
+            $this->assertSame(['shared/lib/L.php'], $answer['files']);
+        } finally {
+            unlink($project . '/shared');
+        }
+    }
+
+    public function testANulByteInTheBasePathStillPasses(): void
+    {
+        // scandir() and lstat() throw a ValueError for a path holding a NUL
+        // byte, which '@' and an error handler cannot stop; master never
+        // called either, and passed.
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $handler = static fn (): bool => false;
+        set_error_handler($handler);
+
+        try {
+            $analyzer = new WalkingFileAnalyzer();
+            $analyzer->setBasePath($this->testDir . "/p\0x");
+            $analyzer->setPaths(['app']);
+
+            $result = $analyzer->analyze();
+            $this->assertSame(Status::Passed, $result->getStatus(), $result->getMessage());
+            $this->assertSame([], $listings->getValue($analyzer));
+
+            // The handler stack is as it was: ours on top.
+            $this->assertSame($handler, set_error_handler(null));
+            restore_error_handler();
+        } finally {
+            restore_error_handler();
+        }
+    }
+
+    public function testTheRespellHelpersAnswerNothingForANulBytePath(): void
+    {
+        $listing = new \ReflectionMethod(AbstractFileAnalyzer::class, 'listing');
+        $fileIdentity = new \ReflectionMethod(AbstractFileAnalyzer::class, 'fileIdentity');
+
+        $this->assertSame([], $listing->invoke(null, $this->testDir . "/p\0x/"));
+        $this->assertNull($fileIdentity->invoke(null, $this->testDir . "/p\0x/app"));
+    }
+
+    public function testRespellingLeavesTheCallersHandlerInChargeOfTheWalk(): void
+    {
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $project = $this->unreadableProject();
+        $seen = [];
+        $handler = static function (int $severity, string $message) use (&$seen): bool {
+            $seen[] = $message;
+
+            return true;
+        };
+
+        // 'app/Missing' makes the respelling stat a name that is not there.
+        $analyzer = $this->caseAnalyzer(['app', 'app/Missing']);
+        set_error_handler($handler);
+
+        try {
+            $during = [];
+
+            foreach ($analyzer->getFilesToAnalyzePublic() as $file) {
+                // A subclass warning while it reads the yielded files.
+                trigger_error('reading ' . $file->getFilename(), E_USER_WARNING);
+                $during[] = set_error_handler(null) === $handler;
+                restore_error_handler();
+            }
+
+            $after = set_error_handler(null);
+            restore_error_handler();
+        } finally {
+            restore_error_handler();
+        }
+
+        sort($seen);
+        // The consumer's handler saw its own warnings, and nothing from the
+        // respelling.
+        $this->assertSame(['reading C.php', 'reading P.php'], $seen);
+        $this->assertSame([true, true], $during);
+        $this->assertSame($handler, $after);
+        $this->assertSame([], $listings->getValue($analyzer));
+        $this->assertSame(['app/Missing'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testANormalisationVariantEntryIsRespelledEndToEnd(): void
+    {
+        // Runs wherever names fold Unicode normalisation - case-sensitive
+        // APFS included - but not on ext4, which folds nothing: there no
+        // real path can be respelled, and the seams (listedSpelling()'s
+        // identity callable, typedRoots) carry the coverage.
+        $project = $this->unreadableProject();
+        mkdir($project . "/cafe\u{0301}");
+        file_put_contents($project . "/cafe\u{0301}/X.php", "<?php\n");
+
+        if (! is_dir($project . "/caf\u{00e9}")) {
+            $this->markTestSkipped('needs a normalisation-insensitive filesystem (APFS)');
+        }
+
+        $analyzer = $this->caseAnalyzer(["caf\u{00e9}", "cafe\u{0301}"]);
+        $analyzer->setExcludePatterns(["caf\u{00e9}/Y*"]);
+
+        $this->assertSame([$project . "/cafe\u{0301}/X.php"], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testSubclassesCanAskWhetherAPathIsExcluded(): void
+    {
+        $analyzer = new JavaScriptFileAnalyzer();
+        $analyzer->setBasePath('/p');
+        $analyzer->setExcludePatterns(['resources/js/vendor/*', '*/legacy/*']);
+
+        $this->assertSame(
+            ['/p/resources/js/app.js'],
+            $analyzer->keptJavaScript(['/p/resources/js/app.js', '/p/resources/js/vendor/lib.js', '/p/resources/js/legacy/old.js'])
+        );
+
+        // A respelled root: its typed spelling is honoured too (#104).
+        (new \ReflectionProperty(AbstractFileAnalyzer::class, 'typedRoots'))
+            ->setValue($analyzer, ['/p/resources/js' => ['/p/Resources/js' => true]]);
+        $analyzer->setExcludePatterns(['Resources/js/vendor/*']);
+
+        $this->assertSame(['/p/resources/js/app.js'], $analyzer->keptJavaScript(['/p/resources/js/app.js', '/p/resources/js/vendor/lib.js']));
+    }
+
+    public function testSubclassesSeeTheTypedSpellingOfAMiscasedEntry(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        mkdir($project . '/resources/js/vendor', 0777, true);
+        file_put_contents($project . '/resources/js/app.js', '');
+        file_put_contents($project . '/resources/js/vendor/lib.js', '');
+
+        $analyzer = new JavaScriptFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['Resources/js']);
+        $analyzer->setExcludePatterns(['Resources/js/vendor/*']);
+
+        $this->assertSame([$project . '/resources/js/app.js'], $analyzer->walkedJavaScript());
+    }
+
+    public function testReconfiguringForgetsTheTypedSpellingsOfTheLastWalk(): void
+    {
+        $typedRoots = new \ReflectionProperty(AbstractFileAnalyzer::class, 'typedRoots');
+        $file = new \SplFileInfo('/p/app/Http/C.php');
+
+        foreach (['setPaths' => ['app'], 'setBasePath' => '/p'] as $setter => $value) {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath('/p');
+            $analyzer->setExcludePatterns(['App/Http/*']);
+            $typedRoots->setValue($analyzer, ['/p/app' => ['/p/App' => true]]);
+            $this->assertFalse($analyzer->shouldAnalyzeFilePublic($file), $setter);
+
+            $analyzer->{$setter}($value);
+
+            $this->assertTrue($analyzer->shouldAnalyzeFilePublic($file), $setter);
+        }
+    }
+
+    public function testTypedSpellingsOutliveTheWalkUntilReconfigured(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->testDir . '/unreadable-project';
+        $file = new \SplFileInfo($project . '/app/Http/Controllers/C.php');
+
+        $analyzer = $this->caseAnalyzer(['App']);
+        $analyzer->setExcludePatterns(['App/Http/*']);
+        iterator_to_array($analyzer->getFilesToAnalyzePublic(), false);
+
+        // Subclasses collect the walk and filter afterwards.
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic($file));
+
+        $analyzer->setPaths(['app']);
+
+        $this->assertTrue($analyzer->shouldAnalyzeFilePublic($file));
+    }
+
+    /**
+     * Run $test under a handler that throws for every warning, whatever
+     * error_reporting() says - so an '@' does not hide one.
+     */
+    private function withThrowingErrorHandler(callable $test): void
+    {
+        set_error_handler(static function (int $severity, string $message): bool {
+            throw new \ErrorException($message, 0, $severity);
+        });
+
+        try {
+            $test();
+        } finally {
+            restore_error_handler();
+        }
+    }
+
+    /**
+     * overlapAnalyzer() that builds the fixture only once, so a test can make
+     * several analyzers over one tree.
+     *
+     * @param  array<string>  $paths
+     */
+    private function caseAnalyzer(array $paths): ConcreteFileAnalyzer
+    {
+        $project = $this->testDir . '/unreadable-project';
+
+        if (! is_dir($project)) {
+            $this->unreadableProject();
+        }
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths($paths);
+
+        return $analyzer;
+    }
+
+    private function requireCaseInsensitiveFilesystem(): void
+    {
+        if (! $this->isCaseInsensitiveFilesystem()) {
+            $this->markTestSkipped('needs a case-insensitive filesystem (APFS, NTFS), where App and app are one directory');
+        }
+    }
+
+    /**
+     * Whether the temp directory folds case: a file created under one
+     * spelling is found under the other.
+     */
+    private function isCaseInsensitiveFilesystem(): bool
+    {
+        $probe = $this->testDir . '/case-probe';
+        touch($probe);
+
+        try {
+            return file_exists($this->testDir . '/CASE-PROBE');
+        } finally {
+            unlink($probe);
+        }
+    }
+
     /**
      * @param  array<string>  $paths
      */
@@ -2428,6 +3365,38 @@ class ConcreteFileAnalyzer extends AbstractFileAnalyzer
     public function getMissingPathsPublic(): array
     {
         return $this->getMissingPaths();
+    }
+}
+
+// Filters files of its own through isExcludedPath(), as laravel's
+// CsrfAnalyzer does for JavaScript, which shouldAnalyzeFile() declines.
+class JavaScriptFileAnalyzer extends ConcreteFileAnalyzer
+{
+    /**
+     * @param  list<string>  $files
+     * @return list<string>
+     */
+    public function keptJavaScript(array $files): array
+    {
+        return array_values(array_filter($files, fn (string $file): bool => ! $this->isExcludedPath($file)));
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function walkedJavaScript(): array
+    {
+        $files = [];
+
+        foreach ($this->getFilesToAnalyze() as $file) {
+            if ($file->getExtension() === 'js' && ! $this->isExcludedPath($file->getPathname())) {
+                $files[] = $file->getPathname();
+            }
+        }
+
+        sort($files);
+
+        return $files;
     }
 }
 
