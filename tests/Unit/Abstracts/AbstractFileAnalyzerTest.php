@@ -1785,6 +1785,415 @@ class AbstractFileAnalyzerTest extends TestCase
         }
     }
 
+    // =========================================================================
+    // A miscased absolute entry on a case-insensitive filesystem
+    //
+    // realpath() keeps the case it is given, so on macOS APFS (and Windows)
+    // the entry '<T>/PROJ/app' under base '<T>/proj' resolved to '<T>/PROJ',
+    // never matched realpath(base), and was scanned as nothing and recorded
+    // missing although the directory exists. A prefix that is the same
+    // directory as the base now counts as the base; the remainder is kept as
+    // typed and joined onto the base as stored.
+    // =========================================================================
+
+    public function testAMiscasedAbsoluteEntryIsScannedOnACaseInsensitiveFilesystem(): void
+    {
+        $t = $this->caseFixture();
+        $this->requireCaseInsensitive($t);
+
+        foreach ([$t, (string) realpath($t)] as $root) {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($root . '/proj');
+            $analyzer->setPaths([$root . '/PROJ/app']);
+
+            $files = $analyzer->getPhpFilesPublic();
+            sort($files);
+
+            $this->assertSame([$root . '/proj/app/Http/Controllers/C.php', $root . '/proj/app/Providers/P.php'], $files, "base {$root}/proj");
+            $this->assertSame([], $analyzer->getMissingPathsPublic(), "base {$root}/proj");
+        }
+    }
+
+    public function testAMiscasedRemainderIsKeptAsTyped(): void
+    {
+        // Only the base portion is matched by identity; what follows it is
+        // joined on as typed, as for any other absolute entry.
+        $t = $this->caseFixture();
+        $this->requireCaseInsensitive($t);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($t . '/proj');
+        $analyzer->setPaths([$t . '/PROJ/APP/Providers']);
+
+        $this->assertSame([$t . '/proj/APP/Providers/P.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAMiscasedAbsoluteEntryBesideItsRelativeSpellingYieldsEachFileOnce(): void
+    {
+        // On master this also gave each file once - but only because the
+        // miscased entry scanned nothing and was recorded missing.
+        $t = $this->caseFixture();
+        $this->requireCaseInsensitive($t);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($t . '/proj');
+        $analyzer->setPaths(['app', $t . '/PROJ/app']);
+        $files = $analyzer->getPhpFilesPublic();
+        sort($files);
+
+        $this->assertSame([$t . '/proj/app/Http/Controllers/C.php', $t . '/proj/app/Providers/P.php'], $files);
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAMiscasedAbsoluteFileEntryIsScanned(): void
+    {
+        $t = $this->caseFixture();
+        $this->requireCaseInsensitive($t);
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($t . '/proj');
+        $analyzer->setPaths([$t . '/PROJ/app/Providers/P.php']);
+
+        $this->assertSame([$t . '/proj/app/Providers/P.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testADifferentlyCasedDirectoryIsNotTheBaseOnACaseSensitiveFilesystem(): void
+    {
+        // '<T>/PROJ' here is a directory of its own, with its own file: it
+        // must stay outside the base, as any absolute path outside it does.
+        $t = $this->caseFixture();
+
+        if (is_dir($t . '/PROJ')) {
+            $this->markTestSkipped('The filesystem is case-insensitive: PROJ and proj are one directory.');
+        }
+
+        mkdir($t . '/PROJ/app', 0777, true);
+        file_put_contents($t . '/PROJ/app/Other.php', "<?php\n");
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($t . '/proj');
+        $analyzer->setPaths([$t . '/PROJ/app']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+        $this->assertSame([$t . '/PROJ/app'], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testSameDirectoryComparesByIdentityNotSpelling(): void
+    {
+        // Reachable on any filesystem: a symlink is a second spelling of one
+        // directory, which is all a miscased spelling is on APFS. The caller
+        // only ever passes resolved paths; this pins the identity check alone.
+        $t = $this->caseFixture();
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'sameDirectory');
+        symlink($t . '/proj', $t . '/link');
+
+        try {
+            $this->assertTrue($method->invoke(null, $t . '/proj', $t . '/link'));
+            $this->assertTrue($method->invoke(null, $t . '/proj', $t . '/proj'));
+            $this->assertFalse($method->invoke(null, $t . '/proj/app', $t . '/proj'));
+            $this->assertFalse($method->invoke(null, $t . '/gone', $t . '/proj'));
+            $this->assertFalse($method->invoke(null, $t . '/proj', $t . '/gone'));
+        } finally {
+            unlink($t . '/link');
+        }
+    }
+
+    public function testRelativeRemainderFoldsTheDriveLetterOnWindowsOnly(): void
+    {
+        // Windows never tells 'c:' from 'C:', and a drive-letter entry never
+        // reaches the realpath() steps, so the letter is folded in the text
+        // comparison there. Nothing else is: the rest is the filesystem's
+        // business. On POSIX 'c:' and 'C:' are two directories, so nothing is.
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'relativeRemainder');
+
+        $cases = [
+            ['c:\\proj\\app', 'C:\\proj', 'app', null],
+            ['C:\\proj\\app', 'c:\\proj', 'app', null],
+            ['c:/proj/app', 'c:\\proj', 'app', 'app'],
+            ['c:\\', 'C:\\', '', null],
+            ['d:\\proj\\app', 'C:\\proj', null, null],
+            ['c:\\PROJ\\app', 'C:\\proj', null, null],
+        ];
+
+        foreach ($cases as [$path, $base, $windows, $posix]) {
+            $this->assertSame($windows, $method->invoke(null, $path, $base, true), "Windows: relativeRemainder('{$path}', '{$base}')");
+            $this->assertSame($posix, $method->invoke(null, $path, $base, false), "POSIX: relativeRemainder('{$path}', '{$base}')");
+        }
+    }
+
+    public function testADriveShapedPosixEntryIsNotFoldedOntoADifferentlyCasedBase(): void
+    {
+        // On POSIX 'c:' and 'C:' are two directories. Folding the letter there
+        // walked 'C:/proj/app' for the entry 'c:/proj/app'.
+        $t = $this->testDir;
+        $cwd = getcwd();
+        chdir($t);
+
+        try {
+            mkdir('c:/proj/app', 0777, true);
+
+            if (is_dir('C:')) {
+                $this->markTestSkipped('The filesystem is case-insensitive: c: and C: are one directory.');
+            }
+
+            mkdir('C:/proj/app', 0777, true);
+            file_put_contents('c:/proj/app/X.php', "<?php\n");
+            file_put_contents('C:/proj/app/Y.php', "<?php\n");
+
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath('C:/proj');
+            $analyzer->setPaths(['c:/proj/app']);
+
+            $this->assertSame([], $analyzer->getPhpFilesPublic());
+            $this->assertSame(['c:/proj/app'], $analyzer->getMissingPathsPublic());
+        } finally {
+            chdir($cwd === false ? $t : $cwd);
+        }
+    }
+
+    public function testAMiscasedBaseFollowedByDotDotBackIntoTheBaseIsClaimed(): void
+    {
+        // '<T>/PROJ' is the base by identity, but its remainder
+        // '../proj/outlink' is refused. The walk must go on to
+        // '<T>/PROJ/../proj', which realpath() matches, rather than stop.
+        $t = $this->caseFixture();
+        $this->requireCaseInsensitive($t);
+        mkdir($t . '/outside');
+        file_put_contents($t . '/outside/O.php', "<?php\n");
+        symlink($t . '/outside', $t . '/proj/outlink');
+        symlink($t . '/proj/app', $t . '/proj/applink');
+
+        try {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($t . '/proj');
+            $analyzer->setPaths([$t . '/PROJ/../proj/outlink']);
+
+            $this->assertSame([$t . '/proj/outlink/O.php'], $analyzer->getPhpFilesPublic());
+            $this->assertSame([], $analyzer->getMissingPathsPublic());
+
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($t . '/proj');
+            $analyzer->setPaths([$t . '/PROJ/../proj/applink']);
+            $analyzer->setExcludePatterns(['applink/*']);
+
+            $this->assertSame([], $analyzer->getPhpFilesPublic());
+            $this->assertSame([], $analyzer->getMissingPathsPublic());
+        } finally {
+            unlink($t . '/proj/outlink');
+            unlink($t . '/proj/applink');
+        }
+    }
+
+    public function testDotDotSpellingsThroughAMiscasedBaseAreClaimed(): void
+    {
+        // The lower-case '<T>/proj/app/../app' was already claimed; these
+        // spellings of the same directories through '<T>/PROJ' were not.
+        $t = $this->caseFixture();
+        $this->requireCaseInsensitive($t);
+        $appFiles = [$t . '/proj/app/Http/Controllers/C.php', $t . '/proj/app/Providers/P.php'];
+
+        foreach (['/PROJ/app/../app', '/PROJ/app/..', '/proj/../PROJ/app', '/PROJ/../PROJ/app'] as $entry) {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($t . '/proj');
+            $analyzer->setPaths([$t . $entry]);
+            $files = $analyzer->getPhpFilesPublic();
+            sort($files);
+
+            $this->assertSame($appFiles, $files, "setPaths(['<T>{$entry}'])");
+            $this->assertSame([], $analyzer->getMissingPathsPublic(), "setPaths(['<T>{$entry}'])");
+        }
+    }
+
+    public function testADotDotEntryLeavingTheBaseIsNeverClaimed(): void
+    {
+        // A prefix only ever matches the base itself, and a remainder with
+        // '..' is refused, so trying longer prefixes cannot let an entry out.
+        $t = $this->caseFixture();
+        mkdir($t . '/outside');
+        file_put_contents($t . '/outside/O.php', "<?php\n");
+
+        foreach (['/proj/../outside', '/PROJ/../outside', '/proj/app/../../outside'] as $entry) {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($t . '/proj');
+            $analyzer->setPaths([$t . $entry]);
+
+            $this->assertSame([], $analyzer->getPhpFilesPublic(), "setPaths(['<T>{$entry}'])");
+            $this->assertSame([$t . $entry], $analyzer->getMissingPathsPublic(), "setPaths(['<T>{$entry}'])");
+        }
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($t . '/proj');
+        $analyzer->setPaths([$t . '/proj/app/../app']);
+        $files = $analyzer->getPhpFilesPublic();
+        sort($files);
+
+        $this->assertSame([$t . '/proj/app/Http/Controllers/C.php', $t . '/proj/app/Providers/P.php'], $files);
+    }
+
+    public function testRemainderUnderBaseClaimsAPrefixTheFilesystemCallsTheBase(): void
+    {
+        // Runs on any filesystem: the identity check is injected, standing in
+        // for one that folds case, so a case-sensitive CI still fails if the
+        // identity branch is removed. '<T>/PROJ' is made a real directory
+        // where it is not already the base, since realpath() must resolve it.
+        $t = $this->caseFixture();
+        mkdir($t . '/outside');
+
+        if (! is_dir($t . '/PROJ')) {
+            mkdir($t . '/PROJ/app', 0777, true);
+        }
+
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'remainderUnderBase');
+        $foldsCase = static fn (string $path, string $base): bool => strtolower($path) === strtolower($base);
+        $never = static fn (string $path, string $base): bool => false;
+        $base = $t . '/proj';
+
+        $cases = [
+            ['/PROJ/app', 'app'],
+            ['/PROJ', ''],
+            ['/PROJ/../proj/app', 'app'],
+            ['/PROJ/app/../app', 'app'],
+            ['/proj/../PROJ/app', 'app'],
+            ['/PROJ/../outside', null],
+            ['/PROJ/app/../../outside', null],
+        ];
+
+        foreach ($cases as [$entry, $expected]) {
+            $this->assertSame($expected, $method->invoke(null, $t . $entry, $base, $foldsCase), "remainderUnderBase('<T>{$entry}')");
+        }
+
+        if (! is_dir($t . '/PROJ') || realpath($t . '/PROJ') !== realpath($base)) {
+            $this->assertNull($method->invoke(null, $t . '/PROJ/app', $base, $never));
+        }
+    }
+
+    /**
+     * Under open_basedir, realpath() warns for every prefix outside the
+     * allowed list, and '@' does not stop a handler that ignores
+     * error_reporting(). The identity check must not add a warning to those:
+     * it only stat()s paths realpath() has already resolved. Run in a plain
+     * subprocess (not @runInSeparateProcess, whose child trips open_basedir
+     * in tearDown) with a handler that records every warning, whatever
+     * error_reporting() says. A handler that throws would stop at the first
+     * prefix outside the allowed list ('/usr', '/private') and never reach
+     * the identity check at all.
+     */
+    public function testTheIdentityCheckAddsNoWarningUnderOpenBasedir(): void
+    {
+        $t = $this->caseFixture();
+        $probe = $t . '/probe.php';
+        file_put_contents($probe, <<<'PHP'
+            <?php
+            require $argv[1] . '/vendor/autoload.php';
+
+            $probe = new class () extends ShieldCI\AnalyzersCore\Abstracts\AbstractFileAnalyzer {
+                protected function metadata(): ShieldCI\AnalyzersCore\ValueObjects\AnalyzerMetadata
+                {
+                    return new ShieldCI\AnalyzersCore\ValueObjects\AnalyzerMetadata('probe', 'Probe', 'Probe', ShieldCI\AnalyzersCore\Enums\Category::Security, ShieldCI\AnalyzersCore\Enums\Severity::Low);
+                }
+
+                protected function runAnalysis(): ShieldCI\AnalyzersCore\Contracts\ResultInterface
+                {
+                    return $this->passed('ok');
+                }
+
+                public function scan(string $base, string $entry): array
+                {
+                    $this->setBasePath($base);
+                    $this->setPaths([$entry]);
+                    $files = $this->getPhpFiles();
+                    sort($files);
+
+                    return ['files' => $files, 'missing' => $this->getMissingPaths()];
+                }
+            };
+
+            $warnings = [];
+            $out = [];
+
+            set_error_handler(static function (int $severity, string $message) use (&$warnings): bool {
+                $warnings[] = $message;
+
+                return true;
+            });
+
+            foreach (array_slice($argv, 3) as $entry) {
+                $warnings = [];
+                $out[] = $probe->scan($argv[2], $entry) + ['warnings' => $warnings];
+            }
+
+            echo 'SHIELDCI-PROBE ' . json_encode($out) . "\n";
+            PHP);
+
+        $repo = dirname(__DIR__, 3);
+        $tmp = sys_get_temp_dir();
+        $base = $t . '/proj';
+        $miscased = $t . '/PROJ/app';
+        $control = $t . '/nope/app';
+        $entries = ['app', $base . '/app', '/usr/lib', $miscased, $control];
+        $command = implode(' ', array_map('escapeshellarg', [
+            PHP_BINARY,
+            '-d', 'open_basedir=' . implode(PATH_SEPARATOR, [$repo, $tmp, (string) realpath($tmp)]),
+            '-d', 'xdebug.mode=off',
+            '-d', 'display_startup_errors=0',
+            '-d', 'error_reporting=' . E_ALL,
+            $probe, $repo, $base, ...$entries,
+        ])) . ' 2>&1';
+
+        exec($command, $lines, $status);
+        $marked = array_values(array_filter($lines, static fn (string $line): bool => str_starts_with($line, 'SHIELDCI-PROBE ')));
+        $this->assertSame(0, $status, implode("\n", $lines));
+        $this->assertCount(1, $marked, implode("\n", $lines));
+        /** @var list<array{files: list<string>, missing: list<string>, warnings: list<string>}> $record */
+        $record = json_decode(substr($marked[0], strlen('SHIELDCI-PROBE ')), true);
+        $appFiles = [$base . '/app/Http/Controllers/C.php', $base . '/app/Providers/P.php'];
+
+        // Entries that never reach realpath() raise nothing.
+        $this->assertSame(['files' => $appFiles, 'missing' => [], 'warnings' => []], $record[0]);
+        $this->assertSame(['files' => $appFiles, 'missing' => [], 'warnings' => []], $record[1]);
+        $this->assertNotSame([], $record[2]['warnings']);
+
+        // The miscased entry raises the same warnings as a missing one with
+        // the same prefixes, and every warning is realpath()'s own: a stat()
+        // of a prefix realpath() refused would add one here.
+        $this->assertSame($record[4]['warnings'], $record[3]['warnings']);
+
+        foreach ($record as $i => $result) {
+            foreach ($result['warnings'] as $warning) {
+                $this->assertStringStartsWith('realpath(): open_basedir restriction in effect', $warning, "entry {$entries[$i]}");
+            }
+        }
+
+        $this->assertSame(['files' => [], 'missing' => [$control]], array_diff_key($record[4], ['warnings' => true]));
+        $this->assertSame(
+            is_dir($miscased) ? ['files' => $appFiles, 'missing' => []] : ['files' => [], 'missing' => [$miscased]],
+            array_diff_key($record[3], ['warnings' => true])
+        );
+    }
+
+    /**
+     * <T>/proj/app/{Http/Controllers/C.php, Providers/P.php}.
+     */
+    private function caseFixture(): string
+    {
+        $t = $this->testDir;
+        mkdir($t . '/proj/app/Http/Controllers', 0777, true);
+        mkdir($t . '/proj/app/Providers');
+        file_put_contents($t . '/proj/app/Http/Controllers/C.php', "<?php\n");
+        file_put_contents($t . '/proj/app/Providers/P.php', "<?php\n");
+
+        return $t;
+    }
+
+    private function requireCaseInsensitive(string $t): void
+    {
+        if (! is_dir($t . '/PROJ')) {
+            $this->markTestSkipped('The filesystem is case-sensitive: PROJ is not proj.');
+        }
+    }
+
     /**
      * open_basedir makes realpath() warn for a path outside it, and Laravel's
      * HandleExceptions turns that warning into an exception that fails the
