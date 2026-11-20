@@ -239,22 +239,26 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         $yielded = [];
         /** @var array<string, true> $missingKeys */
         $missingKeys = [];
-        /** @var list<array{string, string}> $roots */
-        $roots = [];
+        /** @var list<string> $entries */
+        $entries = [];
 
         foreach ($paths as $path) {
-            $entry = self::normaliseEntry($path);
-            $roots[] = [$entry, self::scanRoot($basePath, $entry)];
+            $entries[] = self::normaliseEntry($path);
         }
 
-        // Every root is spelled before the first file is yielded, so the
-        // excludes know each entry's typed spelling (typedSpellings()) however
-        // the caller consumes the walk.
-        $roots = $this->respellRoots($basePath, $roots);
+        // Every root is resolved and spelled before the first file is
+        // yielded, so the excludes know each entry's typed spelling
+        // (typedSpellings()) however the caller consumes the walk.
+        $roots = $this->resolveRoots($basePath, $entries);
 
         foreach ($roots as [$entry, $fullPath]) {
-            if (! is_dir($fullPath)) {
-                if (is_file($fullPath)) {
+            // Fenced: a root outside open_basedir warns here, even through
+            // '@' for a handler that ignores it, and is recorded missing
+            // below instead (#106). The fence is down again before any yield.
+            $kind = self::quietly(static fn (): ?string => @is_dir($fullPath) ? 'dir' : (@is_file($fullPath) ? 'file' : null));
+
+            if ($kind !== 'dir') {
+                if ($kind === 'file') {
                     if (! ($track && self::seenBefore($yielded, $fullPath))) {
                         yield new SplFileInfo($fullPath);
                     }
@@ -271,15 +275,45 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
                 continue;
             }
 
-            // The filter checks each directory before the walk descends into it.
-            // CATCH_GET_CHILD is only the backstop for one that turns unreadable
-            // between that check and the open: it swallows the exception without
-            // saying which directory failed, so that skip goes unrecorded.
+            // The filter checks each directory before the walk descends into it,
+            // and keeps only regular files (links to them included) among the
+            // rest. CATCH_GET_CHILD is only the backstop for a directory that
+            // turns unreadable between that check and the open: it swallows the
+            // exception without saying which directory failed, so that skip
+            // goes unrecorded.
+            //
+            // An entry open_basedir refuses - a link out of the allowed
+            // directories - makes hasChildren() and is_file() warn, and makes
+            // SplFileInfo::isFile() throw a RuntimeException no handler stops,
+            // so neither stat is SplFileInfo's own. Both run under the same
+            // swallow-all handler as resolveRoots(), not behind '@': a host
+            // handler that throws even for a silenced warning would throw from
+            // inside the filter, and an exception raised while the iterator
+            // moves on is cleared by CATCH_GET_CHILD (it covers the whole
+            // move, not only getChildren()), so the refused entry was taken
+            // for a leaf and yielded. Here it answers false to both and is
+            // dropped unrecorded, as a link to a directory is never followed
+            // (#106). Only an accepted entry is asked hasChildren() again by
+            // the iterator, and that one is inside open_basedir. The handler
+            // is fenced to the two stats, so the caller's own is in charge
+            // while files are analysed and directories are judged. The handler
+            // is built once per root: the filter runs for every entry.
+            $quiet = static fn (): bool => true;
             $iterator = new RecursiveIteratorIterator(
                 new RecursiveCallbackFilterIterator(
                     new RecursiveDirectoryIterator($fullPath, RecursiveDirectoryIterator::SKIP_DOTS),
-                    function (SplFileInfo $current, string $key, RecursiveDirectoryIterator $iterator): bool {
-                        if ($iterator->hasChildren() && ! $this->canEnterDirectory($current->getPathname())) {
+                    function (SplFileInfo $current, string $key, RecursiveDirectoryIterator $iterator) use ($quiet): bool {
+                        set_error_handler($quiet);
+
+                        try {
+                            if (! $iterator->hasChildren()) {
+                                return is_file($current->getPathname());
+                            }
+                        } finally {
+                            restore_error_handler();
+                        }
+
+                        if (! $this->canEnterDirectory($current->getPathname())) {
                             $this->recordUnreadablePath($current->getPathname());
 
                             return false;
@@ -294,7 +328,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
 
             /** @var SplFileInfo $file */
             foreach ($iterator as $file) {
-                if ($file->isFile() && ! ($track && self::seenBefore($yielded, $file->getPathname()))) {
+                if (! ($track && self::seenBefore($yielded, $file->getPathname()))) {
                     yield $file;
                 }
             }
@@ -302,39 +336,46 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     }
 
     /**
-     * Each [entry, scan root] with the root respelled to its on-disk names
-     * (onDiskSpelling(), #104), recording in $typedRoots the typed spelling
-     * of every root that changed.
+     * Each [entry, scan root]: the entry resolved to where it is walked
+     * (scanRoot()), then respelled to its on-disk names (onDiskSpelling(),
+     * #104), recording in $typedRoots the typed spelling of every root that
+     * changed.
      *
      * The whole step runs under a temporary error handler that swallows
      * every warning, so no host handler sees one. '@' alone does not do
      * that: it only lowers error_reporting(), and a handler that ignores it
-     * (one that throws for every warning) still runs. And respelling stats
-     * and lists directories the walk itself never touches - the base's
-     * siblings, a base outside open_basedir, a link out of it - where
-     * open_basedir warns on every stat. Guarding each call missed some (a
-     * file_exists() guard warns too), so the step is fenced as a whole: a
-     * call that warns answers false, and the segment keeps its typed
-     * spelling, as when it cannot be matched. scandir() alone throws a
-     * ValueError instead for a path holding a NUL byte, which neither '@'
-     * nor a handler stops; listing() catches that one and answers the same
-     * way. The handler is installed once
-     * per walk and removed before the first file is yielded, so the
-     * caller's own handler is in charge while files are analysed. The
-     * directory listings are released here too, however the step ends.
+     * (one that throws for every warning) still runs. And resolving stats
+     * entries open_basedir may refuse ('../shared', an absolute path
+     * elsewhere, every entry under a base outside it, #106), while
+     * respelling stats and lists directories the walk itself never touches
+     * - the base's siblings, a base outside open_basedir, a link out of it -
+     * where open_basedir warns on every stat. Guarding each call missed some
+     * (a file_exists() guard warns too), so the step is fenced as a whole: a
+     * call that warns answers false, a refused entry is walked where it was
+     * joined and recorded missing there, and a segment keeps its typed
+     * spelling, as when it cannot be matched. Nothing in the step can be
+     * overridden, so no subclass warning is swallowed with them. scandir()
+     * alone throws a ValueError instead for a path holding a NUL byte, which
+     * neither '@' nor a handler stops; listing() catches that one and
+     * answers the same way. The handler is installed once per walk and
+     * removed before the first file is yielded, so the caller's own handler
+     * is in charge while files are analysed. The directory listings are
+     * released here too, however the step ends.
      *
-     * @param list<array{string, string}> $roots
+     * @param list<string> $entries
      * @return list<array{string, string}>
      */
-    private function respellRoots(string $basePath, array $roots): array
+    private function resolveRoots(string $basePath, array $entries): array
     {
+        $roots = [];
         set_error_handler(static fn (): bool => true);
 
         try {
-            foreach ($roots as $i => [$entry, $typed]) {
+            foreach ($entries as $entry) {
+                $typed = self::scanRoot($basePath, $entry);
                 $fullPath = $this->onDiskSpelling($basePath, $typed);
                 $this->typedRoots[$fullPath][$typed] = true;
-                $roots[$i] = [$entry, $fullPath];
+                $roots[] = [$entry, $fullPath];
             }
         } finally {
             restore_error_handler();
@@ -353,6 +394,31 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         $this->typedRoots = array_filter($this->typedRoots);
 
         return $roots;
+    }
+
+    /**
+     * $probe's answer, with every warning it raises swallowed: the fence
+     * resolveRoots() puts round its whole step, for the few root stats the
+     * walk makes outside it. Each caller fences only filesystem calls, never
+     * an overridable method, so a subclass's own warnings still reach the
+     * host's handler; and the handler is gone again before anything is
+     * yielded.
+     *
+     * @template T
+     *
+     * @param \Closure(): T $probe
+     *
+     * @return T
+     */
+    private static function quietly(\Closure $probe): mixed
+    {
+        set_error_handler(static fn (): bool => true);
+
+        try {
+            return $probe();
+        } finally {
+            restore_error_handler();
+        }
     }
 
     /**
@@ -405,9 +471,9 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      *
      * Separators are kept where they were typed. On Windows both '/' and '\'
      * separate, as in normaliseEntry(); on POSIX '\' is a filename byte.
-     * The walk calls this only inside respellRoots(), whose temporary error
+     * The walk calls this only inside resolveRoots(), whose temporary error
      * handler keeps every warning these filesystem calls raise from the
-     * host's handler; respellRoots() says why. The calls are '@'-silenced
+     * host's handler; resolveRoots() says why. The calls are '@'-silenced
      * as well, for direct callers.
      */
     private function onDiskSpelling(string $basePath, string $fullPath, bool $windows = DIRECTORY_SEPARATOR === '\\'): string
@@ -511,7 +577,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * lstat() dev and inode of $path, or null when it cannot be stat'ed:
      * missing, behind a directory that cannot be searched, or outside
      * open_basedir. A dangling link still has an identity, the link's own.
-     * Warnings are kept from the host by respellRoots(). Unlike scandir(),
+     * Warnings are kept from the host by resolveRoots(). Unlike scandir(),
      * lstat() answers false for a path holding a NUL byte rather than
      * throwing, so nothing needs catching here.
      */
@@ -525,7 +591,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     /**
      * scandir() of $dir, or [] when it cannot be listed: not a directory,
      * unreadable, or outside open_basedir. Warnings are kept from the host
-     * by respellRoots(). A NUL byte in $dir (a base path holding one) makes
+     * by resolveRoots(). A NUL byte in $dir (a base path holding one) makes
      * scandir() throw a ValueError rather than warn; that is caught the same
      * way, and only that - master never called scandir() and passed.
      *
@@ -619,7 +685,9 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * walk cannot reach because a directory above it cannot be entered is not
      * missing either: that directory is recorded in getUnreadablePaths()
      * instead. Nor is one naming something that is neither a file nor a
-     * directory (a link to a device, a FIFO).
+     * directory (a link to a device, a FIFO). An entry open_basedir refuses
+     * is recorded here too: every stat answers false for it, so it cannot be
+     * told apart from one that is missing (#106).
      *
      * The record resets when a walk starts, so on a cached instance it never
      * carries an entry created since the last run - but it also describes
@@ -641,14 +709,15 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      */
     private function recordUnscannableEntry(string $entry, string $fullPath, array &$missingKeys): void
     {
-        // Silenced like realpath() in remainderUnderBase(): under open_basedir
-        // every stat outside the allowed list warns, and this one can climb
-        // above the base path.
-        if (@file_exists($fullPath) || $this->excludesEntry($fullPath)) {
+        // Fenced like the root stats in getFilesToAnalyze(): under
+        // open_basedir every stat outside the allowed list warns, and these
+        // can climb above the base path. excludesEntry() stays outside the
+        // fence: it reaches isExcludedPath(), which a subclass may override.
+        if (self::quietly(static fn (): bool => @file_exists($fullPath)) || $this->excludesEntry($fullPath)) {
             return;
         }
 
-        $blocker = $this->blockingDirectory($fullPath);
+        $blocker = self::quietly(static fn (): ?string => self::blockingDirectory($fullPath));
 
         if ($blocker !== null) {
             $this->recordUnreadablePath($blocker);
@@ -697,7 +766,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * Windows has no search bit, so the same split as canEnterDirectory()
      * applies and readability stands in for it there.
      */
-    private function blockingDirectory(string $fullPath): ?string
+    private static function blockingDirectory(string $fullPath): ?string
     {
         $dir = dirname($fullPath);
 
@@ -855,7 +924,14 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     {
         $fullPath = PathHelper::join($basePath, $path);
 
-        if (file_exists($fullPath)) {
+        // Under open_basedir this warns for any path outside the allowed list
+        // - an entry such as '../shared', or every entry under a base outside
+        // it - and the warning, through a host handler that throws, ended the
+        // analysis before any path was walked (#106). The walk calls this
+        // only inside resolveRoots(), whose handler swallows it; a refused
+        // path answers false and is recorded missing, as it is with no
+        // handler. '@' as well, like realpath() in remainderUnderBase().
+        if (@file_exists($fullPath)) {
             return $fullPath;
         }
 
