@@ -44,6 +44,17 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     private array $compiledExcludePatterns = [];
 
     /**
+     * The patterns $compiledExcludePatterns was built from, which the walk
+     * respells (#113). Not $excludePatterns: a subclass that writes that
+     * property directly gets none of its patterns compiled, and respelling
+     * them would honour a miscased one while the correctly cased one stayed
+     * ignored.
+     *
+     * @var array<string>
+     */
+    private array $compiledExcludeSources = [];
+
+    /**
      * Directories the latest walk skipped because they could not be opened.
      *
      * @var list<string>
@@ -88,6 +99,16 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     private array $unlistedSpellings = [];
 
     /**
+     * NFC forms of the non-ASCII names in each listing listedSpelling() got
+     * as far as normalising (normalForms()), keyed like $listings, so one
+     * directory is normalised once per walk however many segments are
+     * matched in it (#113). Released with $listings, for the same reason.
+     *
+     * @var array<string, array<string, string>>
+     */
+    private array $normalForms = [];
+
+    /**
      * For each scan root the latest walk respelled (#104), the spellings its
      * entries were typed in, so an exclude written in that spelling still
      * applies (typedSpellings()). It outlives the walk, because subclasses
@@ -98,6 +119,18 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * @var array<string, array<string, true>>
      */
     private array $typedRoots = [];
+
+    /**
+     * Each exclude pattern the latest walk respelled to its on-disk names
+     * (#113), compiled like $compiledExcludePatterns and matched beside
+     * them, so 'App/Http/*' still applies when the entry is typed 'app'.
+     * Only a pattern whose respelling differs is kept, so the common case
+     * adds no per-file work. Walk-derived like $typedRoots, and cleared on
+     * the same reconfigurations, setExcludePatterns() included.
+     *
+     * @var list<string>
+     */
+    private array $respelledExcludePatterns = [];
 
     /**
      * Set the base path.
@@ -112,6 +145,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     {
         $this->basePath = rtrim($path, '/\\');
         $this->typedRoots = [];
+        $this->respelledExcludePatterns = [];
 
         return $this;
     }
@@ -125,6 +159,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     {
         $this->paths = $paths;
         $this->typedRoots = [];
+        $this->respelledExcludePatterns = [];
 
         return $this;
     }
@@ -137,12 +172,20 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     public function setExcludePatterns(array $patterns): static
     {
         $this->excludePatterns = $patterns;
-        $this->compiledExcludePatterns = array_map(
-            fn (string $p): string => '#^'.str_replace(['\*', '\?'], ['.*', '.'], preg_quote($p, '#')).'$#',
-            $patterns
-        );
+        $this->compiledExcludePatterns = array_map(self::compileExcludePattern(...), $patterns);
+        $this->compiledExcludeSources = $patterns;
+        $this->respelledExcludePatterns = [];
 
         return $this;
+    }
+
+    /**
+     * The anchored regex an exclude pattern is matched by: '*' any run of
+     * characters, '/' included, '?' one character, everything else literal.
+     */
+    private static function compileExcludePattern(string $pattern): string
+    {
+        return '#^'.str_replace(['\*', '\?'], ['.*', '.'], preg_quote($pattern, '#')).'$#';
     }
 
     /**
@@ -246,7 +289,9 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         $this->missingPaths = [];
         $this->listings = [];
         $this->unlistedSpellings = [];
+        $this->normalForms = [];
         $this->typedRoots = [];
+        $this->respelledExcludePatterns = [];
         $track = count($paths) > 1;
         /** @var array<string, true> $yielded */
         $yielded = [];
@@ -352,7 +397,15 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * Each [entry, scan root]: the entry resolved to where it is walked
      * (scanRoot()), then respelled to its on-disk names (onDiskSpelling(),
      * #104), recording in $typedRoots the typed spelling of every root that
-     * changed.
+     * changed. Then each exclude pattern setExcludePatterns() compiled is
+     * respelled the same way
+     * (onDiskPattern(), #113), recording in $respelledExcludePatterns every
+     * one that changed, so 'App/Http/*' applies to an entry typed 'app' as
+     * it does to one typed 'App'. The patterns come after the entries, on
+     * the same listings: below a directory that cannot be listed a pattern
+     * adopts the spelling an entry already registered for the same name,
+     * and an entry never adopts one a pattern registered, so the excludes
+     * never change which pathnames the walk yields.
      *
      * The whole step runs under a temporary error handler that swallows
      * every warning, so no host handler sees one. '@' alone does not do
@@ -390,10 +443,19 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
                 $this->typedRoots[$fullPath][$typed] = true;
                 $roots[] = [$entry, $fullPath];
             }
+
+            foreach ($this->compiledExcludeSources as $pattern) {
+                $respelled = $this->onDiskPattern($basePath, $pattern);
+
+                if ($respelled !== $pattern) {
+                    $this->respelledExcludePatterns[] = self::compileExcludePattern($respelled);
+                }
+            }
         } finally {
             restore_error_handler();
             $this->listings = [];
             $this->unlistedSpellings = [];
+            $this->normalForms = [];
         }
 
         // Every root is recorded above and the ones spelled as typed are
@@ -524,19 +586,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
 
             // Nothing at or past a '.' or '..' is listed: '<base>/..' can lie
             // outside open_basedir, where even is_dir() warns.
-            if ($part === '.' || $part === '..') {
-                $name = null;
-            } elseif (($this->listings[$dir.'/'] ??= self::listing($dir.'/')) === [] && $part !== '' && ($stat = @lstat($dir.'/'.$part)) !== false) {
-                // A listable directory always lists '.' and '..', so []
-                // is one that cannot be listed.
-                $name = $this->unlistedSpelling($dir, $part, $stat);
-            } else {
-                $name = self::listedSpelling(
-                    $part,
-                    $this->listings[$dir.'/'],
-                    static fn (string $name): ?string => self::fileIdentity($dir.'/'.$name)
-                );
-            }
+            $name = $part === '.' || $part === '..' ? null : $this->segmentSpelling($dir, $part);
 
             if ($name === null) {
                 return $base.'/'.$spelled.implode('', array_slice($parts, $i));
@@ -547,6 +597,127 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         }
 
         return $base.'/'.$spelled;
+    }
+
+    /**
+     * The name $part takes in $dir, listed once per walk: matched against
+     * the listing (listedSpelling()), or, where $dir cannot be listed, by
+     * what the entries already reached it as (unlistedSpelling(), #112).
+     * Null when that cannot be told. Shared by entries and excludes.
+     */
+    private function segmentSpelling(string $dir, string $part): ?string
+    {
+        // A listable directory always lists '.' and '..', so [] is one that
+        // cannot be listed.
+        if (($this->listings[$dir.'/'] ??= self::listing($dir.'/')) === [] && $part !== '' && ($stat = @lstat($dir.'/'.$part)) !== false) {
+            return $this->unlistedSpelling($dir, $part, $stat);
+        }
+
+        return self::listedSpelling(
+            $part,
+            $this->listings[$dir.'/'],
+            static fn (string $name): ?string => self::fileIdentity($dir.'/'.$name),
+            fn (): array => $this->normalForms[$dir.'/'] ??= self::normalForms($this->listings[$dir.'/'])
+        );
+    }
+
+    /**
+     * $pattern with its literal leading segments spelled the way their
+     * directories list them (#113), so the exclude 'App/Http/*' reads
+     * 'app/Http/*' where the disk folds case and lists 'app'.
+     *
+     * Only the segments before the first one holding '*' or '?' are
+     * respelled, segment by segment as onDiskSpelling() does, and the rest
+     * is kept as written:
+     * a wildcard segment names no one directory to list, so '?pp/HTTP/*'
+     * misses 'Http' whatever case the entry is typed in. A pattern with no
+     * wildcard is respelled in full, as far as it exists. Segments are cut
+     * at '/', the separator relative paths are matched with on every
+     * platform (getRelativePath()).
+     *
+     * A relative pattern is read under the base path. An absolute one is
+     * read under it only when it starts with the base path exactly as
+     * stored and a '/', and only the part after that is respelled; the base
+     * part is kept byte for byte. Anything else comes back as written: a
+     * miscased spelling of the base, a link to it, or an absolute pattern
+     * under a relative base. Reading those through remainderUnderBase(), as
+     * absolute entries are, wrote the respelling under the base as stored,
+     * where it could also match relative paths below it ('p/app/Http/*'
+     * under the relative base 'p' covered 'p/p/app/Http/...'), and on POSIX
+     * a '\' in the pattern or the base was read as a separator. So is
+     * whatever cannot be matched ('.', '..', a name that is not there).
+     *
+     * A directory is listed only for a segment mayBeSpelledOtherwise() says
+     * the volume may fold, so a pattern typed as on disk, or naming
+     * nothing, costs a few lstat() calls rather than a listing per
+     * directory, and one non-ASCII segment lists its own directory alone.
+     * Called only inside resolveRoots(), after the entries, for the reasons
+     * given there.
+     */
+    private function onDiskPattern(string $basePath, string $pattern): string
+    {
+        $literal = substr($pattern, 0, strcspn($pattern, '*?'));
+
+        if ($literal !== $pattern) {
+            $literal = substr($literal, 0, (int) strrpos($literal, '/'));
+        }
+
+        $root = rtrim($basePath, '/\\');
+        $absolute = str_starts_with($literal, '/');
+
+        if ($absolute ? ! str_starts_with($literal, $root.'/') : $literal === '') {
+            return $pattern;
+        }
+
+        $rest = $absolute ? substr($literal, strlen($root) + 1) : $literal;
+
+        $segments = explode('/', $rest);
+        $dir = $root;
+
+        foreach ($segments as $i => $segment) {
+            $identity = $segment === '.' || $segment === '..' || $segment === '' ? null : self::fileIdentity($dir.'/'.$segment);
+            $name = $identity === null ? null : ($this->mayBeSpelledOtherwise($dir, $segment, $identity) ? $this->segmentSpelling($dir, $segment) : $segment);
+
+            if ($name === null) {
+                break;
+            }
+
+            $segments[$i] = $name;
+            $dir .= '/'.$name;
+        }
+
+        return ($absolute ? $root.'/' : '').implode('/', $segments).substr($pattern, strlen($literal));
+    }
+
+    /**
+     * Whether $segment, a name in $dir with lstat() identity $identity, may
+     * be spelled otherwise on disk, so that $dir has to be listed to tell -
+     * the test that keeps onDiskPattern() from listing directories that
+     * cannot change the pattern. Listing every directory on every pattern's
+     * prefix cost a walk a whole directory per pattern, on every filesystem
+     * (a 60k-entry 'big' named by 'big/sub/*' took 0.12 s per walk, 0.0003 s
+     * before #113).
+     *
+     * onDiskPattern() lstat()s each segment as typed, in order. One that
+     * cannot be stat'ed is not there in any spelling the volume folds to -
+     * a case-insensitive volume would have found it - so neither it nor
+     * anything after it can be respelled ('BIG/SUB/*' on ext4). One that
+     * can is its own on-disk spelling unless the volume folds it: its ASCII
+     * case variant is the same file (two lstat() calls, as in
+     * listedSpelling()), it holds a non-ASCII byte, whose normalisation the
+     * volume may fold (APFS, case-sensitive or not) and which cannot be told
+     * without a listing, or an entry already reached it below a directory
+     * that cannot be listed under another spelling (unlistedSpelling(),
+     * #112). A name with no letter has no case to fold. The answer is per
+     * segment, so a non-ASCII name lists its own directory and no other.
+     */
+    private function mayBeSpelledOtherwise(string $dir, string $segment, string $identity): bool
+    {
+        $other = strtolower($segment) !== $segment ? strtolower($segment) : strtoupper($segment);
+
+        return preg_match('/[\\x80-\\xff]/', $segment) === 1
+            || ($other !== $segment && self::fileIdentity($dir.'/'.$other) === $identity)
+            || array_diff($this->unlistedSpellings[$dir.'/'][$identity] ?? [], [$segment]) !== [];
     }
 
     /**
@@ -634,15 +805,21 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * lstat() calls, not one per sibling. That also settles hard links (the
      * case variant is the name meant) and hosts whose lstat() reports no inode
      * (older Windows builds report 0 for every name). Only when no variant is
-     * the same file is every listed name compared by identity, because the
-     * filesystem's folding is not strtolower(): APFS folds Unicode case and
-     * normalisation too, so NFC 'café' typed for an NFD 'café' on disk has no
-     * ASCII variant.
+     * the same file are the names that normalise like it (NFC, ASCII case
+     * aside) tried the same way, where ext-intl is loaded (#113). Only when
+     * none of those is the same file either is every listed name compared
+     * by identity, because the filesystem's folding is not strtolower() or
+     * NFC: APFS folds Unicode case too. Each step answers only when exactly
+     * one name it tried is the file.
+     *
+     * $forms answers normalForms() of $listing, so an instance caller can
+     * keep it for the walk; by default it is built on the spot.
      *
      * @param array<string> $listing
      * @param callable(string): (string|null) $identity
+     * @param (\Closure(): array<string, string>)|null $forms
      */
-    private static function listedSpelling(string $segment, array $listing, callable $identity): ?string
+    private static function listedSpelling(string $segment, array $listing, callable $identity, ?\Closure $forms = null): ?string
     {
         if (in_array($segment, $listing, true)) {
             return $segment;
@@ -663,6 +840,24 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         $variants = array_filter($listing, static fn (string $name): bool => strcasecmp($name, $segment) === 0);
         $same = array_values(array_filter($variants, $isTyped));
 
+        // Then the names that normalise like the segment, ASCII case aside
+        // (#113): NFC 'café' typed for an NFD 'café' stats one name, not the
+        // whole directory. ext-intl is optional; without it, for a segment
+        // that is not valid UTF-8 (Normalizer throws for one under
+        // intl.use_exceptions), and when none of these is the file, the full
+        // comparison below still decides. An ASCII name is its own NFC form,
+        // so it is compared as listed, and only when the segment's form is
+        // ASCII too (KELVIN SIGN normalises to 'K').
+        if ($same === [] && class_exists(\Normalizer::class) && preg_match('//u', $segment) === 1 && ($form = \Normalizer::normalize($segment)) !== false) {
+            $near = array_keys(array_filter(($forms ?? static fn (): array => self::normalForms($listing))(), static fn (string $name): bool => strcasecmp($name, $form) === 0));
+
+            if (preg_match('/[\x80-\xff]/', $form) !== 1) {
+                $near = [...$near, ...array_filter($listing, static fn (string $name): bool => strcasecmp($name, $form) === 0)];
+            }
+
+            $same = array_values(array_filter($near, $isTyped));
+        }
+
         // '.' and '..' are never candidates: neither is a name inside the
         // directory, and stat()ing '<dir>/..' only reaches further out.
         if ($same === []) {
@@ -673,6 +868,33 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         }
 
         return count($same) === 1 ? $same[0] : null;
+    }
+
+    /**
+     * NFC form of each name in $listing that holds a non-ASCII byte and is
+     * valid UTF-8, keyed by the name (#113). ASCII names are their own form
+     * and are left out, and so are names that are not UTF-8, which
+     * Normalizer throws for under intl.use_exceptions - not a warning, so
+     * resolveRoots()' handler would not stop it. Called only with ext-intl
+     * loaded. $normalise replaces Normalizer::normalize() in tests only.
+     *
+     * @param array<string> $listing
+     * @param (\Closure(string): (string|false))|null $normalise
+     *
+     * @return array<string, string>
+     */
+    private static function normalForms(array $listing, ?\Closure $normalise = null): array
+    {
+        $normalise ??= static fn (string $name): string|false => \Normalizer::normalize($name);
+        $forms = [];
+
+        foreach ($listing as $name) {
+            if (preg_match('/[\x80-\xff]/', $name) === 1 && preg_match('//u', $name) === 1 && ($form = $normalise($name)) !== false) {
+                $forms[$name] = $form;
+            }
+        }
+
+        return $forms;
     }
 
     /**
@@ -949,9 +1171,22 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * in: ['App'] beside 'App/Http/*' excludes the 'app/Http/...' files the
      * walk yields, as it did when the walk yielded 'App/Http/...'. A file
      * under a root reached by several entries is excluded by a pattern in any
-     * of their spellings - they all name it. That part reflects the latest
-     * walk until setPaths() or setBasePath() is called; with no walk since,
-     * only the path as given is tried.
+     * of their spellings - they all name it.
+     *
+     * The patterns are tried as written and, where the latest walk found
+     * their literal leading segments spelled otherwise on disk, as respelled
+     * (#113): ['app'] beside 'App/Http/*' or 'app/HTTP/*' excludes the
+     * 'app/Http/...' files too, and an NFC 'app/café/*' the NFD directory
+     * the disk lists. Only the segments before the first wildcard are
+     * respelled, so '?pp/HTTP/*' still misses 'Http'. The record paths
+     * (excludesEntry(), recordUnreadablePath()) come through here, so a
+     * respelled pattern also keeps a missing or unreadable entry it covers
+     * out of the records.
+     *
+     * Both parts reflect the latest walk until setPaths() or setBasePath()
+     * is called, and the respelled patterns until setExcludePatterns() too;
+     * with no walk since, only the path as given and the patterns as
+     * written are tried.
      */
     protected function isExcludedPath(string $path): bool
     {
@@ -990,14 +1225,17 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     }
 
     /**
-     * Match the compiled exclude patterns against both spellings of a path, the
+     * Match the compiled exclude patterns, and the latest walk's on-disk
+     * respellings of them (#113), against both spellings of a path, the
      * relative one and the absolute one, as shouldAnalyzeFile() explains.
      */
     private function matchesExcludePattern(string $relativePath, string $path): bool
     {
-        foreach ($this->compiledExcludePatterns as $regex) {
-            if (preg_match($regex, $relativePath) === 1 || preg_match($regex, $path) === 1) {
-                return true;
+        foreach ([$this->compiledExcludePatterns, $this->respelledExcludePatterns] as $patterns) {
+            foreach ($patterns as $regex) {
+                if (preg_match($regex, $relativePath) === 1 || preg_match($regex, $path) === 1) {
+                    return true;
+                }
             }
         }
 
