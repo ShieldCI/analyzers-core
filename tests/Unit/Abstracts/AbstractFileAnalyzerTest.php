@@ -3767,6 +3767,638 @@ class AbstractFileAnalyzerTest extends TestCase
     }
 
     // =========================================================================
+    // Excludes miscased against a correctly cased entry -
+    // ShieldCI/analyzers-core#113
+    //
+    // An exclude was matched byte for byte against the on-disk pathname, so
+    // one naming the same directory in another case or normalisation missed
+    // it unless the entry was typed in that spelling too: ['App'] honoured
+    // 'App/Http/*', ['app'] did not.
+    // =========================================================================
+
+    public function testAMiscasedExcludeAppliesToACorrectlyCasedEntry(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $analyzer = $this->caseAnalyzer(['app']);
+        $analyzer->setExcludePatterns(['App/Http/*']);
+
+        $this->assertSame([$this->overlapExpected()[1]], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAMiscasedSegmentBelowTheRootOfAnExcludeStillApplies(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $analyzer = $this->caseAnalyzer(['app']);
+        $analyzer->setExcludePatterns(['app/HTTP/*']);
+
+        $this->assertSame([$this->overlapExpected()[1]], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAnExcludeCasedAsOnDiskStillAppliesToACorrectlyCasedEntry(): void
+    {
+        $analyzer = $this->caseAnalyzer(['app']);
+        $analyzer->setExcludePatterns(['app/Http/*']);
+
+        $this->assertSame([$this->overlapExpected()[1]], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAnExcludeInAnotherUnicodeNormalisationStillApplies(): void
+    {
+        $project = $this->unreadableProject();
+        $nfd = "cafe\u{0301}";
+        $nfc = "caf\u{00e9}";
+        mkdir($project . '/app/' . $nfd);
+        file_put_contents($project . '/app/' . $nfd . '/X.php', "<?php\n");
+
+        // The on-disk spelling applies everywhere.
+        $analyzer = $this->caseAnalyzer(['app']);
+        $analyzer->setExcludePatterns(['app/' . $nfd . '/*']);
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+
+        if (! is_dir($project . '/app/' . $nfc)) {
+            $this->markTestSkipped('needs a normalisation-insensitive filesystem (APFS)');
+        }
+
+        $analyzer->setExcludePatterns(['app/' . $nfc . '/*']);
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+    }
+
+    public function testAnOnDiskExcludeAppliesToAMiscasedEntryBelowAnUnlistableDirectory(): void
+    {
+        // app cannot be listed, so the entry keeps its typed 'providers' and
+        // the on-disk 'Providers' cannot be read: the exclude adopts the
+        // spelling the entry registered for the same directory.
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app', 0111);
+
+        $analyzer = $this->caseAnalyzer(['app/providers']);
+        $analyzer->setExcludePatterns(['app/Providers/*']);
+
+        $this->assertSame([], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testExcludesNeverChangeTheSpellingTheWalkYields(): void
+    {
+        // Entries are respelled first: an exclude naming the same directory
+        // in another case adopts the entry's spelling, never the reverse.
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app', 0111);
+
+        $analyzer = $this->caseAnalyzer(['app/providers']);
+        $analyzer->setExcludePatterns(['app/Providers/Nothing/*']);
+
+        $this->assertSame([$project . '/app/providers/P.php'], $analyzer->getPhpFilesPublic());
+    }
+
+    public function testAMiscasedExcludeHidesAnUnreadableDirectoryUnderACorrectlyCasedEntry(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $this->lock($project . '/app/Providers');
+
+        $analyzer = $this->caseAnalyzer(['app']);
+        $analyzer->setExcludePatterns(['App/Providers/*']);
+
+        $this->assertSame([$project . '/app/Http/Controllers/C.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getUnreadablePathsPublic());
+    }
+
+    public function testAMissingEntryUnderAMiscasedExcludeIsNotRecorded(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+
+        $analyzer = $this->caseAnalyzer(['app/Missing']);
+        $analyzer->setExcludePatterns(['App/Missing/*']);
+        $analyzer->getPhpFilesPublic();
+
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testAMiscasedSegmentAfterAWildcardIsLeftAsWritten(): void
+    {
+        // Out of scope: only the literal segments before the first wildcard
+        // are respelled, so 'HTTP' after '*' misses 'Http' whatever case the
+        // entry is typed in.
+        $respelled = new \ReflectionProperty(AbstractFileAnalyzer::class, 'respelledExcludePatterns');
+        $analyzer = $this->caseAnalyzer(['app']);
+        $analyzer->setExcludePatterns(['*/HTTP/*']);
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+        $this->assertSame([], $respelled->getValue($analyzer));
+    }
+
+    public function testAnExcludeAlreadySpelledOnDiskAddsNoPattern(): void
+    {
+        // The common case costs nothing per file.
+        $respelled = new \ReflectionProperty(AbstractFileAnalyzer::class, 'respelledExcludePatterns');
+        $analyzer = $this->caseAnalyzer(['app']);
+        $analyzer->setExcludePatterns(['app/Http/*', 'vendor/*', '*.blade.php']);
+
+        $this->assertSame([$this->overlapExpected()[1]], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $respelled->getValue($analyzer));
+    }
+
+    public function testAMiscasedExcludeNamesNothingOnACaseSensitiveFilesystem(): void
+    {
+        $this->requireCaseSensitiveFilesystem();
+        $respelled = new \ReflectionProperty(AbstractFileAnalyzer::class, 'respelledExcludePatterns');
+        $analyzer = $this->caseAnalyzer(['app']);
+        $analyzer->setExcludePatterns(['App/Http/*', 'app/HTTP/*']);
+
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+        $this->assertSame([], $respelled->getValue($analyzer));
+    }
+
+    public function testWithNoWalkOnlyTheExcludesAsWrittenApply(): void
+    {
+        $this->requireCaseInsensitiveFilesystem();
+        $file = new \SplFileInfo($this->overlapExpected()[0]);
+        $analyzer = $this->caseAnalyzer(['app']);
+        $analyzer->setExcludePatterns(['App/Http/*']);
+
+        $this->assertTrue($analyzer->shouldAnalyzeFilePublic($file));
+
+        iterator_to_array($analyzer->getFilesToAnalyzePublic(), false);
+
+        // Subclasses collect the walk and filter afterwards.
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic($file));
+    }
+
+    public function testReconfiguringForgetsTheRespelledExcludesOfTheLastWalk(): void
+    {
+        $respelled = new \ReflectionProperty(AbstractFileAnalyzer::class, 'respelledExcludePatterns');
+        $file = new \SplFileInfo('/p/app/Http/C.php');
+
+        foreach (['setExcludePatterns' => ['App/Http/*'], 'setPaths' => ['app'], 'setBasePath' => '/p'] as $setter => $value) {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath('/p');
+            $analyzer->setExcludePatterns(['App/Http/*']);
+            $respelled->setValue($analyzer, ['#^app/Http/.*$#']);
+            $this->assertFalse($analyzer->shouldAnalyzeFilePublic($file), $setter);
+
+            $analyzer->{$setter}($value);
+
+            $this->assertTrue($analyzer->shouldAnalyzeFilePublic($file), $setter);
+            $this->assertSame([], $respelled->getValue($analyzer), $setter);
+        }
+    }
+
+    public function testOnDiskPatternRespellsOnlyTheLiteralLeadingSegments(): void
+    {
+        $project = $this->unreadableProject();
+        $analyzer = $this->analyzerWithUnlistedSpelling($project, 'PROVIDERS');
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskPattern');
+
+        $respelled = [
+            'app/Providers/*' => 'app/PROVIDERS/*',
+            'app/Providers' => 'app/PROVIDERS',
+            'app/Providers/P.php' => 'app/PROVIDERS/P.php',
+            'app/Providers/*/x/Y.php' => 'app/PROVIDERS/*/x/Y.php',
+            $project . '/app/Providers/*' => $project . '/app/PROVIDERS/*',
+        ];
+        $asWritten = [
+            'app/Prov*/P.php',
+            'app/Pro?iders/*',
+            '*/Providers/*',
+            'app/../app/Providers/*',
+            'app/./Providers/*',
+            '/elsewhere/app/Providers/*',
+            'app/Gone/*',
+            '',
+        ];
+
+        foreach ($respelled as $pattern => $expected) {
+            $this->assertSame($expected, $method->invoke($analyzer, $project, $pattern), (string) $pattern);
+        }
+
+        foreach ($asWritten as $pattern) {
+            $this->assertSame($pattern, $method->invoke($analyzer, $project, $pattern), $pattern);
+        }
+    }
+
+    public function testTheWalkRespellsTheExcludesOnceItsEntriesAreSpelled(): void
+    {
+        // Runs on any volume, so removing the step fails CI too: the
+        // listings resolveRoots() would build are stood in for.
+        $project = $this->unreadableProject();
+        $resolveRoots = new \ReflectionMethod(AbstractFileAnalyzer::class, 'resolveRoots');
+        $analyzer = $this->analyzerWithUnlistedSpelling($project, 'PROVIDERS');
+        $analyzer->setExcludePatterns(['app/Providers/*']);
+        $file = new \SplFileInfo($project . '/app/PROVIDERS/P.php');
+
+        $this->assertTrue($analyzer->shouldAnalyzeFilePublic($file));
+
+        $resolveRoots->invoke($analyzer, $project, ['app']);
+
+        $this->assertFalse($analyzer->shouldAnalyzeFilePublic($file));
+        $this->assertTrue($analyzer->shouldAnalyzeFilePublic(new \SplFileInfo($project . '/app/Http/Controllers/C.php')));
+        // The record paths go through the same test.
+        $this->assertTrue((new \ReflectionMethod(AbstractFileAnalyzer::class, 'excludesEveryPhpFileIn'))->invoke($analyzer, $project . '/app/PROVIDERS'));
+    }
+
+    public function testAPatternWrittenStraightToThePropertyIsNotRespelled(): void
+    {
+        // setExcludePatterns() compiles the patterns; one written to the
+        // property directly never applied, and a respelling must not make a
+        // miscased one apply where the correctly cased one does not.
+        $project = $this->unreadableProject();
+        $resolveRoots = new \ReflectionMethod(AbstractFileAnalyzer::class, 'resolveRoots');
+        $respelled = new \ReflectionProperty(AbstractFileAnalyzer::class, 'respelledExcludePatterns');
+        $analyzer = $this->analyzerWithUnlistedSpelling($project, 'PROVIDERS');
+        (new \ReflectionProperty(AbstractFileAnalyzer::class, 'excludePatterns'))->setValue($analyzer, ['app/Providers/*']);
+
+        $resolveRoots->invoke($analyzer, $project, ['app']);
+
+        $this->assertSame([], $respelled->getValue($analyzer));
+        $this->assertTrue($analyzer->shouldAnalyzeFilePublic(new \SplFileInfo($project . '/app/PROVIDERS/P.php')));
+
+        // End to end, as a subclass constructor writing the property would.
+        foreach ([['App/Http/*'], ['app/Http/*']] as $patterns) {
+            $direct = new DirectExcludeFileAnalyzer($patterns);
+            $direct->setBasePath($project);
+            $direct->setPaths(['app']);
+
+            $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($direct), $patterns[0]);
+        }
+    }
+
+    public function testRespellingAPatternListsNothingWhereNoNameCouldFold(): void
+    {
+        // A name with no letter has no case to fold, and a name that cannot
+        // be stat'ed is not there in any spelling: neither needs a listing,
+        // on any volume.
+        $project = $this->unreadableProject();
+        mkdir($project . '/123/456', 0777, true);
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $onDiskPattern = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskPattern');
+        $analyzer = new ConcreteFileAnalyzer();
+
+        foreach (['123/456/*', '123/456', '123/9/*', 'gone/*', 'Gone/x/y.php', $project . '/123/*'] as $pattern) {
+            $this->assertSame($pattern, $onDiskPattern->invoke($analyzer, $project, $pattern), $pattern);
+        }
+
+        $this->assertSame([], $listings->getValue($analyzer));
+    }
+
+    public function testRespellingACorrectlySpelledPatternListsNothingWhereNamesKeepCase(): void
+    {
+        // The reviewer's case, counted rather than timed: a large directory
+        // the entries never touch, named by excludes typed as on disk, or
+        // miscased so they name nothing. Each used to list every directory
+        // on the pattern's literal prefix on every walk.
+        $this->requireCaseSensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $big = $project . '/big';
+        mkdir($big . '/sub', 0777, true);
+        mkdir($big . "/cafe\u{0301}");
+        file_put_contents($big . '/Z.php', "<?php\n");
+        $patterns = ['big/sub/*', 'big/Z.php', 'BIG/SUB/*', 'big/SUB/*', $project . '/big/sub/*'];
+
+        for ($i = 0; $i < 50; $i++) {
+            mkdir($big . '/sub' . $i);
+            $patterns[] = 'big/sub' . $i . '/*';
+        }
+
+        // Only where the volume does not fold normalisation, as ext4 does
+        // not: there the NFC spelling names nothing.
+        if (! is_dir($big . "/caf\u{00e9}")) {
+            $patterns[] = "big/caf\u{00e9}/*";
+        }
+
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $onDiskPattern = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskPattern');
+        $analyzer = new ConcreteFileAnalyzer();
+
+        foreach ($patterns as $pattern) {
+            $this->assertSame($pattern, $onDiskPattern->invoke($analyzer, $project, $pattern), $pattern);
+        }
+
+        $this->assertSame([], $listings->getValue($analyzer));
+
+        $walk = $this->caseAnalyzer(['app']);
+        $walk->setExcludePatterns($patterns);
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($walk));
+    }
+
+    public function testAPatternAdoptsAnUnlistedSpellingOfANameWithNoLetter(): void
+    {
+        // No case to fold, but an entry already reached '1' below an
+        // unlistable base as '01': the pattern follows it, on any volume.
+        $project = $this->unreadableProject();
+        mkdir($project . '/1');
+        $stat = lstat($project . '/1');
+        $this->assertNotFalse($stat);
+        $analyzer = new ConcreteFileAnalyzer();
+        (new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings'))
+            ->setValue($analyzer, [$project . '/' => []]);
+        (new \ReflectionProperty(AbstractFileAnalyzer::class, 'unlistedSpellings'))
+            ->setValue($analyzer, [$project . '/' => [$stat['dev'] . ':' . $stat['ino'] => ['01']]]);
+        $onDiskPattern = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskPattern');
+
+        $this->assertSame('01/*', $onDiskPattern->invoke($analyzer, $project, '1/*'));
+    }
+
+    public function testTheNormalisationFallbackStatsOnlyTheNamesThatNormaliseAlike(): void
+    {
+        // NFC 'café' typed for an NFD 'café' on disk has no ASCII case
+        // variant, and every listed name used to be stat'ed to find it.
+        if (! class_exists(\Normalizer::class)) {
+            $this->markTestSkipped('needs ext-intl');
+        }
+
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'listedSpelling');
+        $nfc = "caf\u{00e9}";
+        $nfd = "cafe\u{0301}";
+        $listing = ['.', '..', $nfd];
+
+        for ($i = 0; $i < 1000; $i++) {
+            $listing[] = "f{$i}";
+        }
+
+        $calls = [];
+        $identity = static function (string $name) use (&$calls, $nfc, $nfd): string {
+            $calls[] = $name;
+
+            return in_array($name, [$nfc, $nfd], true) ? '1:1' : '1:' . crc32($name);
+        };
+
+        // One lstat for the typed name, one for the one name that
+        // normalises alike - not one per sibling.
+        $this->assertSame($nfd, $method->invoke(null, $nfc, $listing, $identity));
+        $this->assertSame([$nfc, $nfd], $calls);
+
+        // ASCII case is folded too: 'CAFÉ' normalises like 'Café'.
+        $calls = [];
+        $this->assertSame($nfd, $method->invoke(null, "CAF\u{00e9}", $listing, static function (string $name) use (&$calls): string {
+            $calls[] = $name;
+
+            return $name === "CAF\u{00e9}" || $name === "cafe\u{0301}" ? '1:1' : '1:' . crc32($name);
+        }));
+        $this->assertCount(2, $calls);
+
+        // When none of those is the file, every name is still compared, and
+        // exactly one must be the file.
+        $other = static fn (string $name): string => in_array($name, [$nfc, 'f7'], true) ? '1:1' : '1:' . crc32($name);
+        $this->assertSame('f7', $method->invoke(null, $nfc, $listing, $other));
+        $twins = static fn (string $name): string => in_array($name, [$nfc, 'f7', 'f8'], true) ? '1:1' : '1:' . crc32($name);
+        $this->assertNull($method->invoke(null, $nfc, $listing, $twins));
+    }
+
+    public function testOnlyValidNonAsciiNamesAreNormalised(): void
+    {
+        // An ASCII name is its own NFC form, and Normalizer throws for
+        // invalid UTF-8 under intl.use_exceptions: neither is sent to it.
+        if (! class_exists(\Normalizer::class)) {
+            $this->markTestSkipped('needs ext-intl');
+        }
+
+        $normalForms = new \ReflectionMethod(AbstractFileAnalyzer::class, 'normalForms');
+        $nfd = "cafe\u{0301}";
+        $listing = ['.', '..', $nfd, "bad\xff", "\u{00f1}"];
+
+        for ($i = 0; $i < 1000; $i++) {
+            $listing[] = "f{$i}";
+        }
+
+        $calls = [];
+        $normalise = static function (string $name) use (&$calls): string|false {
+            $calls[] = $name;
+
+            return \Normalizer::normalize($name);
+        };
+
+        $this->assertSame([$nfd => "caf\u{00e9}", "\u{00f1}" => "\u{00f1}"], $normalForms->invoke(null, $listing, $normalise));
+        $this->assertSame([$nfd, "\u{00f1}"], $calls);
+    }
+
+    public function testListedSpellingAsksForTheNormalFormsOnlyWhenItGetsThatFar(): void
+    {
+        if (! class_exists(\Normalizer::class)) {
+            $this->markTestSkipped('needs ext-intl');
+        }
+
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'listedSpelling');
+        $asked = [];
+        $forms = static function () use (&$asked): array {
+            $asked[] = true;
+
+            return [];
+        };
+
+        // Settled by an ASCII case variant: never asked.
+        $this->assertSame('App', $method->invoke(null, 'app', ['.', '..', 'App'], static fn (string $name): string => '1:1', $forms));
+        $this->assertCount(0, $asked);
+
+        // KELVIN SIGN normalises to an ASCII 'K', so the ASCII names are
+        // compared too, ASCII case aside; asked once.
+        $kelvin = "\u{212a}";
+        $identity = static fn (string $name): string => in_array($name, [$kelvin, 'k'], true) ? '1:1' : '1:' . crc32($name);
+        $this->assertSame('k', $method->invoke(null, $kelvin, ['.', '..', 'x', 'k'], $identity, $forms));
+        $this->assertCount(1, $asked);
+    }
+
+    public function testAnInvalidUtf8NameDoesNotThrowUnderIntlExceptions(): void
+    {
+        if (! class_exists(\Normalizer::class)) {
+            $this->markTestSkipped('needs ext-intl');
+        }
+
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'listedSpelling');
+        $nfc = "caf\u{00e9}";
+        $nfd = "cafe\u{0301}";
+        $identity = static fn (string $n): string => in_array($n, [$nfc, $nfd], true) ? '1:1' : '1:' . crc32($n);
+        $previous = ini_set('intl.use_exceptions', '1');
+
+        try {
+            $this->assertSame($nfd, $method->invoke(null, $nfc, ['.', '..', "bad\xff", $nfd], $identity));
+            // An invalid segment skips the step; the full comparison decides.
+            $this->assertSame($nfd, $method->invoke(null, "bad\xfe", ['.', '..', "bad\xff", $nfd], static fn (string $n): string => in_array($n, ["bad\xfe", $nfd], true) ? '1:1' : '1:' . crc32($n)));
+        } finally {
+            ini_set('intl.use_exceptions', (string) $previous);
+        }
+    }
+
+    public function testTheNormalisedListingIsBuiltOncePerDirectoryPerWalk(): void
+    {
+        if (! class_exists(\Normalizer::class)) {
+            $this->markTestSkipped('needs ext-intl');
+        }
+
+        // A file reached as NFC, listed only as its NFD hard link (on a
+        // volume that folds normalisation, the NFD name is the same file
+        // anyway), so segmentSpelling() gets as far as the normal forms on
+        // any volume. The listing is stood in for.
+        $dir = $this->testDir . '/src';
+        $nfc = "caf\u{00e9}";
+        $nfd = "cafe\u{0301}";
+        file_put_contents($dir . '/' . $nfc, '');
+        @link($dir . '/' . $nfc, $dir . '/' . $nfd);
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $normalForms = new \ReflectionProperty(AbstractFileAnalyzer::class, 'normalForms');
+        $segmentSpelling = new \ReflectionMethod(AbstractFileAnalyzer::class, 'segmentSpelling');
+        $analyzer = new ConcreteFileAnalyzer();
+        $listings->setValue($analyzer, [$dir . '/' => ['.', '..', $nfd]]);
+
+        $this->assertSame($nfd, $segmentSpelling->invoke($analyzer, $dir, $nfc));
+        $this->assertSame([$dir . '/' => [$nfd => $nfc]], $normalForms->getValue($analyzer));
+
+        // A later segment in the same directory reuses them.
+        $listings->setValue($analyzer, [$dir . '/' => ['.', '..', $nfd, "\u{00f1}"]]);
+        $this->assertSame($nfd, $segmentSpelling->invoke($analyzer, $dir, $nfc));
+        $this->assertSame([$dir . '/' => [$nfd => $nfc]], $normalForms->getValue($analyzer));
+
+        // And a walk releases them with the listings.
+        $walk = $this->caseAnalyzer(['app']);
+        $normalForms->setValue($walk, [$dir . '/' => [$nfd => $nfc]]);
+        $walk->getPhpFilesPublic();
+        $this->assertSame([], $normalForms->getValue($walk));
+    }
+
+    public function testAnExcludeThroughALinkToABaseNamedWithAStarIsLeftAsWritten(): void
+    {
+        // Through the link the pattern is not under the base as stored, so
+        // it is not respelled, and the base's '*' is never written into a
+        // respelling where it would match as a wildcard (p*q/sub/q/...).
+        $base = $this->testDir . '/p*q';
+        mkdir($base . '/app/Http', 0777, true);
+        mkdir($base . '/sub/q/app/Http', 0777, true);
+        file_put_contents($base . '/app/K.php', "<?php\n");
+        file_put_contents($base . '/app/Http/H.php', "<?php\n");
+        file_put_contents($base . '/sub/q/app/Http/S.php', "<?php\n");
+
+        if (! @symlink($base, $this->testDir . '/plink')) {
+            $this->markTestSkipped('symlink() is not available here');
+        }
+
+        try {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath($base);
+            $analyzer->setPaths(['app', 'sub']);
+            $analyzer->setExcludePatterns([$this->testDir . '/plink/app/Http/*']);
+
+            $this->assertSame(
+                [$base . '/app/Http/H.php', $base . '/app/K.php', $base . '/sub/q/app/Http/S.php'],
+                $this->sortedPhpFiles($analyzer)
+            );
+        } finally {
+            unlink($this->testDir . '/plink');
+        }
+    }
+
+    public function testAnAbsoluteExcludeIsNotReadUnderARelativeBase(): void
+    {
+        // Under the relative base 'p' a respelling would be written 'p/...',
+        // which also matches the relative path of 'p/p/app/Http/I.php'. An
+        // absolute pattern is respelled only under the base as stored.
+        $cwd = (string) getcwd();
+        $project = $this->testDir . '/p';
+        mkdir($project . '/app/Http', 0777, true);
+        mkdir($project . '/p/app/Http', 0777, true);
+        file_put_contents($project . '/app/Http/H.php', "<?php\n");
+        file_put_contents($project . '/p/app/Http/I.php', "<?php\n");
+        chdir($this->testDir);
+
+        try {
+            $analyzer = new ConcreteFileAnalyzer();
+            $analyzer->setBasePath('p');
+            $analyzer->setPaths(['']);
+            $analyzer->setExcludePatterns([$project . '/app/Http/*']);
+
+            $this->assertSame(['p/app/Http/H.php', 'p/p/app/Http/I.php'], $this->sortedPhpFiles($analyzer));
+        } finally {
+            chdir($cwd);
+        }
+    }
+
+    public function testAnAbsoluteExcludeKeepsItsBackslashesOnPosix(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('A backslash is a separator on Windows, not a filename byte.');
+        }
+
+        // 'a\b' is one name on POSIX: an exclude naming it must not be read
+        // as 'a/b', nor a base 'p\q' as 'p/q'.
+        $project = $this->testDir . '/p';
+        mkdir($project . '/a\b/http', 0777, true);
+        mkdir($project . '/a/b/http', 0777, true);
+        file_put_contents($project . '/a\b/http/X.php', "<?php\n");
+        file_put_contents($project . '/a/b/http/Y.php', "<?php\n");
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        $analyzer->setPaths(['']);
+        $analyzer->setExcludePatterns([$project . '/a\b/http/*']);
+
+        $this->assertSame([$project . '/a/b/http/Y.php'], $this->sortedPhpFiles($analyzer));
+
+        $base = $this->testDir . '/p\q';
+        mkdir($base . '/app', 0777, true);
+        file_put_contents($base . '/app/A.php', "<?php\n");
+        $analyzer->setBasePath($base);
+        $analyzer->setExcludePatterns([$this->testDir . '/p/q/app/*']);
+
+        $this->assertSame([$base . '/app/A.php'], $this->sortedPhpFiles($analyzer));
+    }
+
+    public function testAPatternListsOnlyTheDirectoriesWhoseNamesMayFold(): void
+    {
+        // Decided per segment: an ASCII name the volume keeps apart from its
+        // case variant needs no listing, before or after a non-ASCII one.
+        $this->requireCaseSensitiveFilesystem();
+        $project = $this->unreadableProject();
+        mkdir($project . "/big/caf\u{00e9}", 0777, true);
+        mkdir($project . "/\u{00f1}/big2/sub", 0777, true);
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $onDiskPattern = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskPattern');
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $this->assertSame("big/caf\u{00e9}/*", $onDiskPattern->invoke($analyzer, $project, "big/caf\u{00e9}/*"));
+        $this->assertSame([$project . '/big/'], array_keys((array) $listings->getValue($analyzer)));
+
+        $analyzer = new ConcreteFileAnalyzer();
+        $this->assertSame("\u{00f1}/big2/sub/*", $onDiskPattern->invoke($analyzer, $project, "\u{00f1}/big2/sub/*"));
+        $this->assertSame([$project . '/'], array_keys((array) $listings->getValue($analyzer)));
+    }
+
+    public function testAnAbsoluteExcludeOutsideTheStoredBaseIsLeftAsWritten(): void
+    {
+        // Only the base exactly as stored is read: a miscased spelling of
+        // it, a link to it, or a path elsewhere comes back as written.
+        $project = $this->unreadableProject();
+        $onDiskPattern = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskPattern');
+        $analyzer = $this->caseAnalyzer(['app']);
+
+        foreach ([$this->testDir . '/src/File1.php', $this->testDir . '/UNREADABLE-PROJECT/app/Http/*', $this->testDir . '/projlink/app/Http/*'] as $pattern) {
+            $this->assertSame($pattern, $onDiskPattern->invoke($analyzer, $project, $pattern), $pattern);
+        }
+
+        $analyzer->setExcludePatterns([$this->testDir . '/src/*']);
+        $this->assertSame($this->overlapExpected(), $this->sortedPhpFiles($analyzer));
+    }
+
+    /**
+     * An analyzer under $project that takes app as unlistable and app/Providers
+     * as already reached under $spelling - what a case-insensitive volume
+     * answers below a 0111 app for an entry typed that way - on any volume.
+     */
+    private function analyzerWithUnlistedSpelling(string $project, string $spelling): ConcreteFileAnalyzer
+    {
+        $stat = lstat($project . '/app/Providers');
+        $this->assertNotFalse($stat);
+        $analyzer = new ConcreteFileAnalyzer();
+        $analyzer->setBasePath($project);
+        (new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings'))
+            ->setValue($analyzer, [$project . '/app/' => []]);
+        (new \ReflectionProperty(AbstractFileAnalyzer::class, 'unlistedSpellings'))
+            ->setValue($analyzer, [$project . '/app/' => [$stat['dev'] . ':' . $stat['ino'] => [$spelling]]]);
+
+        return $analyzer;
+    }
+
+    // =========================================================================
     // Paths open_basedir refuses - ShieldCI/analyzers-core#106
     // =========================================================================
 
@@ -4548,6 +5180,19 @@ class JavaScriptFileAnalyzer extends ConcreteFileAnalyzer
         sort($files);
 
         return $files;
+    }
+}
+
+// Writes its exclude patterns straight to the protected property, bypassing
+// setExcludePatterns(), as a subclass constructor might.
+class DirectExcludeFileAnalyzer extends ConcreteFileAnalyzer
+{
+    /**
+     * @param  array<string>  $patterns
+     */
+    public function __construct(array $patterns)
+    {
+        $this->excludePatterns = $patterns;
     }
 }
 
