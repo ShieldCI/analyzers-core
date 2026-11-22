@@ -695,30 +695,21 @@ class AstParser implements RecordingParserInterface
     /**
      * Check if code contains variable interpolation in strings.
      *
+     * Only double-quoted strings and heredocs that embed a variable or
+     * expression parse to InterpolatedString nodes. Single-quoted strings,
+     * nowdocs and escaped dollar signs parse to String_ literals, so text like
+     * '$name' in them is never interpolated and is not reported.
+     *
      * @param array<Node> $ast
      */
     public function hasVariableInterpolation(array $ast): bool
     {
-        // Check for InterpolatedString nodes (double-quoted strings with variables)
         $interpolated = $this->nodeFinder->findFirst(
             $ast,
             fn (Node $node) => $node instanceof Node\Scalar\InterpolatedString
         );
 
-        if ($interpolated !== null) {
-            return true;
-        }
-
-        // Also check regular strings that might contain interpolation syntax
-        $strings = $this->nodeFinder->findInstanceOf($ast, Node\Scalar\String_::class);
-
-        foreach ($strings as $string) {
-            if (str_contains($string->value, '{$') || preg_match('/\$\w+/', $string->value)) {
-                return true;
-            }
-        }
-
-        return false;
+        return $interpolated !== null;
     }
 
     /**
