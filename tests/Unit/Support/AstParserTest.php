@@ -553,6 +553,234 @@ PHP;
         $this->assertCount(1, $strlenCalls);
     }
 
+    public function testFindFunctionCallsMatchesFunctionNameCaseInsensitively(): void
+    {
+        // PHP function names are case-insensitive: SYSTEM() calls system()
+        $ast = $this->parser->parseCode('<?php SYSTEM($c); system($c); System($c);');
+
+        $this->assertCount(3, $this->parser->findFunctionCalls($ast, 'system'));
+    }
+
+    public function testFindFunctionCallsMatchesUppercaseAssertCall(): void
+    {
+        $ast = $this->parser->parseCode('<?php ASSERT($_GET["x"]);');
+
+        $this->assertCount(1, $this->parser->findFunctionCalls($ast, 'assert'));
+    }
+
+    public function testFindFunctionCallsMatchesFullyQualifiedNameCaseInsensitively(): void
+    {
+        $ast = $this->parser->parseCode('<?php \SYSTEM($c); \system($c);');
+
+        $this->assertCount(2, $this->parser->findFunctionCalls($ast, 'system'));
+    }
+
+    public function testFindFunctionCallsAcceptsMixedCaseSearchName(): void
+    {
+        $ast = $this->parser->parseCode('<?php system($c);');
+
+        $this->assertCount(1, $this->parser->findFunctionCalls($ast, 'System'));
+    }
+
+    public function testFindFunctionCallsStillRequiresTheSameName(): void
+    {
+        $ast = $this->parser->parseCode('<?php systems($c); SYSTEMS($c); sys($c);');
+
+        $this->assertEmpty($this->parser->findFunctionCalls($ast, 'system'));
+    }
+
+    public function testFindFunctionCallsDoesNotMatchDynamicNameCaseInsensitively(): void
+    {
+        $ast = $this->parser->parseCode('<?php $SYSTEM($c); $system($c);');
+
+        $this->assertEmpty($this->parser->findFunctionCalls($ast, 'system'));
+    }
+
+    public function testFindFunctionCallsFoldsOnlyAsciiCaseLikePhp(): void
+    {
+        // PHP folds only ASCII letters in identifiers: café() and CAFé() are the same
+        // function, CAFÉ() is a different one. The exact name still matches.
+        $ast = $this->parser->parseCode('<?php café(); CAFé(); CAFÉ();');
+
+        $this->assertCount(2, $this->parser->findFunctionCalls($ast, 'café'));
+        $this->assertCount(1, $this->parser->findFunctionCalls($ast, 'CAFÉ'));
+    }
+
+    public function testFindStaticCallsMatchesClassAndMethodCaseInsensitively(): void
+    {
+        $ast = $this->parser->parseCode('<?php hash::make($c); Hash::Make($c); Hash::make($c); HASH::MAKE($c);');
+
+        $this->assertCount(4, $this->parser->findStaticCalls($ast, 'Hash', 'make'));
+    }
+
+    public function testFindStaticCallsAcceptsMixedCaseSearchNames(): void
+    {
+        $ast = $this->parser->parseCode('<?php Hash::make($c);');
+
+        $this->assertCount(1, $this->parser->findStaticCalls($ast, 'HASH', 'MAKE'));
+    }
+
+    public function testFindStaticCallsMatchesFullyQualifiedClassCaseInsensitively(): void
+    {
+        $ast = $this->parser->parseCode('<?php \hash::make($c); \Hash::make($c);');
+
+        $this->assertCount(2, $this->parser->findStaticCalls($ast, 'Hash', 'make'));
+    }
+
+    public function testFindStaticCallsStillRequiresTheSameClassAndMethod(): void
+    {
+        $ast = $this->parser->parseCode('<?php Hashes::make($c); Hash::makes($c); Foo\Hash::make($c); foo\hash::make($c);');
+
+        $this->assertEmpty($this->parser->findStaticCalls($ast, 'Hash', 'make'));
+    }
+
+    public function testFindStaticCallsDoesNotMatchVariableClassCaseInsensitively(): void
+    {
+        $ast = $this->parser->parseCode('<?php $cls::make($c); $hash::MAKE($c);');
+
+        $this->assertEmpty($this->parser->findStaticCalls($ast, 'Hash', 'make'));
+    }
+
+    public function testNamespaceRelativeFunctionCallIsNotTheGlobalFunction(): void
+    {
+        // namespace\SYSTEM() inside namespace App calls App\SYSTEM, not the global system()
+        $ast = $this->parser->parseCode('<?php namespace App; function system($c) {} namespace\SYSTEM($_GET["c"]);');
+
+        $this->assertCount(0, $this->parser->findFunctionCalls($ast, 'system'));
+    }
+
+    public function testLowercaseNamespaceRelativeFunctionCallIsNotTheGlobalFunction(): void
+    {
+        $ast = $this->parser->parseCode('<?php namespace App; function system($c) {} namespace\system($_GET["c"]);');
+
+        $this->assertCount(0, $this->parser->findFunctionCalls($ast, 'system'));
+    }
+
+    public function testNamespaceRelativeClassIsNotTheWrittenShortName(): void
+    {
+        $ast = $this->parser->parseCode('<?php namespace App; namespace\Hash::make($c);');
+
+        $this->assertCount(0, $this->parser->findStaticCalls($ast, 'Hash', 'make'));
+    }
+
+    public function testNamespaceRelativeCallInGlobalNamespaceIsTheGlobalFunction(): void
+    {
+        // Outside a named namespace, namespace\system() is \system()
+        $ast = $this->parser->parseCode('<?php namespace\system($_GET["c"]);');
+
+        $this->assertCount(1, $this->parser->findFunctionCalls($ast, 'system'));
+    }
+
+    public function testNamespaceRelativeCallInBracedGlobalNamespaceIsTheGlobalFunction(): void
+    {
+        $ast = $this->parser->parseCode('<?php namespace { namespace\SYSTEM($_GET["c"]); }');
+
+        $this->assertCount(1, $this->parser->findFunctionCalls($ast, 'system'));
+    }
+
+    public function testNamespaceRelativeClassInGlobalNamespaceIsTheGlobalClass(): void
+    {
+        $ast = $this->parser->parseCode('<?php namespace\Hash::make($c);');
+
+        $this->assertCount(1, $this->parser->findStaticCalls($ast, 'Hash', 'make'));
+    }
+
+    public function testNamespaceRelativeNameIsJudgedPerNamespaceBlock(): void
+    {
+        $code = '<?php namespace App { namespace\system($c); namespace\Hash::make($c); } '
+            . 'namespace { namespace\system($c); namespace\Hash::make($c); }';
+        $ast = $this->parser->parseCode($code);
+
+        $this->assertCount(1, $this->parser->findFunctionCalls($ast, 'system'));
+        $this->assertCount(1, $this->parser->findStaticCalls($ast, 'Hash', 'make'));
+    }
+
+    public function testNamespaceRelativeNameInSubAstWithoutItsNamespaceIsTreatedAsGlobal(): void
+    {
+        // A sub-AST passed without its enclosing namespace has no namespace context, so a
+        // namespace-relative name in it is conservatively treated as global.
+        $ast = $this->parser->parseCode('<?php namespace App; $f = function () { namespace\system($c); namespace\Hash::make($c); };');
+        $closures = $this->parser->findNodes($ast, Expr\Closure::class);
+        $this->assertCount(1, $closures);
+
+        $this->assertCount(0, $this->parser->findFunctionCalls($ast, 'system'));
+        $this->assertCount(1, $this->parser->findFunctionCalls($closures, 'system'));
+        $this->assertCount(1, $this->parser->findStaticCalls($closures, 'Hash', 'make'));
+    }
+
+    public function testFindFunctionCallsTraversesOnceWhenNoRelativeNameMatches(): void
+    {
+        // A namespace-relative name that does not match, plus many ordinary calls: the
+        // namespace scope is never needed, so the AST is walked exactly once.
+        [$ast, $probe] = $this->namespacedAstWithProbe(
+            '<?php namespace App; system($c); SYSTEM($c); strlen($c); namespace\other($c); Hash::make($c);'
+        );
+
+        $this->assertCount(2, $this->parser->findFunctionCalls($ast, 'system'));
+        $this->assertSame(1, $probe->visits);
+    }
+
+    public function testFindStaticCallsTraversesOnceWhenNoRelativeNameMatches(): void
+    {
+        [$ast, $probe] = $this->namespacedAstWithProbe(
+            '<?php namespace App; Hash::make($c); HASH::MAKE($c); Other::make($c); namespace\Other::make($c);'
+        );
+
+        $this->assertCount(2, $this->parser->findStaticCalls($ast, 'Hash', 'make'));
+        $this->assertSame(1, $probe->visits);
+    }
+
+    public function testRelativeNameMatchStillResolvesNamespaceScopeAmongManyCalls(): void
+    {
+        $calls = str_repeat('system($c); Hash::make($c); strlen($c); ', 50);
+        [$ast, $probe] = $this->namespacedAstWithProbe(
+            '<?php namespace App; ' . $calls . 'namespace\system($c); namespace\SYSTEM($c); namespace\Hash::make($c);'
+        );
+
+        // The relative names are inside namespace App, so only the 50 plain calls match.
+        $this->assertCount(50, $this->parser->findFunctionCalls($ast, 'system'));
+        $this->assertCount(50, $this->parser->findStaticCalls($ast, 'Hash', 'make'));
+        // Each finder walks the AST once to search and twice more, once per call, to
+        // compute the namespace scope: 3 for findFunctionCalls + 3 for findStaticCalls.
+        $this->assertSame(6, $probe->visits);
+    }
+
+    /**
+     * Parses $code (a single `namespace X;` file) and appends a node to the namespace that
+     * counts how many times a traversal descends into it.
+     *
+     * @return array{0: array<\PhpParser\Node>, 1: Stmt\Nop&object{visits: int}}
+     */
+    private function namespacedAstWithProbe(string $code): array
+    {
+        $ast = $this->parser->parseCode($code);
+        $namespace = $ast[0];
+        $this->assertInstanceOf(Stmt\Namespace_::class, $namespace);
+
+        $probe = new class () extends Stmt\Nop {
+            public int $visits = 0;
+
+            public function getSubNodeNames(): array
+            {
+                $this->visits++;
+
+                return [];
+            }
+        };
+        $namespace->stmts[] = $probe;
+
+        return [$ast, $probe];
+    }
+
+    public function testFindStaticCallsFoldsOnlyAsciiCaseLikePhp(): void
+    {
+        $ast = $this->parser->parseCode('<?php Café::make(); CAFé::make(); CAFÉ::make(); Hash::créer(); HASH::CRéER(); Hash::CRÉER();');
+
+        $this->assertCount(2, $this->parser->findStaticCalls($ast, 'Café', 'make'));
+        $this->assertCount(1, $this->parser->findStaticCalls($ast, 'CAFÉ', 'make'));
+        $this->assertCount(2, $this->parser->findStaticCalls($ast, 'Hash', 'créer'));
+    }
+
     public function testHasVariableInterpolationDetectsVariablesInStringValues(): void
     {
         // Both strings are double-quoted with real variables, so both parse to
