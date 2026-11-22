@@ -594,12 +594,27 @@ class AstParser implements RecordingParserInterface
     }
 
     /**
+     * Find static calls by class and method name.
+     *
+     * Both names are matched case-insensitively, as PHP resolves them (ASCII case folding
+     * only, like PHP's own). The class is compared by its name as written, ignoring a leading
+     * `\`: `Hash::make()` and `\Hash::make()` match 'Hash', `Foo\Hash::make()` does not.
+     *
+     * A namespace-relative `namespace\Hash::make()` names `\Hash` only in the global namespace,
+     * so it is not matched inside a named namespace (`namespace App;` / `namespace App { }`) and
+     * is matched elsewhere. A sub-AST passed without its enclosing namespace statement has no
+     * namespace context, so its namespace-relative names are treated as global.
+     *
      * @param array<Node> $ast
      * @return array<Node>
      */
     public function findStaticCalls(array $ast, string $className, string $methodName): array
     {
-        return $this->nodeFinder->find($ast, function (Node $node) use ($className, $methodName) {
+        // Computed only when a namespace-relative class name matches, so a file without one
+        // is walked once.
+        $scoped = null;
+
+        return $this->nodeFinder->find($ast, function (Node $node) use ($ast, $className, $methodName, &$scoped) {
             if (! $node instanceof Expr\StaticCall) {
                 return false;
             }
@@ -608,38 +623,96 @@ class AstParser implements RecordingParserInterface
                 return false;
             }
 
-            if ($node->name->name !== $methodName) {
+            if (strcasecmp($node->name->name, $methodName) !== 0) {
                 return false;
             }
 
-            // Check class name
-            if ($node->class instanceof Node\Name) {
-                return $node->class->toString() === $className;
+            if (! $node->class instanceof Node\Name) {
+                return false;
             }
 
-            return false;
+            if (strcasecmp($node->class->toString(), $className) !== 0) {
+                return false;
+            }
+
+            // A namespace-relative name inside a named namespace is not the global class
+            // written after the prefix, so it is not matched.
+            if ($node->class instanceof Node\Name\Relative) {
+                $scoped ??= $this->namespaceScopedRelativeNames($ast);
+
+                return ! isset($scoped[spl_object_id($node->class)]);
+            }
+
+            return true;
         });
     }
 
     /**
      * Find function calls by name.
      *
+     * The name is matched case-insensitively, as PHP resolves function names (ASCII case
+     * folding only, like PHP's own), as written ignoring a leading `\`. Calls through a variable
+     * (`$f()`) are not matched.
+     *
+     * A namespace-relative `namespace\system()` calls `\system()` only in the global namespace,
+     * so it is not matched inside a named namespace (`namespace App;` / `namespace App { }`) and
+     * is matched elsewhere. A sub-AST passed without its enclosing namespace statement has no
+     * namespace context, so its namespace-relative calls are treated as global.
+     *
      * @param array<Node> $ast
      * @return array<Node>
      */
     public function findFunctionCalls(array $ast, string $functionName): array
     {
-        return $this->nodeFinder->find($ast, function (Node $node) use ($functionName) {
+        // Computed only when a namespace-relative name matches, so a file without one is
+        // walked once.
+        $scoped = null;
+
+        return $this->nodeFinder->find($ast, function (Node $node) use ($ast, $functionName, &$scoped) {
             if (! $node instanceof Expr\FuncCall) {
                 return false;
             }
 
-            if ($node->name instanceof Node\Name) {
-                return $node->name->toString() === $functionName;
+            if (! $node->name instanceof Node\Name) {
+                return false;
             }
 
-            return false;
+            if (strcasecmp($node->name->toString(), $functionName) !== 0) {
+                return false;
+            }
+
+            if ($node->name instanceof Node\Name\Relative) {
+                $scoped ??= $this->namespaceScopedRelativeNames($ast);
+
+                return ! isset($scoped[spl_object_id($node->name)]);
+            }
+
+            return true;
         });
+    }
+
+    /**
+     * Object ids of the namespace-relative names (`namespace\Foo`) that sit inside a named
+     * namespace, where they do not refer to the global `\Foo`.
+     *
+     * @param array<Node> $ast
+     * @return array<int, true>
+     */
+    private function namespaceScopedRelativeNames(array $ast): array
+    {
+        $ids = [];
+
+        foreach ($this->nodeFinder->findInstanceOf($ast, Stmt\Namespace_::class) as $namespace) {
+            if ($namespace->name === null) {
+                continue;
+            }
+
+            foreach ($this->nodeFinder->findInstanceOf($namespace->stmts, Node\Name\Relative::class) as $name) {
+                $ids[spl_object_id($name)] = true;
+            }
+        }
+
+        return $ids;
     }
 
     /**

@@ -50,6 +50,8 @@ interface ParserInterface
     /**
      * Find static calls by class and method name.
      *
+     * Both names are matched case-insensitively, as PHP resolves them.
+     *
      * @param array<Node> $ast
      * @return array<Node>
      */
