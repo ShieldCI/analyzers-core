@@ -419,6 +419,82 @@ PHP;
         $this->assertEmpty($calls);
     }
 
+    public function testFindMethodCallsFindsNullsafeMethodCall(): void
+    {
+        $ast = $this->parser->parseCode('<?php $a?->render();');
+
+        $calls = $this->parser->findMethodCalls($ast, 'render');
+
+        $this->assertCount(1, $calls);
+        $this->assertInstanceOf(Expr\NullsafeMethodCall::class, $calls[0]);
+    }
+
+    public function testFindMethodCallsFindsNullsafeCallAtTheEndOfAChain(): void
+    {
+        $ast = $this->parser->parseCode('<?php $c->d()?->render();');
+
+        $calls = $this->parser->findMethodCalls($ast, 'render');
+
+        $this->assertCount(1, $calls);
+        $this->assertInstanceOf(Expr\NullsafeMethodCall::class, $calls[0]);
+    }
+
+    public function testFindMethodCallsFindsNullsafeCallsInsideAndAfterAChain(): void
+    {
+        $ast = $this->parser->parseCode('<?php $a?->b()->render(); $c->d()?->render();');
+
+        $calls = $this->parser->findMethodCalls($ast, 'render');
+
+        $this->assertCount(2, $calls);
+        $this->assertInstanceOf(Expr\MethodCall::class, $calls[0]);
+        $this->assertInstanceOf(Expr\NullsafeMethodCall::class, $calls[1]);
+    }
+
+    public function testFindMethodCallsReturnsPlainAndNullsafeCallsInSourceOrder(): void
+    {
+        $code = <<<'PHP'
+<?php
+$a->render();
+$b?->render();
+$c->other();
+$d?->other();
+$e->render();
+PHP;
+        $ast = $this->parser->parseCode($code);
+
+        $calls = $this->parser->findMethodCalls($ast, 'render');
+
+        $this->assertCount(3, $calls);
+        $this->assertInstanceOf(Expr\MethodCall::class, $calls[0]);
+        $this->assertInstanceOf(Expr\NullsafeMethodCall::class, $calls[1]);
+        $this->assertInstanceOf(Expr\MethodCall::class, $calls[2]);
+        $this->assertSame([2, 3, 6], array_map(static fn ($call) => $call->getStartLine(), $calls));
+    }
+
+    public function testFindMethodCallsIgnoresNullsafeCallWithADifferentName(): void
+    {
+        $ast = $this->parser->parseCode('<?php $a?->other();');
+
+        $this->assertSame([], $this->parser->findMethodCalls($ast, 'render'));
+    }
+
+    public function testFindMethodCallsIgnoresNullsafeCallWithADynamicName(): void
+    {
+        $ast = $this->parser->parseCode('<?php $m = "render"; $a?->$m(); $a?->{"render"}();');
+
+        $this->assertSame([], $this->parser->findMethodCalls($ast, 'render'));
+    }
+
+    public function testFindMethodCallsStillFindsPlainMethodCall(): void
+    {
+        $ast = $this->parser->parseCode('<?php $a->render();');
+
+        $calls = $this->parser->findMethodCalls($ast, 'render');
+
+        $this->assertCount(1, $calls);
+        $this->assertInstanceOf(Expr\MethodCall::class, $calls[0]);
+    }
+
     public function testFindStaticCallsHandlesNonIdentifierMethodNames(): void
     {
         // Test line 97: Static calls with non-Identifier names

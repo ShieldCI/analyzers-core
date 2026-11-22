@@ -40,7 +40,7 @@ interface ParserInterface
     public function findNodes(array $ast, string $nodeType): array;
 
     /**
-     * Find method calls by name.
+     * Find method calls by name, including nullsafe `?->` calls.
      *
      * @param array<Node> $ast
      * @return array<Node>
