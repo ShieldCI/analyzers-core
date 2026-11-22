@@ -34,6 +34,15 @@ class PackageDetector
     private static array $lockContentCache = [];
 
     /**
+     * Cache for the package names composer.lock lists, per base path.
+     *
+     * Format: ['/path/to/project' => ['vendor/package' => true] or null if the lock is not valid JSON]
+     *
+     * @var array<string, array<string, true>|null>
+     */
+    private static array $installedNamesCache = [];
+
+    /**
      * Check if a specific package is installed.
      *
      * Parses composer.lock to detect package presence. This is the most
@@ -60,9 +69,17 @@ class PackageDetector
             return false;
         }
 
-        // Search for package name in composer.lock
-        // Format: "name": "vendor/package"
-        $found = str_contains($lockContent, '"name": "'.$packageName.'"');
+        $installed = self::getInstalledPackageNames($basePath, $lockContent);
+
+        if ($installed !== null) {
+            $found = isset($installed[$packageName]);
+        } else {
+            // Not valid JSON, e.g. a lock git left conflict markers in: search the text for
+            // "name": "vendor/package", with any whitespace around the colon and the slash
+            // optionally escaped, so a minified lock reads the same as Composer's own layout.
+            $name = str_replace('/', '\\\\?/', preg_quote($packageName, '~'));
+            $found = preg_match('~"name"\s*:\s*"'.$name.'"~', $lockContent) === 1;
+        }
 
         self::$packageCache[$cacheKey] = $found;
 
@@ -335,6 +352,53 @@ class PackageDetector
     {
         self::$packageCache = [];
         self::$lockContentCache = [];
+        self::$installedNamesCache = [];
+    }
+
+    /**
+     * Get the names of the packages composer.lock lists under "packages" and "packages-dev".
+     *
+     * Reading the decoded lock rather than its text keeps a "name" key elsewhere in an entry
+     * (an author's, say) from passing for a package, and accepts any escaping JSON allows.
+     *
+     * @param  string  $basePath  Application base path
+     * @param  string  $lockContent  composer.lock content
+     * @return array<string, true>|null Package names as keys, or null if the lock is not valid JSON
+     */
+    private static function getInstalledPackageNames(string $basePath, string $lockContent): ?array
+    {
+        if (array_key_exists($basePath, self::$installedNamesCache)) {
+            return self::$installedNamesCache[$basePath];
+        }
+
+        // A BOM or one stray byte in a description would otherwise send the whole lock to the
+        // text fallback, which cannot tell a package's "name" from an author's
+        $lock = json_decode(
+            str_starts_with($lockContent, "\xEF\xBB\xBF") ? substr($lockContent, 3) : $lockContent,
+            true,
+            512,
+            JSON_INVALID_UTF8_SUBSTITUTE
+        );
+
+        if (! is_array($lock)) {
+            return self::$installedNamesCache[$basePath] = null;
+        }
+
+        $names = [];
+
+        foreach (['packages', 'packages-dev'] as $section) {
+            if (! isset($lock[$section]) || ! is_array($lock[$section])) {
+                continue;
+            }
+
+            foreach ($lock[$section] as $package) {
+                if (is_array($package) && isset($package['name']) && is_string($package['name'])) {
+                    $names[$package['name']] = true;
+                }
+            }
+        }
+
+        return self::$installedNamesCache[$basePath] = $names;
     }
 
     /**

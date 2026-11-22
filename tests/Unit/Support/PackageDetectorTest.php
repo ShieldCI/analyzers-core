@@ -595,6 +595,167 @@ JSON;
         $this->assertFalse($result);
     }
 
+    // --- A lock not in Composer's own pretty-printed layout ---
+
+    public function test_detects_package_in_minified_composer_lock(): void
+    {
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            '{"packages":[{"name":"laravel/nova","version":"4.0.0"}],"packages-dev":[]}'
+        );
+
+        $this->assertTrue(PackageDetector::hasNova($this->testDir));
+    }
+
+    public function test_detects_package_whose_slash_is_json_escaped(): void
+    {
+        // json_encode() without JSON_UNESCAPED_SLASHES writes "laravel\/nova"
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            (string) json_encode(['packages' => [['name' => 'laravel/nova', 'version' => '4.0.0']]])
+        );
+
+        $this->assertTrue(PackageDetector::hasNova($this->testDir));
+    }
+
+    public function test_detects_package_with_other_whitespace_around_the_colon(): void
+    {
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            "{\n\t\"packages\": [\n\t\t{\n\t\t\t\"name\"\t:\n\t\t\t\t\"laravel/nova\"\n\t\t}\n\t]\n}"
+        );
+
+        $this->assertTrue(PackageDetector::hasNova($this->testDir));
+    }
+
+    public function test_minified_lock_does_not_match_a_longer_package_name(): void
+    {
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            '{"packages":[{"name":"laravel/nova-tools","version":"1.0.0"},{"name":"acme/laravel/nova"}]}'
+        );
+
+        $this->assertFalse(PackageDetector::hasNova($this->testDir));
+    }
+
+    public function test_minified_lock_does_not_count_a_package_only_required_by_another(): void
+    {
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            '{"packages":[{"name":"acme/nova-addon","require":{"laravel/nova":"^4.0"}}]}'
+        );
+
+        $this->assertFalse(PackageDetector::hasNova($this->testDir));
+    }
+
+    public function test_package_name_is_matched_literally_not_as_a_pattern(): void
+    {
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            '{"packages":[{"name":"some-vendor/myXspecial"}]}'
+        );
+
+        $this->assertFalse(PackageDetector::hasPackage('some-vendor/my.special', $this->testDir));
+    }
+
+    public function test_an_author_named_like_the_package_does_not_count_as_installed(): void
+    {
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            '{"packages":[{"name":"acme/tool","authors":[{"name":"laravel/nova"}]}]}'
+        );
+
+        $this->assertFalse(PackageDetector::hasNova($this->testDir));
+    }
+
+    public function test_a_lock_with_a_byte_order_mark_is_still_read_as_json(): void
+    {
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            "\xEF\xBB\xBF".'{"packages":[{"name":"laravel/horizon","authors":[{"name":"laravel/nova"}]}]}'
+        );
+
+        $this->assertTrue(PackageDetector::hasHorizon($this->testDir));
+        $this->assertFalse(PackageDetector::hasNova($this->testDir));
+    }
+
+    public function test_a_lock_with_an_invalid_utf8_byte_is_still_read_as_json(): void
+    {
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            '{"packages":[{"name":"laravel/horizon","description":"caf'."\xE9".'","authors":[{"name":"laravel/nova"}]}]}'
+        );
+
+        $this->assertTrue(PackageDetector::hasHorizon($this->testDir));
+        $this->assertFalse(PackageDetector::hasNova($this->testDir));
+    }
+
+    public function test_detects_package_whose_name_is_unicode_escaped(): void
+    {
+        // chr(92) is the backslash: the name is "laravel", backslash, "u002fnova", JSON's escape for "/"
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            '{"packages":[{"name":"laravel'.chr(92).'u002fnova"}]}'
+        );
+
+        $this->assertTrue(PackageDetector::hasNova($this->testDir));
+    }
+
+    public function test_entries_without_a_string_name_are_ignored(): void
+    {
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            '{"packages":"laravel/nova","packages-dev":["laravel/nova",{"name":["laravel/nova"]},{"name":"laravel/nova"}]}'
+        );
+
+        $this->assertTrue(PackageDetector::hasNova($this->testDir));
+        $this->assertFalse(PackageDetector::hasTelescope($this->testDir));
+    }
+
+    public function test_a_lock_left_with_merge_conflict_markers_still_answers(): void
+    {
+        file_put_contents($this->testDir.DIRECTORY_SEPARATOR.'composer.lock', <<<'LOCK'
+{
+    "packages": [
+<<<<<<< HEAD
+        {"name":"laravel/nova","version":"4.0.0"},
+=======
+        {"name": "laravel/nova", "version": "4.1.0"},
+>>>>>>> feature
+        {
+            "name": "laravel/horizon"
+        }
+    ]
+}
+LOCK);
+
+        $this->assertTrue(PackageDetector::hasNova($this->testDir));
+        $this->assertTrue(PackageDetector::hasHorizon($this->testDir));
+        $this->assertFalse(PackageDetector::hasSanctum($this->testDir));
+    }
+
+    public function test_a_lock_that_does_not_decode_still_accepts_an_escaped_slash(): void
+    {
+        // chr(92) is the backslash: "laravel\/nova", then a stray conflict marker
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            '{"packages":[{"name":"laravel'.chr(92).'/nova"}]}'."\n>>>>>>> feature\n"
+        );
+
+        $this->assertTrue(PackageDetector::hasNova($this->testDir));
+        $this->assertFalse(PackageDetector::hasPackage('laravel/nov', $this->testDir));
+    }
+
+    public function test_a_lock_that_does_not_decode_matches_the_name_literally(): void
+    {
+        file_put_contents(
+            $this->testDir.DIRECTORY_SEPARATOR.'composer.lock',
+            '{"packages":[{"name":"some-vendor/myXspecial"}]}'."\n>>>>>>> feature\n"
+        );
+
+        $this->assertFalse(PackageDetector::hasPackage('some-vendor/my.special', $this->testDir));
+    }
+
     // --- Reaching the parse failures panel provider discovery would otherwise discard ---
 
 
