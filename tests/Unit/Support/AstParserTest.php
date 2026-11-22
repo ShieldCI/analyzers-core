@@ -479,40 +479,103 @@ PHP;
 
     public function testHasVariableInterpolationDetectsVariablesInStringValues(): void
     {
-        // Test line 204: Check for variable interpolation in string values
-        // This checks String_ nodes (not InterpolatedString) for variable patterns
+        // Both strings are double-quoted with real variables, so both parse to
+        // InterpolatedString nodes
         $code = '<?php $x = "Hello {$name}"; $y = "Hello $name";';
         $ast = $this->parser->parseCode($code);
 
         $result = $this->parser->hasVariableInterpolation($ast);
 
-        // Should detect variables in strings (line 204 checks string->value)
         $this->assertTrue($result);
     }
 
-    public function testHasVariableInterpolationDetectsVarPatternInSingleQuotedString(): void
+    public function testHasVariableInterpolationIgnoresVarPatternInSingleQuotedString(): void
     {
-        // Test line 204: Single-quoted strings preserve literal $ signs in the value
-        // The regex /\$\w+/ should match the literal $name in the node's value
-        $code = "<?php \$x = 'Hello \$name';";
+        // Single-quoted strings never interpolate: $name is literal text
+        $code = '<?php $x = ' . "'" . 'Hello $name' . "'" . ';';
         $ast = $this->parser->parseCode($code);
 
         $result = $this->parser->hasVariableInterpolation($ast);
 
-        // Single-quoted strings contain literal $name which matches the regex
-        $this->assertTrue($result);
+        $this->assertFalse($result);
     }
 
     public function testHasVariableInterpolationDetectsDollarSignPattern(): void
     {
-        // Test line 204: preg_match('/\$\w+/', $string->value)
+        // "$100" is not a variable, but "$total" is, so the second string is an
+        // InterpolatedString node
         $code = '<?php $x = "Price is $100"; $y = "Total: $total";';
         $ast = $this->parser->parseCode($code);
 
         $result = $this->parser->hasVariableInterpolation($ast);
 
-        // Should detect $total pattern (line 204)
         $this->assertTrue($result);
+    }
+
+    public function testHasVariableInterpolationIgnoresDollarDigitsInDoubleQuotedString(): void
+    {
+        // A variable name cannot start with a digit, so "$100" is literal text
+        $code = '<?php $x = "Price is $100";';
+        $ast = $this->parser->parseCode($code);
+
+        $this->assertFalse($this->parser->hasVariableInterpolation($ast));
+    }
+
+    public function testHasVariableInterpolationIgnoresDollarAmountInSingleQuotedString(): void
+    {
+        $code = '<?php $x = ' . "'" . 'costs $5' . "'" . ';';
+        $ast = $this->parser->parseCode($code);
+
+        $this->assertFalse($this->parser->hasVariableInterpolation($ast));
+    }
+
+    public function testHasVariableInterpolationIgnoresCurlySyntaxInSingleQuotedString(): void
+    {
+        $code = '<?php $x = ' . "'" . '{$name}' . "'" . ';';
+        $ast = $this->parser->parseCode($code);
+
+        $this->assertFalse($this->parser->hasVariableInterpolation($ast));
+    }
+
+    public function testHasVariableInterpolationIgnoresVariableInNowdoc(): void
+    {
+        $code = '<?php $x = <<<' . "'" . 'EOT' . "'" . PHP_EOL . '$name' . PHP_EOL . 'EOT;' . PHP_EOL;
+        $ast = $this->parser->parseCode($code);
+
+        $this->assertFalse($this->parser->hasVariableInterpolation($ast));
+    }
+
+    public function testHasVariableInterpolationIgnoresEscapedDollarInDoubleQuotedString(): void
+    {
+        // A backslash-escaped dollar sign is a literal "$", not a variable
+        $code = '<?php $x = "' . chr(92) . '$name";';
+        $ast = $this->parser->parseCode($code);
+
+        $this->assertFalse($this->parser->hasVariableInterpolation($ast));
+    }
+
+    public function testHasVariableInterpolationDetectsVariableInHeredoc(): void
+    {
+        $code = '<?php $x = <<<EOT' . PHP_EOL . '$name' . PHP_EOL . 'EOT;' . PHP_EOL;
+        $ast = $this->parser->parseCode($code);
+
+        $this->assertTrue($this->parser->hasVariableInterpolation($ast));
+    }
+
+    public function testHasVariableInterpolationDetectsPropertyFetchInCurlySyntax(): void
+    {
+        $code = '<?php $x = "{$a->b}";';
+        $ast = $this->parser->parseCode($code);
+
+        $this->assertTrue($this->parser->hasVariableInterpolation($ast));
+    }
+
+    public function testHasVariableInterpolationDetectsDollarBraceSyntax(): void
+    {
+        $code = '<?php $x = "${name}";';
+        $ast = $this->parser->parseCode($code);
+
+        $this->assertTrue($this->parser->hasVariableInterpolation($ast));
     }
 
     // --- resolveNames ---
