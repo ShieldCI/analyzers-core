@@ -575,13 +575,15 @@ class AstParser implements RecordingParserInterface
     }
 
     /**
+     * Matches both `->` and nullsafe `?->` calls.
+     *
      * @param array<Node> $ast
      * @return array<Node>
      */
     public function findMethodCalls(array $ast, string $methodName): array
     {
         return $this->nodeFinder->find($ast, function (Node $node) use ($methodName) {
-            if (! $node instanceof Expr\MethodCall) {
+            if (! $node instanceof Expr\MethodCall && ! $node instanceof Expr\NullsafeMethodCall) {
                 return false;
             }
 
