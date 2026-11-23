@@ -20,9 +20,13 @@ class MessageHelper
         // First, redact sensitive information
         $sanitized = self::redactSensitiveInfo($error);
 
-        // Then truncate if needed
+        // Then truncate if needed. A negative length would make substr() count from
+        // the end and keep text instead of dropping it, so treat it as zero.
+        $maxLength = max(0, $maxLength);
+
         if (strlen($sanitized) > $maxLength) {
-            return substr($sanitized, 0, $maxLength).'...';
+            // $maxLength is a byte budget; cut without splitting a UTF-8 character.
+            return Utf8::cut($sanitized, $maxLength).'...';
         }
 
         return $sanitized;

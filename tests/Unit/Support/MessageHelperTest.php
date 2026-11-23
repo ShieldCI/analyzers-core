@@ -155,4 +155,129 @@ class MessageHelperTest extends TestCase
         $this->assertStringEndsWith('...', $result);
         $this->assertLessThanOrEqual(203, strlen($result));
     }
+
+    public function testTruncationDoesNotSplitTwoByteCharacter(): void
+    {
+        $result = MessageHelper::sanitizeErrorMessage(str_repeat('a', 199).'é'.'tail');
+
+        $this->assertSame(str_repeat('a', 199).'...', $result);
+        $this->assertSame(1, preg_match('//u', $result));
+    }
+
+    public function testTruncationDoesNotSplitThreeByteCharacter(): void
+    {
+        $result = MessageHelper::sanitizeErrorMessage(str_repeat('a', 198).'€'.'tail');
+
+        $this->assertSame(str_repeat('a', 198).'...', $result);
+        $this->assertSame(1, preg_match('//u', $result));
+    }
+
+    public function testTruncationDoesNotSplitFourByteCharacterAtAnyOffset(): void
+    {
+        // The cut falls after 1, 2 and 3 of the emoji's 4 bytes.
+        foreach ([199, 198, 197] as $prefixLength) {
+            $result = MessageHelper::sanitizeErrorMessage(str_repeat('a', $prefixLength).'😀'.'tail');
+
+            $this->assertSame(str_repeat('a', $prefixLength).'...', $result, "prefix {$prefixLength}");
+            $this->assertSame(1, preg_match('//u', $result), "prefix {$prefixLength}");
+        }
+    }
+
+    public function testTruncationOnCharacterBoundaryKeepsWholeCharacter(): void
+    {
+        // 'é' ends exactly at the cut, so nothing is stepped back over.
+        $result = MessageHelper::sanitizeErrorMessage(str_repeat('a', 198).'é'.'tail');
+
+        $this->assertSame(str_repeat('a', 198).'é...', $result);
+        $this->assertSame(1, preg_match('//u', $result));
+    }
+
+    public function testTruncationAtZeroLengthReturnsOnlyEllipsis(): void
+    {
+        $this->assertSame('...', MessageHelper::sanitizeErrorMessage('é', 0));
+    }
+
+    public function testTruncationWithSmallLengthDropsSplitCharacter(): void
+    {
+        $result = MessageHelper::sanitizeErrorMessage('é€', 3);
+
+        $this->assertSame('é...', $result);
+        $this->assertSame(1, preg_match('//u', $result));
+    }
+
+    public function testTruncationCutsStrayContinuationBytesWhereTheyFall(): void
+    {
+        // Invalid input: a run of bare continuation bytes has no character to protect,
+        // so the cut stays at the byte budget, as it did before the UTF-8 fix.
+        $message = str_repeat('a', 10).str_repeat(chr(0x80), 10);
+
+        $this->assertSame(
+            str_repeat('a', 10).str_repeat(chr(0x80), 5).'...',
+            MessageHelper::sanitizeErrorMessage($message, 15)
+        );
+    }
+
+    public function testTruncationOfLeadingStrayContinuationBytesStaysInsideTheString(): void
+    {
+        $this->assertSame(
+            chr(0x80).chr(0x80).'...',
+            MessageHelper::sanitizeErrorMessage(str_repeat(chr(0x80), 4), 2)
+        );
+    }
+
+    public function testNegativeMaxLengthIsTreatedAsZeroForMultibyteInput(): void
+    {
+        // substr() with a negative length counts from the end of the string, which
+        // split 'é' and kept text instead of dropping it.
+        $result = MessageHelper::sanitizeErrorMessage('aé', -1);
+
+        $this->assertSame('...', $result);
+        $this->assertSame(1, preg_match('//u', $result));
+    }
+
+    public function testNegativeMaxLengthIsTreatedAsZeroForAsciiInput(): void
+    {
+        $this->assertSame('...', MessageHelper::sanitizeErrorMessage('abc', -1));
+    }
+
+    public function testNegativeMaxLengthLeavesEmptyStringUnchanged(): void
+    {
+        $this->assertSame('', MessageHelper::sanitizeErrorMessage('', -1));
+    }
+
+    public function testTruncationKeepsWholeCharacterBeforeStrayContinuationByte(): void
+    {
+        // Invalid input: a complete emoji, then a stray continuation byte at the cut.
+        // The step-back must not walk into the emoji and leave its bare lead byte.
+        $emoji = chr(0xF0).chr(0x9F).chr(0x98).chr(0x80);
+        $result = MessageHelper::sanitizeErrorMessage($emoji.chr(0x80).'tail', 4);
+
+        $this->assertSame($emoji.'...', $result);
+        $this->assertSame(1, preg_match('//u', $result));
+    }
+
+    public function testTruncationKeepsWholeCharacterBeforeStrayContinuationByteAfterPrefix(): void
+    {
+        $emoji = chr(0xF0).chr(0x9F).chr(0x98).chr(0x80);
+        $result = MessageHelper::sanitizeErrorMessage('a'.$emoji.chr(0x80).'tail', 5);
+
+        $this->assertSame('a'.$emoji.'...', $result);
+        $this->assertSame(1, preg_match('//u', $result));
+    }
+
+    public function testTruncationKeepsTwoByteCharacterBeforeStrayContinuationByte(): void
+    {
+        $result = MessageHelper::sanitizeErrorMessage('é'.chr(0x80).'x', 2);
+
+        $this->assertSame('é...', $result);
+        $this->assertSame(1, preg_match('//u', $result));
+    }
+
+    public function testTruncationDoesNotDropAsciiBeforeStrayContinuationBytes(): void
+    {
+        $this->assertSame(
+            'ab'.chr(0x80).'...',
+            MessageHelper::sanitizeErrorMessage('ab'.chr(0x80).chr(0x80), 3)
+        );
+    }
 }

@@ -1035,6 +1035,17 @@ class AbstractAnalyzerTest extends TestCase
         );
     }
 
+    public function testAnalyzeDoesNotSplitAMultibyteCharacterInTheErrorMessage(): void
+    {
+        $result = (new MultibyteMessageAnalyzer())->analyze();
+
+        $this->assertSame(1, preg_match('//u', $result->getMessage()));
+        $this->assertSame(
+            'Analysis failed: '.str_repeat('a', 499).'...',
+            $result->getMessage()
+        );
+    }
+
     /**
      * Run $run with exception arguments forced on, restoring the host setting after.
      *
@@ -1836,5 +1847,24 @@ class LongMessageAnalyzer extends AbstractAnalyzer
     protected function runAnalysis(): ResultInterface
     {
         throw new \RuntimeException(str_repeat('a', 1000));
+    }
+}
+
+class MultibyteMessageAnalyzer extends AbstractAnalyzer
+{
+    protected function metadata(): AnalyzerMetadata
+    {
+        return new AnalyzerMetadata(
+            id: 'multibyte-message-analyzer',
+            name: 'Multibyte Message Analyzer',
+            description: 'Throws a message whose cap falls inside a multibyte character',
+            category: Category::Security,
+            severity: Severity::High
+        );
+    }
+
+    protected function runAnalysis(): ResultInterface
+    {
+        throw new \RuntimeException(str_repeat('a', 499).'é'.'tail');
     }
 }
