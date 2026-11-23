@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ShieldCI\AnalyzersCore\ValueObjects;
 
 use ShieldCI\AnalyzersCore\Support\LineIndexedFile;
+use ShieldCI\AnalyzersCore\Support\Utf8;
 
 /**
  * Value object representing a code snippet with context lines around a target line.
@@ -94,72 +95,10 @@ class CodeSnippet
         $lines = [];
 
         for ($i = $startLine; $i <= $endLine; $i++) {
-            $lines[$i] = rtrim(self::truncate($file->head($i) ?? ''));
+            $lines[$i] = rtrim(Utf8::cut($file->head($i) ?? '', self::MAX_LINE_BYTES));
         }
 
         return new self($filePath, $targetLine, $lines, $contextLines);
-    }
-
-    /**
-     * Cut a line to MAX_LINE_BYTES without splitting a UTF-8 character.
-     *
-     * A cut that lands inside a multibyte sequence (a lead byte followed by the continuation
-     * bytes it announces) backs off to the start of that sequence, so valid UTF-8 stays valid
-     * and the JSON report can encode it. Only the byte structure is checked, so an overlong or
-     * surrogate sequence straddling the cut is dropped as well; a stray continuation byte or a
-     * truncated sequence is cut where it falls. No mbstring needed.
-     */
-    private static function truncate(string $line): string
-    {
-        $cut = self::MAX_LINE_BYTES;
-
-        if (strlen($line) <= $cut || ! self::isContinuationByte($line[$cut])) {
-            return substr($line, 0, $cut);
-        }
-
-        // Walk back over at most three continuation bytes to the lead byte.
-        for ($lead = $cut - 1; $lead >= $cut - 3; $lead--) {
-            if (! self::isContinuationByte($line[$lead])) {
-                break;
-            }
-        }
-
-        $length = self::sequenceLength(ord($line[$lead]));
-
-        if ($length > $cut - $lead && self::isWellFormedSequence($line, $lead, $length)) {
-            return substr($line, 0, $lead);
-        }
-
-        return substr($line, 0, $cut);
-    }
-
-    private static function isContinuationByte(string $byte): bool
-    {
-        return (ord($byte) & 0xC0) === 0x80;
-    }
-
-    /**
-     * The byte length of the UTF-8 sequence a lead byte starts, or 0 if it starts none.
-     */
-    private static function sequenceLength(int $byte): int
-    {
-        return match (true) {
-            $byte >= 0xC2 && $byte <= 0xDF => 2,
-            $byte >= 0xE0 && $byte <= 0xEF => 3,
-            $byte >= 0xF0 && $byte <= 0xF4 => 4,
-            default => 0,
-        };
-    }
-
-    private static function isWellFormedSequence(string $line, int $lead, int $length): bool
-    {
-        for ($i = $lead + 1; $i < $lead + $length; $i++) {
-            if (! isset($line[$i]) || ! self::isContinuationByte($line[$i])) {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     /**
