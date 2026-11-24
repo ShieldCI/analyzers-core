@@ -17,6 +17,44 @@ use SplFileInfo;
 abstract class AbstractFileAnalyzer extends AbstractAnalyzer
 {
     /**
+     * The ASCII characters a canonical singleton normalises to, each mapped
+     * to that singleton: KELVIN SIGN, GREEK QUESTION MARK and GREEK VARIA
+     * (#114). Unicode never changes a decomposition once published, and
+     * canonicalSources() is checked against this in the tests.
+     */
+    private const ASCII_SINGLETONS = ['K' => "\u{212A}", ';' => "\u{037E}", '`' => "\u{1FEF}"];
+
+    /**
+     * The blocks holding every code point that NFC does not keep as it is
+     * (canonical singletons and composition exclusions), as [first, last].
+     * Scanned once per process by canonicalSources(); a test scans every
+     * code point to keep this complete.
+     */
+    private const CANONICAL_SOURCE_BLOCKS = [[0x0340, 0x0FFF], [0x1F00, 0x2FFF], [0xF900, 0xFB4F], [0x1D100, 0x1D1FF], [0x2F800, 0x2FA1F]];
+
+    /**
+     * A character class holding at least one character of every NFD key of
+     * canonicalSources(): a name without one has no piece to replace, so
+     * canonicalAlternative() never builds the table for it ('привет', NFC
+     * 'café' on ext4). A test checks it against the table.
+     */
+    private const CANONICAL_TARGET_CHARS = '/[K;`\x{00B4}\x{00B7}\x{02B9}\x{0300}-\x{03FF}\x{0590}-\x{05FF}\x{0900}-\x{0B7F}\x{0F00}-\x{0FFF}\x{2000}-\x{2AFF}\x{3000}-\x{303F}\x{3400}-\x{9FFF}\x{1D100}-\x{1D1FF}\x{20000}-\x{2FFFF}]/u';
+
+    /**
+     * The BMP blocks whose code points HFS+ never decomposes, as [first,
+     * last], by its specification (U+2F800-2FAFF, the third, lies above the
+     * BMP, all of which HFS+ leaves alone). See hfsForm() (#114).
+     */
+    private const HFS_KEPT_BLOCKS = [[0x2000, 0x2FFF], [0xF900, 0xFAFF]];
+
+    /**
+     * canonicalSources(), once built.
+     *
+     * @var array<string, string>|null
+     */
+    private static ?array $canonicalSources = null;
+
+    /**
      * Base path for analysis.
      */
     protected string $basePath = '';
@@ -77,10 +115,12 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     private array $missingPaths = [];
 
     /**
-     * Directory listings onDiskSpelling() has read while the walk respells
-     * its roots, keyed by the directory with a trailing '/', so entries
-     * sharing a parent list it once (#104). An unlistable directory is kept
-     * as []. Released as soon as every root is spelled: AnalyzerManager
+     * Directory listings segmentSpelling() has read while the walk respells
+     * its roots and excludes, keyed by the directory with a trailing '/', so
+     * entries sharing a parent list it once (#104). Only directories holding
+     * a name the volume may fold are listed (probedSpelling(), #114). An
+     * unlistable directory is kept as []. Released as soon as every root
+     * and exclude is spelled: AnalyzerManager
      * caches analyzer instances, and a listing kept past that is a whole
      * directory held for the life of the process.
      *
@@ -89,10 +129,11 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     private array $listings = [];
 
     /**
-     * For each directory onDiskSpelling() found unlistable, the spellings
-     * the walk reached each file in it under, keyed by the directory with a
-     * trailing '/' and then by lstat() dev and inode (#112). Released with
-     * $listings, for the same reason.
+     * For each directory segmentSpelling() found unlistable, or
+     * probedSpelling() did not list, the spellings the walk reached each
+     * file in it under, keyed by the directory with a trailing '/' and then
+     * by lstat() dev and inode (#112, #114). Released with $listings, for
+     * the same reason.
      *
      * @var array<string, array<string, list<string>>>
      */
@@ -535,19 +576,35 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * Only the part below the base is touched: yielded paths must keep
      * starting with the base exactly as stored, or relativeTo() misses. A path
      * not under it - the base itself, or a scan root that ended up elsewhere -
-     * comes back as given. Segments are rewritten left to right, each listed
-     * with scandir() and matched by listedSpelling(); the first one that
-     * cannot be matched (it names nothing, or its directory cannot be
-     * searched) is kept as typed along with everything after it, which is
-     * all a missing or unreachable entry needs - the walk records it from
-     * there as before.
+     * comes back as given. Segments are rewritten left to right through
+     * probedSpelling(): each is lstat()ed as typed, and its directory is
+     * listed with scandir() and matched by listedSpelling() only where
+     * mayBeSpelledOtherwise() says the volume may fold the name (#114). The
+     * first one that cannot be matched (it names nothing, or its directory
+     * cannot be searched) is kept as typed along with everything after it,
+     * which is all a missing or unreachable entry needs - the walk records
+     * it from there as before.
+     *
+     * So an entry typed as on disk, or naming nothing, costs a few lstat()
+     * calls per segment and no listing where the volume does not fold its
+     * names: ext4; case-sensitive APFS for an ASCII name with no 'K', ';'
+     * or '`'; any volume but case-insensitive HFS+ for a name with no
+     * letter and no other canonically equivalent spelling ('123', '€4').
+     * Case-insensitive HFS+ also ignores zero-width code points, so it
+     * lists every directory a probe reaches there. On a case-insensitive
+     * volume (default macOS) a lettered segment still lists its directory,
+     * once per walk however many entries share it: only a listing tells a
+     * name's stored case there. On Windows every segment is listed, as
+     * before #114: NTFS also reaches 'name.', 'name ' and an 8.3 short name
+     * as 'name', aliases no probe of the typed spelling can see.
      *
      * A directory that can be searched but not listed (0111) lists as [],
      * yet its names can still be stat'ed (#112). A segment there that names
      * something takes an earlier spelling the walk reached the same name in
      * under that directory, or is recorded as typed (unlistedSpelling() says
-     * which spellings are one name); so 'app/Providers' and 'app/providers'
-     * meet in one root, the pathname dedup and the typed spellings apply as
+     * which spellings are one name; probedSpelling() records a segment it
+     * keeps unlisted there the same way); so 'app/Providers' and
+     * 'app/providers' meet in one root, the pathname dedup and the typed spellings apply as
      * for a listed directory, and the segments after it are respelled from
      * their own listings. The first spelling is not necessarily the on-disk
      * one, which cannot be read.
@@ -586,7 +643,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
 
             // Nothing at or past a '.' or '..' is listed: '<base>/..' can lie
             // outside open_basedir, where even is_dir() warns.
-            $name = $part === '.' || $part === '..' ? null : $this->segmentSpelling($dir, $part);
+            $name = $part === '.' || $part === '..' ? null : ($windows ? $this->segmentSpelling($dir, $part) : $this->probedSpelling($dir, $part, true));
 
             if ($name === null) {
                 return $base.'/'.$spelled.implode('', array_slice($parts, $i));
@@ -622,6 +679,48 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     }
 
     /**
+     * The name $segment takes in $dir, as segmentSpelling() answers it, but
+     * with $dir listed only for a segment mayBeSpelledOtherwise() says the
+     * volume may fold (#113, #114); null when that cannot be told. The gate
+     * onDiskSpelling() and onDiskPattern() share.
+     *
+     * A '.', '..' or empty segment answers null without a stat, as does one
+     * lstat() cannot reach: it is not there in any spelling the volume
+     * folds to, or its directory cannot be searched (0444). A listing
+     * answers no better: it matches nothing that cannot be stat'ed but the
+     * name itself, listed in an unsearchable directory, and nothing below
+     * that can be listed or stat'ed, so the path came out as typed from
+     * there either way.
+     *
+     * A segment kept as typed in a directory that cannot be read (0111,
+     * #112) is recorded under its identity in $unlistedSpellings, as
+     * unlistedSpelling() records it there: a later spelling of the same
+     * file must fold into this one rather than be walked a second time,
+     * and meets the record in mayBeSpelledOtherwise(). is_readable() asks
+     * that without a listing. Nothing is recorded for a readable
+     * directory, where master recorded nothing either, so no later pattern
+     * adopts a spelling the listing would not have given it.
+     */
+    private function probedSpelling(string $dir, string $segment, bool $entry = false): ?string
+    {
+        $identity = $segment === '.' || $segment === '..' || $segment === '' ? null : self::fileIdentity($dir.'/'.$segment);
+
+        if ($identity === null) {
+            return null;
+        }
+
+        if ($this->mayBeSpelledOtherwise($dir, $segment, $identity, $entry)) {
+            return $this->segmentSpelling($dir, $segment);
+        }
+
+        if (! @is_readable($dir)) {
+            $this->unlistedSpellings[$dir.'/'][$identity] = [$segment];
+        }
+
+        return $segment;
+    }
+
+    /**
      * $pattern with its literal leading segments spelled the way their
      * directories list them (#113), so the exclude 'App/Http/*' reads
      * 'app/Http/*' where the disk folds case and lists 'app'.
@@ -647,10 +746,13 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
      * a '\' in the pattern or the base was read as a separator. So is
      * whatever cannot be matched ('.', '..', a name that is not there).
      *
-     * A directory is listed only for a segment mayBeSpelledOtherwise() says
-     * the volume may fold, so a pattern typed as on disk, or naming
-     * nothing, costs a few lstat() calls rather than a listing per
-     * directory, and one non-ASCII segment lists its own directory alone.
+     * Each segment goes through probedSpelling(), as an entry's does, so a
+     * directory is listed only for a segment mayBeSpelledOtherwise() says
+     * the volume may fold: a pattern typed as on disk, or naming nothing,
+     * costs a few lstat() calls rather than a listing per directory where
+     * the volume does not fold its names, non-ASCII ones included (#114).
+     * On a case-insensitive volume a lettered segment still lists its
+     * directory, once per walk, for the reason onDiskSpelling() gives.
      * Called only inside resolveRoots(), after the entries, for the reasons
      * given there.
      */
@@ -675,8 +777,7 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
         $dir = $root;
 
         foreach ($segments as $i => $segment) {
-            $identity = $segment === '.' || $segment === '..' || $segment === '' ? null : self::fileIdentity($dir.'/'.$segment);
-            $name = $identity === null ? null : ($this->mayBeSpelledOtherwise($dir, $segment, $identity) ? $this->segmentSpelling($dir, $segment) : $segment);
+            $name = $this->probedSpelling($dir, $segment);
 
             if ($name === null) {
                 break;
@@ -692,32 +793,219 @@ abstract class AbstractFileAnalyzer extends AbstractAnalyzer
     /**
      * Whether $segment, a name in $dir with lstat() identity $identity, may
      * be spelled otherwise on disk, so that $dir has to be listed to tell -
-     * the test that keeps onDiskPattern() from listing directories that
-     * cannot change the pattern. Listing every directory on every pattern's
-     * prefix cost a walk a whole directory per pattern, on every filesystem
-     * (a 60k-entry 'big' named by 'big/sub/*' took 0.12 s per walk, 0.0003 s
-     * before #113).
+     * the test that keeps probedSpelling() from listing directories that
+     * cannot change the path. Listing every directory on every entry's path
+     * and every pattern's prefix cost a walk a whole directory each, on
+     * every filesystem: one file in a 60k-entry 'big' took 0.14-0.5 s per
+     * walk, 0.0002 s with ten siblings (#113, #114).
      *
-     * onDiskPattern() lstat()s each segment as typed, in order. One that
-     * cannot be stat'ed is not there in any spelling the volume folds to -
-     * a case-insensitive volume would have found it - so neither it nor
-     * anything after it can be respelled ('BIG/SUB/*' on ext4). One that
-     * can is its own on-disk spelling unless the volume folds it: its ASCII
-     * case variant is the same file (two lstat() calls, as in
-     * listedSpelling()), it holds a non-ASCII byte, whose normalisation the
-     * volume may fold (APFS, case-sensitive or not) and which cannot be told
-     * without a listing, or an entry already reached it below a directory
-     * that cannot be listed under another spelling (unlistedSpelling(),
-     * #112). A name with no letter has no case to fold. The answer is per
-     * segment, so a non-ASCII name lists its own directory and no other.
+     * The segment is its own on-disk spelling unless a probe finds the
+     * volume folding it, or an entry already reached the same file below a
+     * directory that cannot be listed under another spelling
+     * (unlistedSpelling(), #112). The probes lstat() spellings of the name,
+     * never its siblings:
+     *
+     * - its ASCII case variant (as listedSpelling() tries it). A volume that
+     *   folds any case folds ASCII case, so for a name with an ASCII letter
+     *   this one probe settles case, Unicode case included;
+     * - a non-ASCII name's NFC and NFD forms, where they differ from it. A
+     *   normalisation-insensitive volume (APFS, case-sensitive or not)
+     *   reaches the same file under every form, so the probe finds it
+     *   folding whenever the name is not already in both; NFC 'café' typed
+     *   as on disk still lists on APFS, which cannot say whether it stores
+     *   the NFC or the NFD bytes, but not on ext4;
+     * - its HFS+ form (hfsForm()): HFS+ stores and looks names up in NFD
+     *   but keeps some code points as they are, so 'U+F900 U+AC00' is
+     *   stored as 'U+F900 U+1100 U+1161', which neither normal form
+     *   reaches there;
+     * - for a name already in both forms, one other canonically equivalent
+     *   spelling (canonicalAlternative()): 'K1' with KELVIN SIGN for
+     *   'K1', U+F900 for U+8C48, its combining marks out of order. The
+     *   on-disk bytes may be such a spelling, which neither normal form
+     *   reaches, and on a normalisation-insensitive volume any equivalent
+     *   spelling reaches the file, so one probe tells whether the volume
+     *   folds it. An ASCII name has one only for 'K', ';' and '`', so it
+     *   needs no ext-intl;
+     * - for a non-ASCII name with no ASCII letter whose Unicode case
+     *   mbstring can read ('ω1', not '€4'), its Unicode case variants, and
+     *   whether the volume folds case at all (foldsCase()): a variant from
+     *   mb_strtoupper() is not always the one the volume folds to ('ß'
+     *   uppercases to 'SS').
+     *
+     * An entry's segment, and a pattern's non-ASCII one, is also probed
+     * with ZERO WIDTH NON-JOINER in front: case-insensitive HFS+ ignores
+     * the zero-width code points (U+200C-200F, U+202A-202E, U+206A-206F,
+     * U+FEFF) in every comparison, so '12' reaches an on-disk '1 U+200C 2'
+     * and the probe reaches the file there, and nowhere else. Those are the
+     * segments that were always listed before #114 ($entry is false for a
+     * pattern's): an ASCII pattern segment was kept as typed after its
+     * case probe since #113, and still is there.
+     *
+     * A name with no letter and no other spelling has nothing to fold.
+     * Where a form cannot be read - no ext-intl (IntlChar included: a
+     * userland Normalizer alone cannot say what HFS+ keeps), no mbstring
+     * ($mbstring is false in tests only), a name that is not valid UTF-8 -
+     * a non-ASCII name answers yes, as every one did before #114.
+     *
+     * So on a volume that does not fold the name - ext4, case-sensitive
+     * APFS for an ASCII name with no 'K', ';' or '`', any volume but
+     * case-insensitive HFS+ for '123' - a segment typed as on disk costs a
+     * few lstat() calls and no listing. On a case-insensitive
+     * volume (default macOS, Windows) every lettered segment still lists
+     * its directory, once per walk: PHP has no portable way to read a
+     * name's stored case but to list it.
+     *
+     * Below a directory that cannot be listed, the spelling
+     * probedSpelling() records folds a later spelling of the same file into
+     * the first whatever the probes said. onDiskSpelling() asks none of
+     * this on Windows, whose aliases no probe of the typed name sees.
      */
-    private function mayBeSpelledOtherwise(string $dir, string $segment, string $identity): bool
+    private function mayBeSpelledOtherwise(string $dir, string $segment, string $identity, bool $entry = true, ?bool $mbstring = null): bool
     {
         $other = strtolower($segment) !== $segment ? strtolower($segment) : strtoupper($segment);
+        $same = static fn (string|false $name): bool => $name === false || ($name !== $segment && self::fileIdentity($dir.'/'.$name) === $identity);
+        $ignorable = $entry || preg_match('/[\x80-\xff]/', $segment) === 1;
 
-        return preg_match('/[\\x80-\\xff]/', $segment) === 1
-            || ($other !== $segment && self::fileIdentity($dir.'/'.$other) === $identity)
-            || array_diff($this->unlistedSpellings[$dir.'/'][$identity] ?? [], [$segment]) !== [];
+        // ZERO WIDTH NON-JOINER: case-insensitive HFS+ ignores it, and the
+        // other zero-width code points, in every name it compares.
+        if ($same($other) || ($ignorable && $same("\u{200C}".$segment)) || array_diff($this->unlistedSpellings[$dir.'/'][$identity] ?? [], [$segment]) !== []) {
+            return true;
+        }
+
+        if (preg_match('/[\x80-\xff]/', $segment) !== 1) {
+            return $same(strtr($segment, self::ASCII_SINGLETONS));
+        }
+
+        if (! class_exists(\Normalizer::class) || ! class_exists(\IntlChar::class) || ! ($mbstring ?? function_exists('mb_strtolower')) || preg_match('//u', $segment) !== 1) {
+            return true;
+        }
+
+        $nfc = \Normalizer::normalize($segment);
+        $nfd = \Normalizer::normalize($segment, \Normalizer::FORM_D);
+        $cases = array_diff([mb_strtolower($segment, 'UTF-8'), mb_strtoupper($segment, 'UTF-8')], [$segment]);
+
+        return $same($nfc)
+            || $same($nfd)
+            || $same(self::hfsForm($segment))
+            || ($nfc === $segment && $nfd === $segment && $same(self::canonicalAlternative($segment)))
+            || ($other === $segment && $cases !== [] && (self::foldsCase($dir) || array_filter($cases, $same) !== []));
+    }
+
+    /**
+     * A spelling of $segment, a valid UTF-8 name, that is canonically
+     * equivalent to it but differs from it, or $segment itself when there
+     * is none (#114). Called only with ext-intl loaded.
+     *
+     * A name both NFC and NFD has another equivalent spelling only where a
+     * piece of it is what a canonical singleton or composition exclusion
+     * normalises to ('K' for KELVIN SIGN, U+8C48 for U+F900), or where two
+     * of its combining marks with different combining classes stand next to
+     * each other and can swap. The first such piece is replaced by its
+     * source (canonicalSources()), else the first such pair is swapped. A
+     * name in neither normal form is already caught by those forms' probes,
+     * so mayBeSpelledOtherwise() asks only for one in both; and a name with
+     * no character CANONICAL_TARGET_CHARS lists has no piece to replace, so
+     * the table is not built for it.
+     */
+    private static function canonicalAlternative(string $segment): string
+    {
+        if (preg_match(self::CANONICAL_TARGET_CHARS, $segment) === 1 && ($alternative = strtr($segment, self::canonicalSources())) !== $segment) {
+            return $alternative;
+        }
+
+        /** @var list<string> $chars */
+        $chars = preg_split('//u', $segment, -1, PREG_SPLIT_NO_EMPTY);
+
+        for ($i = 1; $i < count($chars); $i++) {
+            // NFD puts two marks in order only where their classes differ
+            // and neither is a starter: then the swapped pair is equivalent.
+            if ($chars[$i - 1] !== $chars[$i] && \Normalizer::normalize($chars[$i].$chars[$i - 1], \Normalizer::FORM_D) === $chars[$i - 1].$chars[$i]) {
+                [$chars[$i - 1], $chars[$i]] = [$chars[$i], $chars[$i - 1]];
+
+                return implode('', $chars);
+            }
+        }
+
+        return $segment;
+    }
+
+    /**
+     * $segment, a valid UTF-8 name, in the form HFS+ stores and looks names
+     * up in (#114): NFD as HFS+'s table, frozen at Unicode 3.2, computes it.
+     * 'U+F900 U+AC00' is stored as 'U+F900 U+1100 U+1161', which neither
+     * its NFC nor its NFD reaches there, since both turn U+F900 into U+8C48.
+     * Called only with ext-intl loaded.
+     *
+     * HFS+ never decomposes the blocks HFS_KEPT_BLOCKS lists, nor any code
+     * point above the BMP or assigned after Unicode 3.2 (Balinese), and it
+     * treats a combining mark from those two last groups as a starter that
+     * never moves (U+0656, U+1DC2, U+1D165), as images of both HFS+
+     * variants show. Each such code point is kept as it is and cuts the
+     * name: every one NFD would decompose is a starter (a test checks it),
+     * and NFD never orders marks across a starter, so the pieces between
+     * them are normalised on their own and their marks ordered as HFS+
+     * orders them, the 3.2 marks in the kept blocks (U+20D7) included.
+     * Elsewhere the form is canonically equivalent to the name: it reaches
+     * the same file only on a volume that folds normalisation, where the
+     * NFD probe already did.
+     */
+    private static function hfsForm(string $segment): string
+    {
+        $nfd = static fn (string $piece): string => \Normalizer::normalize($piece, \Normalizer::FORM_D) ?: $piece;
+        $form = '';
+        $piece = '';
+
+        /** @var list<string> $chars */
+        $chars = preg_split('//u', $segment, -1, PREG_SPLIT_NO_EMPTY);
+
+        foreach ($chars as $char) {
+            $code = (int) mb_ord($char, 'UTF-8');
+            // Unknown to HFS+'s Unicode 3.2 table: decomposed and ordered by
+            // it as a starter would be, not at all.
+            $unknown = $code >= 0x10000 || version_compare(implode('.', \IntlChar::charAge($code) ?? []), '3.2.0.0', '>');
+            $kept = $unknown || array_filter(self::HFS_KEPT_BLOCKS, static fn (array $block): bool => $code >= $block[0] && $code <= $block[1]) !== [];
+
+            if (($kept && $nfd($char) !== $char) || ($unknown && \IntlChar::getCombiningClass($code) !== 0)) {
+                $form .= $nfd($piece).$char;
+                $piece = '';
+            } else {
+                $piece .= $char;
+            }
+        }
+
+        return $form.$nfd($piece);
+    }
+
+    /**
+     * For each string some code point normalises to under NFC other than
+     * itself, one such code point (#114): KELVIN SIGN for 'K', U+F900 for
+     * U+8C48, U+0958 for its two-character NFC. Built once per process
+     * from CANONICAL_SOURCE_BLOCKS, about 9,000 normalize() calls (tens of
+     * milliseconds with ext-intl, several times that with a userland
+     * Normalizer), and only for a non-ASCII name the volume was not already
+     * found folding, in both normal forms, holding a character
+     * CANONICAL_TARGET_CHARS lists. Called only where Normalizer exists.
+     *
+     * @return array<string, string>
+     */
+    private static function canonicalSources(): array
+    {
+        if (self::$canonicalSources === null) {
+            self::$canonicalSources = [];
+
+            foreach (self::CANONICAL_SOURCE_BLOCKS as [$first, $last]) {
+                for ($code = $first; $code <= $last; $code++) {
+                    $char = (string) mb_chr($code, 'UTF-8');
+                    $form = \Normalizer::normalize($char);
+
+                    if (is_string($form) && $form !== $char) {
+                        self::$canonicalSources[$form] ??= $char;
+                    }
+                }
+            }
+        }
+
+        return self::$canonicalSources;
     }
 
     /**

@@ -3186,8 +3186,10 @@ class AbstractFileAnalyzerTest extends TestCase
         $project = $this->unreadableProject();
         $analyzer = new ConcreteFileAnalyzer();
 
+        // As on Windows, where every segment is listed: elsewhere names the
+        // volume keeps apart are not listed at all (#114).
         foreach (['app/Http', 'app/Providers', 'app/Http/Controllers'] as $entry) {
-            $onDiskSpelling->invoke($analyzer, $project, $project . '/' . $entry, false);
+            $onDiskSpelling->invoke($analyzer, $project, $project . '/' . $entry, true);
         }
 
         $this->assertSame(
@@ -3216,8 +3218,10 @@ class AbstractFileAnalyzerTest extends TestCase
         $project = $this->unreadableProject();
         $analyzer = new ConcreteFileAnalyzer();
 
-        $this->assertSame($project . '/app/../app/Http', $onDiskSpelling->invoke($analyzer, $project, $project . '/app/../app/Http', false));
-        $this->assertSame($project . '/./app', $onDiskSpelling->invoke($analyzer, $project, $project . '/./app', false));
+        // As on Windows, where every segment before the '..' is listed;
+        // elsewhere a name the volume keeps apart is not listed at all (#114).
+        $this->assertSame($project . '/app/../app/Http', $onDiskSpelling->invoke($analyzer, $project, $project . '/app/../app/Http', true));
+        $this->assertSame($project . '/./app', $onDiskSpelling->invoke($analyzer, $project, $project . '/./app', true));
         // Only the base, to find 'app': the '..' stops it before 'app/' is read.
         $this->assertSame([$project . '/'], array_keys((array) $listings->getValue($analyzer)));
     }
@@ -4347,20 +4351,28 @@ class AbstractFileAnalyzerTest extends TestCase
     {
         // Decided per segment: an ASCII name the volume keeps apart from its
         // case variant needs no listing, before or after a non-ASCII one.
+        // The non-ASCII one lists its own directory only where the volume
+        // folds normalisation (APFS), whose NFD spelling reaches the same
+        // name; on ext4 it lists nothing either (#114).
         $this->requireCaseSensitiveFilesystem();
         $project = $this->unreadableProject();
         mkdir($project . "/big/caf\u{00e9}", 0777, true);
         mkdir($project . "/\u{00f1}/big2/sub", 0777, true);
+        $folds = is_dir($project . "/big/cafe\u{0301}");
+        // HFS+ stores both names decomposed, and the pattern takes that
+        // spelling from the listing.
+        $cafe = in_array("cafe\u{0301}", (array) scandir($project . '/big'), true) ? "cafe\u{0301}" : "caf\u{00e9}";
+        $enye = in_array("n\u{0303}", (array) scandir($project), true) ? "n\u{0303}" : "\u{00f1}";
         $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
         $onDiskPattern = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskPattern');
 
         $analyzer = new ConcreteFileAnalyzer();
-        $this->assertSame("big/caf\u{00e9}/*", $onDiskPattern->invoke($analyzer, $project, "big/caf\u{00e9}/*"));
-        $this->assertSame([$project . '/big/'], array_keys((array) $listings->getValue($analyzer)));
+        $this->assertSame("big/{$cafe}/*", $onDiskPattern->invoke($analyzer, $project, "big/caf\u{00e9}/*"));
+        $this->assertSame($folds ? [$project . '/big/'] : [], array_keys((array) $listings->getValue($analyzer)));
 
         $analyzer = new ConcreteFileAnalyzer();
-        $this->assertSame("\u{00f1}/big2/sub/*", $onDiskPattern->invoke($analyzer, $project, "\u{00f1}/big2/sub/*"));
-        $this->assertSame([$project . '/'], array_keys((array) $listings->getValue($analyzer)));
+        $this->assertSame("{$enye}/big2/sub/*", $onDiskPattern->invoke($analyzer, $project, "\u{00f1}/big2/sub/*"));
+        $this->assertSame($folds ? [$project . '/'] : [], array_keys((array) $listings->getValue($analyzer)));
     }
 
     public function testAnAbsoluteExcludeOutsideTheStoredBaseIsLeftAsWritten(): void
@@ -4396,6 +4408,612 @@ class AbstractFileAnalyzerTest extends TestCase
             ->setValue($analyzer, [$project . '/app/' => [$stat['dev'] . ':' . $stat['ino'] => [$spelling]]]);
 
         return $analyzer;
+    }
+
+    // =========================================================================
+    // Respelling lists only what the volume may fold - ShieldCI/analyzers-core#114
+    //
+    // Every entry listed each directory on its path on every walk, so one
+    // file in a 60k-entry directory cost a whole scandir() per walk on every
+    // filesystem, typed as on disk or not; and a non-ASCII exclude typed as
+    // on disk listed its directory even where nothing folds.
+    // =========================================================================
+
+    public function testRespellingAnEntryListsNothingWhereNoNameCouldFold(): void
+    {
+        // '€' has no case and no other normal form, a digit has neither, and
+        // a name that cannot be stat'ed is not there in any spelling: none
+        // of them needs a listing, on any volume.
+        $this->skipWhereZeroWidthCodePointsFold();
+        $project = $this->unreadableProject();
+        mkdir($project . "/123/\u{20ac}4", 0777, true);
+        file_put_contents($project . "/123/\u{20ac}4/5.php", "<?php\n");
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $onDiskSpelling = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+        $analyzer = new ConcreteFileAnalyzer();
+
+        // '5.php' is left out: its letters list '€4' where the volume folds
+        // case, as any lettered name must there.
+        foreach (['123', "123/\u{20ac}4", '123/9/8', 'gone/x', '7'] as $entry) {
+            $this->assertSame($project . '/' . $entry, $onDiskSpelling->invoke($analyzer, $project, $project . '/' . $entry, false), $entry);
+        }
+
+        $this->assertSame([], $listings->getValue($analyzer));
+
+        $walk = $this->caseAnalyzer(['123', "123/\u{20ac}4/5.php", '123/9']);
+        $this->assertSame([$project . "/123/\u{20ac}4/5.php"], $walk->getPhpFilesPublic());
+        $this->assertSame(['123/9'], $walk->getMissingPathsPublic());
+    }
+
+    public function testRespellingACorrectlySpelledEntryListsNothingWhereNamesKeepCase(): void
+    {
+        // The issue's case, counted rather than timed: one file in a large
+        // directory, typed as on disk, listed that directory on every walk.
+        // Miscased entries name nothing on this volume, and need no listing
+        // to say so.
+        $this->requireCaseSensitiveFilesystem();
+        $project = $this->unreadableProject();
+        $big = $project . '/big';
+        mkdir($big . '/sub', 0777, true);
+        mkdir($big . "/\u{03c9}1");
+        file_put_contents($big . '/Z.php', "<?php\n");
+        file_put_contents($big . "/\u{03c9}1/W.php", "<?php\n");
+
+        for ($i = 0; $i < 50; $i++) {
+            touch($big . '/f' . $i . '.php');
+        }
+
+        $entries = ['big/Z.php', 'big/sub', "big/\u{03c9}1", 'BIG/Z.php', 'big/SUB', "big/\u{03a9}1"];
+        $expected = [$big . '/Z.php', $big . "/\u{03c9}1/W.php"];
+
+        // Only where the volume does not fold normalisation, as ext4 does
+        // not: on APFS the NFD spelling reaches the same directory, and only
+        // the listing can tell which of the two is on disk.
+        mkdir($big . "/caf\u{00e9}");
+        file_put_contents($big . "/caf\u{00e9}/C.php", "<?php\n");
+
+        if (! is_dir($big . "/cafe\u{0301}")) {
+            $entries[] = "big/caf\u{00e9}";
+            $expected[] = $big . "/caf\u{00e9}/C.php";
+        }
+
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $onDiskSpelling = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+        $analyzer = new ConcreteFileAnalyzer();
+
+        foreach ($entries as $entry) {
+            $this->assertSame($project . '/' . $entry, $onDiskSpelling->invoke($analyzer, $project, $project . '/' . $entry, false), $entry);
+        }
+
+        $this->assertSame([], $listings->getValue($analyzer));
+
+        $walk = $this->caseAnalyzer($entries);
+        $this->assertSame($expected, $walk->getPhpFilesPublic());
+        $this->assertSame(['BIG/Z.php', 'big/SUB', "big/\u{03a9}1"], $walk->getMissingPathsPublic());
+    }
+
+    public function testANonAsciiPatternTypedAsOnDiskListsNothingWhereItCannotFold(): void
+    {
+        // A non-ASCII byte used to list its directory whatever the volume:
+        // '€' has no case and no other normal form, so the probes settle it.
+        $this->skipWhereZeroWidthCodePointsFold();
+        $project = $this->unreadableProject();
+        mkdir($project . "/123/\u{20ac}4", 0777, true);
+        file_put_contents($project . "/123/\u{20ac}4/5.php", "<?php\n");
+        file_put_contents($project . '/123/6.php', "<?php\n");
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $onDiskPattern = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskPattern');
+        $analyzer = new ConcreteFileAnalyzer();
+
+        foreach (["123/\u{20ac}4/*", "\u{20ac}9/*", $project . "/123/\u{20ac}4/*"] as $pattern) {
+            $this->assertSame($pattern, $onDiskPattern->invoke($analyzer, $project, $pattern), $pattern);
+        }
+
+        $this->assertSame([], $listings->getValue($analyzer));
+
+        $walk = $this->caseAnalyzer(['123']);
+        $walk->setExcludePatterns(["123/\u{20ac}4/*"]);
+        $this->assertSame([$project . '/123/6.php'], $walk->getPhpFilesPublic());
+    }
+
+    public function testAnEntryKeptAsTypedIsRecordedForTheSpellingsAfterIt(): void
+    {
+        // Kept without a listing, '2' may sit in a directory that cannot be
+        // listed (#112), so its spelling is recorded as unlistedSpelling()
+        // records it: a later spelling of the same file folds into it.
+        $this->skipWhereZeroWidthCodePointsFold();
+        $project = $this->unreadableProject();
+        mkdir($project . '/1/2', 0777, true);
+        $two = lstat($project . '/1/2');
+        $this->assertNotFalse($two);
+        $this->lock($project . '/1', 0111);
+        $analyzer = new ConcreteFileAnalyzer();
+        $onDiskSpelling = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+
+        $this->assertSame($project . '/1/2', $onDiskSpelling->invoke($analyzer, $project, $project . '/1/2', false));
+        $this->assertSame([], (new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings'))->getValue($analyzer));
+        // Only in '1', which cannot be read: the base can, and is listed
+        // whenever a later spelling needs it, so nothing is recorded there.
+        $this->assertSame(
+            [$project . '/1/' => [$two['dev'] . ':' . $two['ino'] => ['2']]],
+            (new \ReflectionProperty(AbstractFileAnalyzer::class, 'unlistedSpellings'))->getValue($analyzer)
+        );
+    }
+
+    public function testASpellingNoProbeSeesStillFoldsBelowAnUnlistableDirectory(): void
+    {
+        // APFS folds KELVIN SIGN into 'K' (canonical equivalence) whether or
+        // not it folds case, and 'K1' has no other normal form to probe: the
+        // gate keeps it unlisted, and the KELVIN SIGN spelling after it must
+        // still meet it in one root.
+        $project = $this->unreadableProject();
+        mkdir($project . "/app/\u{212a}1");
+        file_put_contents($project . "/app/\u{212a}1/K.php", "<?php\n");
+
+        if (! is_dir($project . '/app/K1')) {
+            $this->markTestSkipped('needs a normalisation-insensitive filesystem (APFS)');
+        }
+
+        $this->lock($project . '/app', 0111);
+        $analyzer = $this->caseAnalyzer(['app/K1', "app/\u{212a}1"]);
+
+        $this->assertSame([$project . '/app/K1/K.php'], $analyzer->getPhpFilesPublic());
+        $this->assertSame([], $analyzer->getMissingPathsPublic());
+    }
+
+    public function testOnWindowsEveryEntrySegmentIsStillListed(): void
+    {
+        // NTFS reaches 'name.' and 'name ' as 'name', and '123456~1' as its
+        // long name: aliases no probe of the typed name can see, so entries
+        // there are respelled from listings as before.
+        $project = $this->unreadableProject();
+        mkdir($project . '/123');
+        $onDiskSpelling = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+        $analyzer = new ConcreteFileAnalyzer();
+
+        $this->assertSame($project . '/123', $onDiskSpelling->invoke($analyzer, $project, $project . '/123', true));
+        $this->assertSame([$project . '/'], array_keys((array) (new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings'))->getValue($analyzer)));
+    }
+
+    public function testANonAsciiSegmentListsWhereItsFormsCannotBeProbed(): void
+    {
+        // Not valid UTF-8, or no mbstring to read a case with: the answer
+        // stays the conservative one, as before #114.
+        $project = $this->unreadableProject();
+        mkdir($project . "/\u{20ac}4");
+        $stat = lstat($project . "/\u{20ac}4");
+        $this->assertNotFalse($stat);
+        $identity = $stat['dev'] . ':' . $stat['ino'];
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'mayBeSpelledOtherwise');
+        $analyzer = new ConcreteFileAnalyzer();
+
+        $this->assertTrue($method->invoke($analyzer, $project, "\xff4", $identity));
+        $this->assertTrue($method->invoke($analyzer, $project, "\u{20ac}4", $identity, true, false));
+        // Control: with mbstring, '€4' is settled by probes - where the
+        // volume does not ignore zero-width code points.
+        $this->skipWhereZeroWidthCodePointsFold();
+        $this->assertFalse($method->invoke($analyzer, $project, "\u{20ac}4", $identity));
+    }
+
+    public function testAUnicodeCasedNameWithNoAsciiLetterListsWhereTheVolumeFoldsCase(): void
+    {
+        // 'ω1' has no ASCII letter to probe the volume's case with, so its
+        // own Unicode case is asked: on a folding volume 'Ω1' is respelled.
+        $this->requireCaseInsensitiveFilesystem();
+        $project = $this->unreadableProject();
+        mkdir($project . "/\u{03c9}1");
+        file_put_contents($project . "/\u{03c9}1/W.php", "<?php\n");
+        $onDiskSpelling = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+
+        $this->assertSame($project . "/\u{03c9}1", $onDiskSpelling->invoke(new ConcreteFileAnalyzer(), $project, $project . "/\u{03a9}1", false));
+        $this->assertSame([$project . "/\u{03c9}1/W.php"], $this->caseAnalyzer(["\u{03a9}1", "\u{03c9}1"])->getPhpFilesPublic());
+    }
+
+    /**
+     * Pairs of canonically equivalent names, [on disk, typed], that APFS
+     * folds into one whether or not it folds case, where the typed one is
+     * already NFC and NFD (or the on-disk one is).
+     *
+     * @return list<array{string, string}>
+     */
+    private static function canonicalPairs(): array
+    {
+        return [
+            ["\u{F900}", "\u{8C48}"],
+            ["\u{8C48}", "\u{F900}"],
+            ["\u{037E}", ';'],
+            ["\u{212A}1", 'K1'],
+            ["\u{2126}", "\u{03A9}"],
+            ["\u{212B}", "\u{00C5}"],
+            ["\u{00C5}", "\u{212B}"],
+            ["x\u{0302}\u{0323}", "x\u{0323}\u{0302}"],
+        ];
+    }
+
+    public function testCanonicallyEquivalentSpellingsMeetInOneRoot(): void
+    {
+        // A name the volume folds through a canonical singleton, a CJK
+        // compatibility ideograph or reordered marks has no other NFC or
+        // NFD form to probe; the canonical alternative finds the folding,
+        // so each pair still walks as one root and an exclude in either
+        // spelling applies. Master listed every entry's directories, so the
+        // roots met there too; an ASCII exclude (';', 'K1') did not apply
+        // there to a name stored in its singleton, since #113 probed only
+        // ASCII case before keeping such a pattern as typed.
+        // Each pair runs only where the volume folds it: APFS folds all of
+        // them, HFS+ keeps U+F900, KELVIN SIGN, OHM SIGN and ANGSTROM SIGN
+        // apart from their normal forms, ext4 folds none.
+        $project = $this->unreadableProject();
+        $folded = 0;
+
+        foreach (self::canonicalPairs() as $i => [$disk, $typed]) {
+            mkdir($project . '/c' . $i . '/' . $disk, 0777, true);
+
+            if (! is_dir($project . '/c' . $i . '/' . $typed)) {
+                continue;
+            }
+
+            $folded++;
+            file_put_contents($project . '/c' . $i . '/' . $disk . '/X.php', "<?php\n");
+            // The walk yields the name as the directory lists it, which
+            // HFS+ may store decomposed.
+            $stored = array_values(array_diff((array) scandir($project . '/c' . $i), ['.', '..']));
+            $this->assertCount(1, $stored);
+            $file = $project . '/c' . $i . '/' . $stored[0] . '/X.php';
+
+            foreach ([[$typed, $disk], [$disk, $typed]] as $order) {
+                $paths = array_map(static fn (string $name): string => 'c' . $i . '/' . $name, $order);
+                $this->assertSame([$file], $this->caseAnalyzer($paths)->getPhpFilesPublic(), json_encode($paths) ?: '');
+
+                $excluded = $this->caseAnalyzer([$paths[0]]);
+                $excluded->setExcludePatterns([$paths[1] . '/*']);
+                $this->assertSame([], $excluded->getPhpFilesPublic(), json_encode($paths) ?: '');
+            }
+        }
+
+        if ($folded === 0) {
+            $this->markTestSkipped('needs a normalisation-insensitive filesystem (APFS, HFS+)');
+        }
+    }
+
+    public function testAnExcludeTypedAsCreatedStillAppliesOnHfsPlus(): void
+    {
+        // HFS+ stores 'U+F900 U+AC00' as 'U+F900 U+1100 U+1161': NFD but
+        // for U+F900, a form neither NFC nor NFD of the typed name reaches.
+        $base = $this->testDir . '/hfs';
+        mkdir($base . "/d/\u{F900}\u{AC00}", 0777, true);
+        file_put_contents($base . "/d/\u{F900}\u{AC00}/X.php", "<?php\n");
+
+        if (! in_array("\u{F900}\u{1100}\u{1161}", (array) scandir($base . '/d'), true)) {
+            $this->markTestSkipped('needs HFS+');
+        }
+
+        $a = new ConcreteFileAnalyzer();
+        $a->setBasePath($base);
+        $a->setPaths(['d']);
+        $a->setExcludePatterns(["d/\u{F900}\u{AC00}/*"]);
+        $this->assertSame([], $a->getPhpFilesPublic());
+
+        $a->setPaths(["d/\u{F900}\u{AC00}", "d/\u{F900}\u{1100}\u{1161}"]);
+        $a->setExcludePatterns([]);
+        $this->assertSame([$base . "/d/\u{F900}\u{1100}\u{1161}/X.php"], $a->getPhpFilesPublic());
+    }
+
+    public function testSingletonsHfsPlusKeepMeetTheirStoredFormInOneRoot(): void
+    {
+        // Created as KELVIN SIGN, GREEK QUESTION MARK, GREEK VARIA, HFS+
+        // stores KELVIN SIGN, ';', '`': the typed spelling reaches it only
+        // through its HFS+ form. Case-sensitive HFS+ alone; a case-insensitive
+        // volume finds it through case, APFS through the canonical forms.
+        $this->requireCaseSensitiveFilesystem();
+        $base = $this->testDir . '/hfs';
+        $created = "\u{212A}\u{037E}\u{1FEF}";
+        mkdir($base . '/d/' . $created, 0777, true);
+        file_put_contents($base . '/d/' . $created . '/X.php', "<?php\n");
+
+        if (! in_array("\u{212A};`", (array) scandir($base . '/d'), true)) {
+            $this->markTestSkipped('needs HFS+');
+        }
+
+        $a = new ConcreteFileAnalyzer();
+        $a->setBasePath($base);
+        $a->setPaths(['d/' . $created, "d/\u{212A};`"]);
+        $this->assertSame([$base . "/d/\u{212A};`/X.php"], $a->getPhpFilesPublic());
+
+        $a->setPaths(['d']);
+        $a->setExcludePatterns(['d/' . $created . '/*']);
+        $this->assertSame([], $a->getPhpFilesPublic());
+    }
+
+    public function testAMarkHfsPlusKeepsInPlaceStillMeetsItsStoredForm(): void
+    {
+        // HFS+ treats a mark assigned after Unicode 3.2 as a starter that
+        // never moves: ALEF WITH MADDA ABOVE + U+0656 is stored decomposed,
+        // U+0656 after U+0653 although NFD orders it first.
+        $base = $this->testDir . '/hfs';
+        $name = "\u{0622}\u{0656}";
+        mkdir($base . '/d/' . $name, 0777, true);
+        file_put_contents($base . '/d/' . $name . '/X.php', "<?php\n");
+
+        if (! in_array("\u{0627}\u{0653}\u{0656}", (array) scandir($base . '/d'), true)) {
+            $this->markTestSkipped('needs HFS+');
+        }
+
+        $a = new ConcreteFileAnalyzer();
+        $a->setBasePath($base);
+        $a->setPaths(['d']);
+        $a->setExcludePatterns(['d/' . $name . '/*']);
+        $this->assertSame([], $a->getPhpFilesPublic());
+        $a->setExcludePatterns([]);
+        $a->setPaths(['d/' . $name, 'd']);
+        $this->assertSame([$base . "/d/\u{0627}\u{0653}\u{0656}/X.php"], $a->getPhpFilesPublic());
+    }
+
+    public function testMarksHfsPlusLeavesInPlaceMeetTheirStoredFormInOneRoot(): void
+    {
+        // 'é' + a mark HFS+ does not order (U+0353 and U+1DC2, assigned
+        // after 3.2; U+1D165, above the BMP): stored 'e' U+0301 + the mark
+        // where NFD puts the mark first.
+        $base = $this->testDir . '/hfs';
+
+        foreach (["\u{0353}", "\u{1DC2}", "\u{1D165}"] as $i => $mark) {
+            $created = "\u{00E9}" . $mark;
+            mkdir($base . '/d' . $i . '/' . $created, 0777, true);
+            file_put_contents($base . '/d' . $i . '/' . $created . '/X.php', "<?php\n");
+
+            if (! in_array("e\u{0301}" . $mark, (array) scandir($base . '/d' . $i), true)) {
+                $this->markTestSkipped('needs HFS+');
+            }
+
+            $a = new ConcreteFileAnalyzer();
+            $a->setBasePath($base);
+            $a->setPaths(['d' . $i . '/' . $created, 'd' . $i . "/e\u{0301}" . $mark]);
+            $this->assertSame([$base . '/d' . $i . "/e\u{0301}" . $mark . '/X.php'], $a->getPhpFilesPublic(), bin2hex($mark));
+
+            $a->setPaths(['d' . $i]);
+            $a->setExcludePatterns(['d' . $i . '/' . $created . '/*']);
+            $this->assertSame([], $a->getPhpFilesPublic(), bin2hex($mark));
+        }
+    }
+
+    public function testAnIgnorableHfsPlusFoldsIsRespelledAsOnMaster(): void
+    {
+        $base = $this->testDir . '/hfs';
+        $disk = "\u{0645}\u{06CC}\u{200C}\u{062E}";
+        $typed = "\u{0645}\u{06CC}\u{062E}";
+        mkdir("$base/d/$disk", 0777, true);
+        file_put_contents("$base/d/$disk/X.php", "<?php\n");
+
+        if (! is_dir("$base/d/$typed")) {
+            $this->markTestSkipped('needs case-insensitive HFS+');
+        }
+
+        $a = new ConcreteFileAnalyzer();
+        $a->setBasePath($base);
+        $a->setPaths(['d']);
+        $a->setExcludePatterns(["d/$typed/*"]);
+        $this->assertSame([], $a->getPhpFilesPublic());
+        $a->setExcludePatterns([]);
+        $a->setPaths(["d/$typed", "d/$disk"]);
+        $this->assertCount(1, $a->getPhpFilesPublic());
+    }
+
+    public function testADigitNameWithAnIgnorableMeetsItsStoredFormAsOnMaster(): void
+    {
+        // Case-insensitive HFS+ reaches '1 U+200C 2' as '12' and back. Both
+        // entries were respelled from the listing; an ASCII exclude was kept
+        // as typed after its case probe (#113) and still is, so 'd/12/*'
+        // misses the on-disk name as it always did.
+        $base = $this->testDir . '/hfs';
+        $disk = "1\u{200C}2";
+        mkdir("$base/d/$disk", 0777, true);
+        file_put_contents("$base/d/$disk/X.php", "<?php\n");
+
+        if (! is_dir("$base/d/12")) {
+            $this->markTestSkipped('needs case-insensitive HFS+');
+        }
+
+        $a = new ConcreteFileAnalyzer();
+        $a->setBasePath($base);
+
+        foreach ([['d/12', "d/$disk"], ["d/$disk", 'd/12']] as $paths) {
+            $a->setPaths($paths);
+            $this->assertSame(["$base/d/$disk/X.php"], $a->getPhpFilesPublic(), $paths[0]);
+        }
+
+        $a->setPaths(["d/$disk"]);
+        $a->setExcludePatterns(['d/12/*']);
+        $this->assertSame(["$base/d/$disk/X.php"], $a->getPhpFilesPublic());
+
+        $a->setPaths(['d/12']);
+        $a->setExcludePatterns(["d/$disk/*"]);
+        $this->assertSame([], $a->getPhpFilesPublic());
+    }
+
+    public function testTheHfsFormKeepsWhatHfsPlusKeeps(): void
+    {
+        if (! class_exists(\Normalizer::class)) {
+            $this->markTestSkipped('needs ext-intl');
+        }
+
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'hfsForm');
+
+        $this->assertSame("\u{F900}\u{1100}\u{1161}", $method->invoke(null, "\u{F900}\u{AC00}"));
+        $this->assertSame("\u{212A};`", $method->invoke(null, "\u{212A}\u{037E}\u{1FEF}"));
+        // Marks are ordered across a kept one, as HFS+ orders them.
+        $this->assertSame("a\u{0323}\u{20D7}", $method->invoke(null, "a\u{20D7}\u{0323}"));
+        $this->assertSame("e\u{0301}\u{1D15E}", $method->invoke(null, "\u{00E9}\u{1D15E}"));
+        $this->assertSame('0', $method->invoke(null, '0'));
+    }
+
+    public function testWhatHfsFormKeepsIsWhatHfsPlusKeeps(): void
+    {
+        // hfsForm() keeps what HFS+'s Unicode 3.2 table does not know (above
+        // the BMP, assigned later) and the blocks its specification
+        // excludes. Every such code point NFD would change must be a
+        // starter, for hfsForm() to cut there; and the BMP marks 3.2 knew
+        // must keep the combining classes hfsForm() was checked with on
+        // HFS+ images (297 marks; classes are stable since Unicode 4.1).
+        if (! class_exists(\IntlChar::class)) {
+            $this->markTestSkipped('needs ext-intl');
+        }
+
+        $blocks = (new \ReflectionClassConstant(AbstractFileAnalyzer::class, 'HFS_KEPT_BLOCKS'))->getValue();
+        $this->assertIsArray($blocks);
+        $ranges = [];
+
+        foreach ($blocks as $block) {
+            $this->assertIsArray($block);
+            [$first, $last] = array_values($block);
+            $this->assertIsInt($first);
+            $this->assertIsInt($last);
+            $ranges[] = [$first, $last];
+        }
+
+        $wrong = [];
+        $marks = [];
+
+        for ($code = 0; $code <= 0x10FFFF; $code++) {
+            $char = mb_chr($code, 'UTF-8');
+
+            if ($char === false) {
+                continue;
+            }
+
+            $age = \IntlChar::charAge($code);
+            $later = $code >= 0x10000 || (is_array($age) && version_compare(implode('.', array_map(static fn (mixed $part): int => is_numeric($part) ? (int) $part : 0, $age)), '3.2.0.0', '>'));
+            $kept = $later;
+
+            foreach ($ranges as [$first, $last]) {
+                $kept = $kept || ($code >= $first && $code <= $last);
+            }
+
+            $class = \IntlChar::getCombiningClass($code);
+
+            if ($kept && $class !== 0 && \Normalizer::normalize($char, \Normalizer::FORM_D) !== $char) {
+                $wrong[] = sprintf('U+%04X', $code);
+            }
+
+            if (! $later && $class !== 0) {
+                $marks[] = sprintf('%X:%d', $code, $class);
+            }
+        }
+
+        $this->assertSame([], $wrong);
+        $this->assertCount(297, $marks);
+        $this->assertSame('faf19b2e45367727e36934c2a623b65fba61b5be', sha1(implode(',', $marks)));
+    }
+
+    public function testACanonicallyEquivalentSpellingIsProbedNotListedWhereNothingFolds(): void
+    {
+        // Where the volume keeps the spellings apart (ext4), the typed name
+        // is its own: the alternative names nothing and nothing is listed.
+        $this->requireCaseSensitiveFilesystem();
+        $project = $this->unreadableProject();
+        mkdir($project . "/caf\u{00e9}");
+
+        if (is_dir($project . "/cafe\u{0301}")) {
+            $this->markTestSkipped('needs a filesystem that keeps normal forms apart (ext4)');
+        }
+
+        $listings = new \ReflectionProperty(AbstractFileAnalyzer::class, 'listings');
+        $onDiskSpelling = new \ReflectionMethod(AbstractFileAnalyzer::class, 'onDiskSpelling');
+        $analyzer = new ConcreteFileAnalyzer();
+
+        foreach (["\u{8C48}", ';', 'K1', "\u{03A9}", "x\u{0323}\u{0302}"] as $i => $name) {
+            mkdir($project . '/' . $i . '/' . $name, 0777, true);
+            $this->assertSame($project . '/' . $i . '/' . $name, $onDiskSpelling->invoke($analyzer, $project, $project . '/' . $i . '/' . $name, false), $name);
+        }
+
+        $this->assertSame([], $listings->getValue($analyzer));
+    }
+
+    public function testTheCanonicalAlternativeDiffersOnlyWhereOneExists(): void
+    {
+        if (! class_exists(\Normalizer::class)) {
+            $this->markTestSkipped('needs ext-intl');
+        }
+
+        $method = new \ReflectionMethod(AbstractFileAnalyzer::class, 'canonicalAlternative');
+
+        $this->assertSame("\u{F900}1", $method->invoke(null, "\u{8C48}1"));
+        $this->assertSame("\u{212A}1", $method->invoke(null, 'K1'));
+        $this->assertSame("\u{2126}", $method->invoke(null, "\u{03A9}"));
+        $this->assertSame("x\u{0302}\u{0323}", $method->invoke(null, "x\u{0323}\u{0302}"));
+        // U+0301 is itself what U+0341 normalises to: replaced before any swap.
+        $this->assertSame("x\u{0323}\u{0341}", $method->invoke(null, "x\u{0323}\u{0301}"));
+        // No piece a singleton normalises to, no marks that can swap.
+        $this->assertSame("\u{20ac}4", $method->invoke(null, "\u{20ac}4"));
+        $this->assertSame("x\u{0302}\u{0302}", $method->invoke(null, "x\u{0302}\u{0302}"));
+        $this->assertSame("\u{03c9}1", $method->invoke(null, "\u{03c9}1"));
+    }
+
+    public function testTheCanonicalSourceBlocksHoldEveryCodePointNfcChanges(): void
+    {
+        // Every code point whose NFC is not itself, scanned in full, so a
+        // Unicode update that adds one outside the blocks fails here rather
+        // than leaving a spelling unprobed. The ASCII ones are the constant
+        // the no-intl path uses.
+        if (! class_exists(\Normalizer::class)) {
+            $this->markTestSkipped('needs ext-intl');
+        }
+
+        $blocks = (new \ReflectionClassConstant(AbstractFileAnalyzer::class, 'CANONICAL_SOURCE_BLOCKS'))->getValue();
+        $this->assertIsArray($blocks);
+        $ranges = [];
+
+        foreach ($blocks as $block) {
+            $this->assertIsArray($block);
+            [$first, $last] = array_values($block);
+            $this->assertIsInt($first);
+            $this->assertIsInt($last);
+            $ranges[] = [$first, $last];
+        }
+
+        $outside = [];
+
+        for ($code = 0; $code <= 0x10FFFF; $code++) {
+            if ($code >= 0xD800 && $code <= 0xDFFF) {
+                continue;
+            }
+
+            $char = (string) mb_chr($code, 'UTF-8');
+
+            if (\Normalizer::normalize($char) === $char) {
+                continue;
+            }
+
+            $inside = false;
+
+            foreach ($ranges as [$first, $last]) {
+                $inside = $inside || ($code >= $first && $code <= $last);
+            }
+
+            if (! $inside) {
+                $outside[] = sprintf('U+%04X', $code);
+            }
+        }
+
+        $this->assertSame([], $outside);
+
+        $sources = (new \ReflectionMethod(AbstractFileAnalyzer::class, 'canonicalSources'))->invoke(null);
+        $this->assertIsArray($sources);
+        $ascii = array_filter($sources, static fn (string $form): bool => preg_match('/[\x80-\xff]/', $form) !== 1, ARRAY_FILTER_USE_KEY);
+        ksort($ascii);
+        $expected = (new \ReflectionClassConstant(AbstractFileAnalyzer::class, 'ASCII_SINGLETONS'))->getValue();
+        $this->assertIsArray($expected);
+        ksort($expected);
+        $this->assertSame($expected, $ascii);
+
+        // Every key a name in both normal forms can hold has a character
+        // the precheck lists, so skipping the table never skips a key.
+        $pattern = (new \ReflectionClassConstant(AbstractFileAnalyzer::class, 'CANONICAL_TARGET_CHARS'))->getValue();
+        $this->assertIsString($pattern);
+        $unlisted = array_filter(
+            array_keys($sources),
+            static fn (string $form): bool => \Normalizer::normalize($form, \Normalizer::FORM_D) === $form && preg_match($pattern, $form) !== 1
+        );
+        $this->assertSame([], array_values($unlisted));
     }
 
     // =========================================================================
@@ -4995,6 +5613,25 @@ class AbstractFileAnalyzerTest extends TestCase
     {
         if (! $this->isCaseInsensitiveFilesystem()) {
             $this->markTestSkipped('needs a case-insensitive filesystem (APFS, NTFS), where App and app are one directory');
+        }
+    }
+
+    /**
+     * Skip where the volume ignores zero-width code points in names, as
+     * case-insensitive HFS+ does: there '123' may be an on-disk
+     * '1 U+200C 23', so even a name with no letter is listed (#114).
+     */
+    private function skipWhereZeroWidthCodePointsFold(): void
+    {
+        $probe = $this->testDir . '/zero-width-probe';
+        touch($probe);
+
+        try {
+            if (file_exists($this->testDir . "/zero\u{200C}-width-probe")) {
+                $this->markTestSkipped('the volume ignores zero-width code points (case-insensitive HFS+)');
+            }
+        } finally {
+            unlink($probe);
         }
     }
 
