@@ -793,4 +793,179 @@ PHP);
         $this->assertTrue(PackageDetector::isFilamentConfigured($this->testDir));
     }
 
+    // =================================================================
+    // Tests for installedVersion()
+    // =================================================================
+
+    private function writeLock(string $content): void
+    {
+        file_put_contents($this->testDir.DIRECTORY_SEPARATOR.'composer.lock', $content);
+    }
+
+    public function test_installed_version_reads_a_pretty_printed_lock(): void
+    {
+        $this->createComposerLock(['laravel/nova', 'symfony/console']);
+
+        $this->assertSame('1.0.0', PackageDetector::installedVersion('laravel/nova', $this->testDir));
+    }
+
+    public function test_installed_version_returns_the_version_exactly_as_written(): void
+    {
+        $this->writeLock(<<<'JSON'
+{
+    "packages": [
+        {
+            "name": "laravel/framework",
+            "version": "v10.48.4"
+        },
+        {
+            "name": "acme/tool",
+            "version": "dev-main"
+        }
+    ]
+}
+JSON);
+
+        $this->assertSame('v10.48.4', PackageDetector::installedVersion('laravel/framework', $this->testDir));
+        $this->assertSame('dev-main', PackageDetector::installedVersion('acme/tool', $this->testDir));
+    }
+
+    public function test_installed_version_reads_a_minified_lock(): void
+    {
+        $this->writeLock('{"packages":[{"name":"laravel/nova","version":"4.32.1"}],"packages-dev":[]}');
+
+        $this->assertSame('4.32.1', PackageDetector::installedVersion('laravel/nova', $this->testDir));
+    }
+
+    public function test_installed_version_reads_packages_dev(): void
+    {
+        $this->writeLock('{"packages":[],"packages-dev":[{"name":"laravel/telescope","version":"v5.2.0"}]}');
+
+        $this->assertSame('v5.2.0', PackageDetector::installedVersion('laravel/telescope', $this->testDir));
+    }
+
+    public function test_installed_version_keeps_the_first_entry_for_a_name_listed_twice(): void
+    {
+        $this->writeLock(
+            '{"packages":[{"name":"laravel/nova","version":"4.0.0"}],'
+            .'"packages-dev":[{"name":"laravel/nova","version":"5.0.0"}]}'
+        );
+
+        $this->assertSame('4.0.0', PackageDetector::installedVersion('laravel/nova', $this->testDir));
+    }
+
+    public function test_installed_version_returns_null_for_a_package_not_in_the_lock(): void
+    {
+        $this->createComposerLock(['laravel/framework']);
+
+        $this->assertNull(PackageDetector::installedVersion('laravel/nova', $this->testDir));
+    }
+
+    public function test_installed_version_matches_the_name_case_sensitively(): void
+    {
+        $this->createComposerLock(['laravel/nova']);
+
+        $this->assertNull(PackageDetector::installedVersion('Laravel/Nova', $this->testDir));
+        $this->assertFalse(PackageDetector::hasPackage('Laravel/Nova', $this->testDir));
+    }
+
+    public function test_installed_version_returns_null_without_a_lock(): void
+    {
+        $this->assertNull(PackageDetector::installedVersion('laravel/nova', $this->testDir));
+    }
+
+    public function test_installed_version_returns_null_for_an_unreadable_lock(): void
+    {
+        $lockPath = $this->testDir.DIRECTORY_SEPARATOR.'composer.lock';
+        file_put_contents($lockPath, '{"packages":[{"name":"laravel/nova","version":"4.0.0"}]}');
+        chmod($lockPath, 0000);
+
+        set_error_handler(fn () => true);
+
+        try {
+            $version = PackageDetector::installedVersion('laravel/nova', $this->testDir);
+        } finally {
+            restore_error_handler();
+            chmod($lockPath, 0644);
+        }
+
+        $this->assertNull($version);
+    }
+
+    public function test_installed_version_returns_null_for_a_lock_that_does_not_decode(): void
+    {
+        // The text fallback hasPackage() uses can say a name is there, but not which of the
+        // two conflicting versions is the one installed.
+        $this->writeLock(<<<'LOCK'
+{
+    "packages": [
+<<<<<<< HEAD
+        {"name":"laravel/nova","version":"4.0.0"},
+=======
+        {"name": "laravel/nova", "version": "4.1.0"},
+>>>>>>> feature
+    ]
+}
+LOCK);
+
+        $this->assertNull(PackageDetector::installedVersion('laravel/nova', $this->testDir));
+        $this->assertTrue(PackageDetector::hasPackage('laravel/nova', $this->testDir));
+    }
+
+    public function test_installed_version_returns_null_for_an_entry_without_a_string_version(): void
+    {
+        $this->writeLock(
+            '{"packages":[{"name":"laravel/nova"},{"name":"laravel/horizon","version":5},'
+            .'{"name":"laravel/sanctum","version":null}]}'
+        );
+
+        foreach (['laravel/nova', 'laravel/horizon', 'laravel/sanctum'] as $package) {
+            $this->assertNull(PackageDetector::installedVersion($package, $this->testDir), $package);
+            // Still installed: a lock entry with a name is a package whatever else it lacks.
+            $this->assertTrue(PackageDetector::hasPackage($package, $this->testDir), $package);
+        }
+    }
+
+    public function test_installed_version_agrees_with_has_package(): void
+    {
+        $this->writeLock(
+            '{"packages":[{"name":"laravel/nova","version":"4.0.0"},{"name":"acme/tool","version":"dev-main"}],'
+            .'"packages-dev":[{"name":"laravel/telescope","version":"v5.0.0"}]}'
+        );
+
+        foreach (['laravel/nova', 'acme/tool', 'laravel/telescope', 'laravel/horizon', 'laravel/nov', 'LARAVEL/NOVA'] as $package) {
+            $this->assertSame(
+                PackageDetector::hasPackage($package, $this->testDir),
+                PackageDetector::installedVersion($package, $this->testDir) !== null,
+                $package
+            );
+        }
+    }
+
+    public function test_installed_version_answers_from_the_cache_until_it_is_cleared(): void
+    {
+        $this->createComposerLock(['laravel/nova']);
+
+        $this->assertSame('1.0.0', PackageDetector::installedVersion('laravel/nova', $this->testDir));
+
+        unlink($this->testDir.DIRECTORY_SEPARATOR.'composer.lock');
+
+        $this->assertSame('1.0.0', PackageDetector::installedVersion('laravel/nova', $this->testDir));
+        $this->assertNull(PackageDetector::installedVersion('laravel/telescope', $this->testDir));
+
+        PackageDetector::clearCache();
+
+        $this->assertNull(PackageDetector::installedVersion('laravel/nova', $this->testDir));
+    }
+
+    public function test_installed_version_shares_the_lock_has_package_decoded(): void
+    {
+        $this->createComposerLock(['laravel/nova']);
+
+        $this->assertTrue(PackageDetector::hasNova($this->testDir));
+
+        unlink($this->testDir.DIRECTORY_SEPARATOR.'composer.lock');
+
+        $this->assertSame('1.0.0', PackageDetector::installedVersion('laravel/nova', $this->testDir));
+    }
 }
