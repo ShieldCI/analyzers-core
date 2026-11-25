@@ -462,6 +462,551 @@ class FileParserTest extends TestCase
         }
     }
 
+    // --- A label is a statement boundary (`foo: use A\B;`) ---
+
+    public function testExtractUseStatementsReadsImportAfterLabel(): void
+    {
+        $this->assertSame(['A\\B'], FileParser::extractUseStatements($this->writeFixture("<?php\nfoo:\nuse A\\B;\n")));
+    }
+
+    public function testExtractUseStatementsReadsImportAfterChainedLabels(): void
+    {
+        $this->assertSame(['A\\B'], FileParser::extractUseStatements($this->writeFixture("<?php\na: /* x */ b:\nuse A\\B;\n")));
+    }
+
+    /**
+     * Only a colon ending a label is a boundary: one after a named argument, a ternary's
+     * middle operand or a `case` value is not, since that word does not itself start a
+     * statement; nor is a return type's or an alternative-syntax colon, which follows `)`.
+     * These inputs are invalid PHP; they pin the rule, not real code.
+     */
+    public function testExtractUseStatementsIgnoresColonThatDoesNotEndLabel(): void
+    {
+        foreach ([
+            "<?php\nfoo(bar: use A\\B);\n",
+            "<?php\n\$x = \$a ? B : use A\\B;\n",
+            "<?php\nswitch (\$x) { case B: use A\\B; }\n",
+            "<?php\nfunction f(): use A\\B;\n",
+            "<?php\nif (\$x): use A\\B; endif;\n",
+        ] as $code) {
+            $this->assertSame([], FileParser::extractUseStatementsFromSource($code), $code);
+        }
+    }
+
+    // --- A trait conflict block is skipped whole ---
+
+    public function testExtractUseStatementsSkipsTraitConflictBlockWithMethodNamedUse(): void
+    {
+        $this->assertSame(['T'], FileParser::extractUseStatements($this->writeFixture("<?php\nclass X { use T { use as protected foo; } }\n")));
+    }
+
+    public function testExtractUseStatementsResumesAfterTraitConflictBlock(): void
+    {
+        $this->assertSame(
+            ['T', 'U'],
+            FileParser::extractUseStatementsFromSource("<?php\nclass X { use T { T::use as protected foo; use as bar; } use U; }\n")
+        );
+    }
+
+    /**
+     * Regression (review of #152): an import missing its `;` runs into the class header. At
+     * namespace level that `{` is no conflict block, so the class body is still read.
+     */
+    public function testExtractUseStatementsReadsClassBodyAfterImportMissingSemicolon(): void
+    {
+        $code = "<?php\nnamespace App;\nuse Foo\\Bar\nclass X { use HasFactory; }\n";
+
+        $this->assertSame(["Foo\\Bar\nclass X", 'HasFactory'], FileParser::extractUseStatements($this->writeFixture($code)));
+        $this->assertSame(["Foo\\Bar\nclass X", 'HasFactory'], FileParser::extractUseStatementsFromSource($code));
+        // The swallowed header is no import, and the trait use is not one either.
+        $this->assertSame([], FileParser::extractImportsFromSource($code));
+    }
+
+    public function testExtractUseStatementsSkipsConflictBlockInBracedNamespace(): void
+    {
+        $this->assertSame(
+            ['A\\B', 'T', 'C\\D'],
+            FileParser::extractUseStatementsFromSource("<?php\nnamespace N {\n    use A\\B;\n    class X { use T { use as protected foo; } }\n    use C\\D;\n}\n")
+        );
+    }
+
+    /**
+     * Regressions (review of #152): a `{` that is no conflict block, or a conflict block that
+     * never closes, must not hide the statements after it. Each expected value is master's.
+     */
+    public function testExtractUseStatementsReadsPastUnclosedConflictBlock(): void
+    {
+        $code = "<?php\nclass V {\n    use CodeGenerator;\n    use TestGenerator {\n        handle as protected handleFromTrait;\n\n    use UsesGeneratorOverrides;\n\n    protected function configure(): void\n    {\n        parent::configure();\n    }\n}\n";
+
+        $this->assertSame(['CodeGenerator', 'TestGenerator', 'UsesGeneratorOverrides'], FileParser::extractUseStatementsFromSource($code));
+    }
+
+    public function testExtractUseStatementsReadsPastTraitUseMissingSemicolon(): void
+    {
+        $code = "<?php\nclass X {\n use A\n public function f() { return new class { use B; }; }\n}\n";
+
+        $this->assertSame(["A\n public function f()", 'B'], FileParser::extractUseStatementsFromSource($code));
+    }
+
+    public function testExtractUseStatementsReadsPastConflictBlockRunningIntoMethods(): void
+    {
+        $code = "<?php\nclass X {\n use A { a as b;\n public function f() { return new class { use B; }; }\n}\n";
+
+        $this->assertSame(['A', 'B'], FileParser::extractUseStatementsFromSource($code));
+    }
+
+    public function testExtractUseStatementsStopsAtUnclosedTraitConflictBlock(): void
+    {
+        $this->assertSame(['T'], FileParser::extractUseStatementsFromSource("<?php\nclass X { use T { use as foo;\n"));
+    }
+
+    // --- Source-string variants ---
+
+    public function testFromSourceVariantsReadTaggedSource(): void
+    {
+        $code = "<?php\nnamespace App\\Models;\n\nuse Foo\\Bar;\n\nfinal class User { use HasFactory; }\n";
+
+        $this->assertSame('App\\Models', FileParser::extractNamespaceFromSource($code));
+        $this->assertSame('User', FileParser::extractClassNameFromSource($code));
+        $this->assertSame('App\\Models\\User', FileParser::extractFullyQualifiedClassNameFromSource($code));
+        $this->assertSame(['Foo\\Bar', 'HasFactory'], FileParser::extractUseStatementsFromSource($code));
+        $this->assertSame(['Bar' => 'Foo\\Bar'], FileParser::extractImportsFromSource($code));
+        $this->assertSame([['name' => 'App\\Models\\User', 'kind' => 'class']], FileParser::extractClassLikesFromSource($code));
+    }
+
+    public function testFromSourceVariantsReadTaglessFragment(): void
+    {
+        $code = "namespace App;\nuse Foo\\Bar;\nclass X { use T; }\n";
+
+        $this->assertSame('App', FileParser::extractNamespaceFromSource($code));
+        $this->assertSame('X', FileParser::extractClassNameFromSource($code));
+        $this->assertSame('App\\X', FileParser::extractFullyQualifiedClassNameFromSource($code));
+        $this->assertSame(['Foo\\Bar', 'T'], FileParser::extractUseStatementsFromSource($code));
+        $this->assertSame(['Bar' => 'Foo\\Bar'], FileParser::extractImportsFromSource($code));
+        $this->assertSame([['name' => 'App\\X', 'kind' => 'class']], FileParser::extractClassLikesFromSource($code));
+    }
+
+    /**
+     * stripAllComments() decides by `<?php` appearing anywhere, so this fragment would be read
+     * as inline HTML. The extractors look for a real open-tag token instead.
+     */
+    public function testFromSourceReadsTaglessFragmentMentioningOpenTagInString(): void
+    {
+        $code = "\$tag = '<?php';\nclass X {}\n";
+
+        $this->assertSame('X', FileParser::extractClassNameFromSource($code));
+        $this->assertSame([['name' => 'X', 'kind' => 'class']], FileParser::extractClassLikesFromSource($code));
+    }
+
+    public function testFromSourceReadsTemplateWithOpenTagAsIs(): void
+    {
+        $code = "<p>class Html</p>\n<?php class X {} ?>\n<p>use Nope;</p>\n";
+
+        $this->assertSame('X', FileParser::extractClassNameFromSource($code));
+        $this->assertSame([], FileParser::extractUseStatementsFromSource($code));
+    }
+
+    public function testFromSourceVariantsReturnNothingWithoutKeyword(): void
+    {
+        $this->assertNull(FileParser::extractNamespaceFromSource('$a = 1;'));
+        $this->assertNull(FileParser::extractClassNameFromSource('$a = 1;'));
+        $this->assertNull(FileParser::extractFullyQualifiedClassNameFromSource('$a = 1;'));
+        $this->assertSame([], FileParser::extractUseStatementsFromSource('$a = 1;'));
+        $this->assertSame([], FileParser::extractImportsFromSource('$a = 1;'));
+        $this->assertSame([], FileParser::extractClassLikesFromSource('$a = 1;'));
+        $this->assertSame([], FileParser::extractClassLikesFromSource(''));
+    }
+
+    /**
+     * The file-path extractors tokenize the file as it is: a file with no open tag is all
+     * inline HTML and declares nothing, exactly as before the source variants existed.
+     */
+    public function testFilePathVariantsDoNotTreatTaglessFileAsFragment(): void
+    {
+        $file = $this->writeFixture("namespace App;\nuse Foo\\Bar;\nclass X {}\n");
+
+        $this->assertNull(FileParser::extractNamespace($file));
+        $this->assertNull(FileParser::extractClassName($file));
+        $this->assertNull(FileParser::extractFullyQualifiedClassName($file));
+        $this->assertSame([], FileParser::extractUseStatements($file));
+        $this->assertSame([], FileParser::extractImports($file));
+        $this->assertSame([], FileParser::extractClassLikes($file));
+    }
+
+    public function testNewFilePathVariantsReturnEmptyForNonExistentFile(): void
+    {
+        $this->assertSame([], FileParser::extractImports('/non/existent/file.php'));
+        $this->assertSame([], FileParser::extractClassLikes('/non/existent/file.php'));
+    }
+
+    // --- extractImports(): namespace-level class imports only ---
+
+    public function testExtractImportsExcludesTraitUse(): void
+    {
+        $file = $this->writeFixture("<?php\nnamespace App;\nuse Foo\\Bar;\nclass X { use HasFactory; }\n");
+
+        $this->assertSame(['Bar' => 'Foo\\Bar'], FileParser::extractImports($file));
+        // extractUseStatements() still reports the trait use alongside the import.
+        $this->assertSame(['Foo\\Bar', 'HasFactory'], FileParser::extractUseStatements($file));
+    }
+
+    public function testExtractImportsExpandsAliasesListsAndGroups(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            namespace App;
+            use \Foo\Bar, Baz\Qux as Q;
+            USE App\{Models\User, Http\Kernel AS K,};
+            use Lone;
+            class X {}
+            PHP;
+
+        $this->assertSame(
+            ['Bar' => 'Foo\\Bar', 'Q' => 'Baz\\Qux', 'User' => 'App\\Models\\User', 'K' => 'App\\Http\\Kernel', 'Lone' => 'Lone'],
+            FileParser::extractImportsFromSource($code)
+        );
+    }
+
+    public function testExtractImportsSkipsFunctionAndConstImports(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            use function Foo\bar;
+            use const Foo\BAZ;
+            use Function Foo\{a, b};
+            use App\{Models\User, function helper, const VERSION, Http\Kernel};
+            PHP;
+
+        $this->assertSame(
+            ['User' => 'App\\Models\\User', 'Kernel' => 'App\\Http\\Kernel'],
+            FileParser::extractImportsFromSource($code)
+        );
+    }
+
+    public function testExtractImportsIgnoresCommentsInsideStatement(): void
+    {
+        $code = "<?php\nuse Foo\\Bar /* legacy; keep */ as /** doc */ B;\nuse App\\{\n    User, // primary\n    # old\n    Post,\n};\n";
+
+        $this->assertSame(['B' => 'Foo\\Bar', 'User' => 'App\\User', 'Post' => 'App\\Post'], FileParser::extractImportsFromSource($code));
+    }
+
+    public function testExtractImportsKeepsFirstOfCaseInsensitiveDuplicateAlias(): void
+    {
+        $code = "<?php\nuse A\\User;\nuse B\\user;\nuse C\\Thing as USER;\nuse D\\Other;\n";
+
+        $this->assertSame(['User' => 'A\\User', 'Other' => 'D\\Other'], FileParser::extractImportsFromSource($code));
+    }
+
+    public function testExtractImportsReadsBracedNamespacesAndExcludesTraitUses(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            namespace App\Http {
+                use Foo\Bar;
+                class Kernel { use Macroable; }
+                trait T { use Other; }
+                enum E { use Third; }
+                interface I {}
+            }
+            namespace {
+                use Global\Thing;
+                class G { use Fourth; }
+            }
+            PHP;
+
+        $this->assertSame(['Bar' => 'Foo\\Bar', 'Thing' => 'Global\\Thing'], FileParser::extractImportsFromSource($code));
+    }
+
+    public function testExtractImportsReadsPastNamespaceStatementThatDeclaresNothing(): void
+    {
+        $this->assertSame(['B' => 'A\\B'], FileParser::extractImportsFromSource("<?php\nnamespace 1;\nuse A\\B;\n"));
+    }
+
+    /**
+     * Regression (review of #152): a namespace declaration is top level, so a brace left open
+     * in an earlier namespace does not hide the imports of a later one.
+     */
+    public function testExtractImportsResetsDepthAtNamespaceDeclaration(): void
+    {
+        $this->assertSame(
+            ['Z' => 'Y\\Z'],
+            FileParser::extractImportsFromSource("<?php\nnamespace A;\nclass X { function f() {\n}\nnamespace B;\nuse Y\\Z;\n")
+        );
+        $this->assertSame(
+            ['Z' => 'Y\\Z'],
+            FileParser::extractImportsFromSource("<?php\nnamespace A {\nclass X { function f() {\n}\nnamespace B {\nuse Y\\Z;\nclass W { use T; }\n}\n")
+        );
+    }
+
+    /**
+     * Regression (review of #152): `as` and `insteadof` are reserved and never a name, so
+     * these are neither imports nor statements (extractUseStatements() agrees).
+     */
+    public function testExtractImportsRejectsReservedWordAsName(): void
+    {
+        foreach ([
+            "<?php\nuse as;\n",
+            "<?php\nuse insteadof;\n",
+            "<?php\nuse A\\{AS, B};\n",
+            "<?php\nuse Foo as InsteadOf;\n",
+        ] as $code) {
+            $this->assertSame([], FileParser::extractImportsFromSource($code), $code);
+        }
+
+        // A reserved word is fine as a segment of a qualified name.
+        $this->assertSame(['Foo' => 'As\\Foo'], FileParser::extractImportsFromSource("<?php\nuse As\\Foo;\n"));
+    }
+
+    /**
+     * Regression (review of #152): an import missing its `;` ends at a namespace declaration,
+     * so a braced namespace it runs into still opens the namespace level.
+     */
+    public function testExtractImportsReadsBracedNamespaceAfterImportMissingSemicolon(): void
+    {
+        $code = "<?php\nuse A\\B\nnamespace C {\nuse X\\Y;\n}\n";
+
+        $this->assertSame(['Y' => 'X\\Y'], FileParser::extractImportsFromSource($code));
+        // extractUseStatements() reads it as before: the statement runs to the next `;`.
+        $this->assertSame(["A\\B\nnamespace C", 'X\\Y'], FileParser::extractUseStatementsFromSource($code));
+    }
+
+    public function testExtractImportsMergesNamespacesFirstWins(): void
+    {
+        $code = "<?php\nnamespace A;\nuse X\\User;\nnamespace B;\nuse Y\\User;\nuse Y\\Post;\n";
+
+        $this->assertSame(['User' => 'X\\User', 'Post' => 'Y\\Post'], FileParser::extractImportsFromSource($code));
+    }
+
+    public function testExtractImportsExcludesClosureUseAndUseInsideFunctions(): void
+    {
+        $code = "<?php\nuse Foo\\Bar;\n\$f = function () use (\$x) { return \$x; };\nfunction g() { use Nope; }\n";
+
+        $this->assertSame(['Bar' => 'Foo\\Bar'], FileParser::extractImportsFromSource($code));
+    }
+
+    public function testExtractImportsTracksBracesInsideInterpolatedStringsAndHeredocs(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            namespace A {
+                $s = "{$a} ${b} {$c['}']}";
+                $h = <<<EOT
+                {$d}
+                use Not\Import;
+                EOT;
+                class X { use T; }
+                use B\C;
+            }
+            PHP;
+
+        $this->assertSame(['C' => 'B\\C'], FileParser::extractImportsFromSource($code));
+    }
+
+    public function testExtractImportsIgnoresCommentsAndStrings(): void
+    {
+        $code = "<?php\n// use Fake\\One;\n/* use Fake\\Two; */\n\$s = 'use Fake\\Three;';\nuse Real\\Four;\n";
+
+        $this->assertSame(['Four' => 'Real\\Four'], FileParser::extractImportsFromSource($code));
+    }
+
+    public function testExtractImportsReadsImportAfterLabelAndCloseTag(): void
+    {
+        $this->assertSame(
+            ['B' => 'A\\B', 'D' => 'C\\D'],
+            FileParser::extractImportsFromSource("<?php\nfoo:\nuse A\\B ?>\n<p></p>\n<?php use C\\D;\n")
+        );
+    }
+
+    public function testExtractImportsSkipsMalformedStatements(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            use ;
+            use A B;
+            use 1;
+            use A\{B;
+            use C\{D}};
+            use E\{F, G as};
+            use H as I as J;
+            use K\{L} M;
+            use N\{O, P\{Q}};
+            use Ok\One;
+            class X {}
+            use R\S }
+            use Ok\Two;
+            use T\U { }
+            use Ok\Three;
+            use Trailing
+            PHP;
+
+        $this->assertSame(
+            ['One' => 'Ok\\One', 'Two' => 'Ok\\Two', 'Three' => 'Ok\\Three'],
+            FileParser::extractImportsFromSource($code)
+        );
+    }
+
+    /**
+     * Each `use` is read once: a rescan from every `use` to the next terminator would make this
+     * input quadratic.
+     */
+    public function testExtractImportsStaysLinearOnMalformedInput(): void
+    {
+        $code = "<?php\n" . str_repeat("use A\\{B, \n", 3000) . "};\n" . str_repeat("use C\\D }\n", 3000);
+
+        $this->assertSame([], FileParser::extractImportsFromSource($code));
+    }
+
+    // --- extractClassLikes(): every named class-like declaration ---
+
+    public function testExtractClassLikesReturnsEveryDeclarationWithKind(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            namespace App;
+            interface I {}
+            #[Attr]
+            final class A implements I {}
+            abstract class B {}
+            readonly class C {}
+            final readonly class D {}
+            trait T {}
+            enum E: string { case X = 'x'; }
+            enum F {}
+            PHP;
+
+        $this->assertSame([
+            ['name' => 'App\\I', 'kind' => 'interface'],
+            ['name' => 'App\\A', 'kind' => 'class'],
+            ['name' => 'App\\B', 'kind' => 'class'],
+            ['name' => 'App\\C', 'kind' => 'class'],
+            ['name' => 'App\\D', 'kind' => 'class'],
+            ['name' => 'App\\T', 'kind' => 'trait'],
+            ['name' => 'App\\E', 'kind' => 'enum'],
+            ['name' => 'App\\F', 'kind' => 'enum'],
+        ], FileParser::extractClassLikesFromSource($code));
+    }
+
+    public function testExtractClassLikesQualifiesEachWithEnclosingNamespace(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            namespace {
+                class G {}
+            }
+            namespace App\Http {
+                class Kernel {}
+            }
+            namespace Other {
+                interface Contract {}
+            }
+            PHP;
+
+        $file = $this->writeFixture($code);
+
+        $this->assertSame([
+            ['name' => 'G', 'kind' => 'class'],
+            ['name' => 'App\\Http\\Kernel', 'kind' => 'class'],
+            ['name' => 'Other\\Contract', 'kind' => 'interface'],
+        ], FileParser::extractClassLikes($file));
+        // extractClassName() still returns only the first class.
+        $this->assertSame('G', FileParser::extractClassName($file));
+    }
+
+    public function testExtractClassLikesReadsUnbracedNamespacesAndGlobalCode(): void
+    {
+        $this->assertSame(
+            [['name' => 'Top', 'kind' => 'class'], ['name' => 'A\\X', 'kind' => 'class'], ['name' => 'B\\Y', 'kind' => 'trait']],
+            FileParser::extractClassLikesFromSource("<?php\nclass Top {}\nnamespace A;\nclass X {}\nnamespace B;\ntrait Y {}\n")
+        );
+    }
+
+    public function testExtractClassNameStillReturnsFirstClassNotFirstClassLike(): void
+    {
+        $file = $this->writeFixture("<?php\nnamespace App;\ninterface I {}\nenum E {}\nclass C {}\nclass D {}\n");
+
+        $this->assertSame('C', FileParser::extractClassName($file));
+        $this->assertSame('App\\C', FileParser::extractFullyQualifiedClassName($file));
+        $this->assertCount(4, FileParser::extractClassLikes($file));
+    }
+
+    public function testExtractClassLikesSkipsNonDeclarations(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            // class InComment {}
+            /** interface InDoc */
+            $a = 'trait InString';
+            $b = Foo::class;
+            $c = new class {};
+            $d = new class(1) extends Base {};
+            $e = new readonly class {};
+            $f = $x->enum;
+            $g = $x?->class;
+            $h = Enum::X;
+            $i = Foo::enum;
+            function enum() {}
+            $j = fn(): enum => 1;
+            foo(enum: 1, class: 2);
+            use enum as Alias;
+            Foo::enum Bar;
+            $k = <<<EOT
+            class InHeredoc {}
+            EOT;
+            class Enum extends X {}
+            PHP;
+
+        $this->assertSame([['name' => 'Enum', 'kind' => 'class']], FileParser::extractClassLikesFromSource($code));
+    }
+
+    public function testExtractClassLikesIncludesConditionalDeclarations(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            namespace App;
+            if (! class_exists(A::class)) {
+                class A {}
+            }
+            if (PHP_VERSION_ID > 80100):
+                enum B {}
+            else:
+                class B {}
+            endif;
+            function make() {
+                interface C {}
+            }
+            switch ($x) {
+                case 1: trait D {}
+                default: class E {}
+            }
+            label: class F {}
+            PHP;
+
+        $this->assertSame([
+            ['name' => 'App\\A', 'kind' => 'class'],
+            ['name' => 'App\\B', 'kind' => 'enum'],
+            ['name' => 'App\\B', 'kind' => 'class'],
+            ['name' => 'App\\C', 'kind' => 'interface'],
+            ['name' => 'App\\D', 'kind' => 'trait'],
+            ['name' => 'App\\E', 'kind' => 'class'],
+            ['name' => 'App\\F', 'kind' => 'class'],
+        ], FileParser::extractClassLikesFromSource($code));
+    }
+
+    public function testExtractClassLikesSkipsNamespaceUsedAsName(): void
+    {
+        $code = "<?php\nnamespace App;\ninterface HasNs { const NAMESPACE = 'x'; }\nfoo(namespace: 1);\nclass Foo {}\n";
+
+        $this->assertSame(
+            [['name' => 'App\\HasNs', 'kind' => 'interface'], ['name' => 'App\\Foo', 'kind' => 'class']],
+            FileParser::extractClassLikesFromSource($code)
+        );
+    }
+
+    public function testExtractClassLikesIgnoresKeywordAtEndOfInput(): void
+    {
+        $this->assertSame([], FileParser::extractClassLikesFromSource("<?php\nclass"));
+    }
+
     private function writeFixture(string $code): string
     {
         $file = $this->testDir . '/fixture.php';
