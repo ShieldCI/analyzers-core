@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Support;
 
-use PhpParser\{Error, ErrorHandler, Node, NodeFinder, NodeTraverser, Parser, ParserFactory, PhpVersion};
+use PhpParser\{Error, ErrorHandler, NameContext, Node, NodeFinder, NodeTraverser, Parser, ParserFactory, PhpVersion};
 use PhpParser\Node\{Expr, Stmt};
 use PhpParser\NodeVisitor\NameResolver;
 use ShieldCI\AnalyzersCore\Contracts\RecordingParserInterface;
@@ -535,6 +535,146 @@ class AstParser implements RecordingParserInterface
         $traverser->addVisitor(new NameResolver(new ErrorHandler\Collecting(), $options));
 
         return $traverser->traverse($ast);
+    }
+
+    /**
+     * The fully qualified class name (no leading `\`) that $name means at $at, or at $name
+     * itself when $at is null, following PHP's rules for the file $ast.
+     *
+     * PHP applies an import from the point the file declares it, not across the enclosing
+     * block, so given `namespace A; class C { D::class } use B\D; class E { D::class }` the
+     * first reference is `A\D` and the second `B\D`. Each namespace statement starts afresh
+     * with no imports. Aliases are compared case-insensitively, `use function` and `use const`
+     * never affect a class name, and of two imports claiming one alias the first is kept, as
+     * resolveNames() keeps it. A fully qualified name is returned as written and
+     * `namespace\Foo` is resolved against the current namespace.
+     *
+     * A name that is itself part of a declaration is already fully qualified, so it is
+     * returned as written rather than resolved against the namespace or the imports: a
+     * namespace statement's name, the name a `use` imports, and a group use's prefix. A
+     * group use item comes back joined to its prefix.
+     *
+     * $name is always read as a class reference. A function or constant name, such as a
+     * FuncCall's, follows other rules (an unqualified one falls back to the global namespace
+     * at run time), so passing one gives an answer PHP would not.
+     *
+     * Null for `self`, `static` and `parent` in any case, which need the enclosing class to
+     * mean anything, and when $at (or $name) is not a node of $ast. In that case there is no
+     * position to resolve at, and the imports in effect at the end of the file would be a
+     * guess.
+     *
+     * Nothing is written to $ast: parseFile() hands back a shared, cached tree. Imports are
+     * only legal at the top level and directly inside a namespace, so only those two levels
+     * are walked for them, but finding the statement that holds the target searches its
+     * subtree, so each call is O(file). A caller resolving many names in one file is better
+     * served by resolveNames() on a tree of its own.
+     *
+     * @param  array<Node>  $ast
+     */
+    public function resolveClassName(array $ast, Node\Name $name, ?Node $at = null): ?string
+    {
+        if ($name->isSpecialClassName()) {
+            return null;
+        }
+
+        // The collecting handler keeps the first of two colliding aliases instead of throwing.
+        $context = new NameContext(new ErrorHandler\Collecting());
+        $context->startNamespace();
+
+        if (! $this->trackImportsUntil($ast, $at ?? $name, $context)) {
+            return null;
+        }
+
+        return $this->declaredName($ast, $name)
+            ?? $context->getResolvedClassName($name)->toString();
+    }
+
+    /**
+     * Feed $context the namespace and imports in effect at $target, in file order, stopping
+     * at the statement that is $target or contains it.
+     *
+     * The statement holding the target is not itself recorded, so a target inside a `use`
+     * does not see that `use`'s own import.
+     *
+     * @param  array<Node>  $stmts
+     * @return bool Whether $target was reached
+     */
+    private function trackImportsUntil(array $stmts, Node $target, NameContext $context): bool
+    {
+        foreach ($stmts as $stmt) {
+            if ($stmt instanceof Stmt\Namespace_) {
+                $context->startNamespace($stmt->name);
+
+                if ($stmt === $target || $stmt->name === $target
+                    || $this->trackImportsUntil($stmt->stmts, $target, $context)) {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if ($this->nodeFinder->findFirst($stmt, static fn (Node $node): bool => $node === $target) !== null) {
+                return true;
+            }
+
+            if ($stmt instanceof Stmt\Use_) {
+                foreach ($stmt->uses as $use) {
+                    $context->addAlias($use->name, $use->getAlias()->toString(), $stmt->type | $use->type, $use->getAttributes());
+                }
+            } elseif ($stmt instanceof Stmt\GroupUse) {
+                foreach ($stmt->uses as $use) {
+                    $context->addAlias(
+                        new Node\Name($stmt->prefix->toString().'\\'.$use->name->toString()),
+                        $use->getAlias()->toString(),
+                        $stmt->type | $use->type,
+                        $use->getAttributes(),
+                    );
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The name as declared, when $name is a namespace statement's name, the name a `use`
+     * imports, or a group use's prefix or item (joined to the prefix).
+     *
+     * @param  array<Node>  $stmts
+     */
+    private function declaredName(array $stmts, Node\Name $name): ?string
+    {
+        foreach ($stmts as $stmt) {
+            if ($stmt instanceof Stmt\Namespace_) {
+                if ($stmt->name === $name) {
+                    return $name->toString();
+                }
+
+                $declared = $this->declaredName($stmt->stmts, $name);
+
+                if ($declared !== null) {
+                    return $declared;
+                }
+            } elseif ($stmt instanceof Stmt\Use_) {
+                foreach ($stmt->uses as $use) {
+                    if ($use->name === $name) {
+                        return $name->toString();
+                    }
+                }
+            } elseif ($stmt instanceof Stmt\GroupUse) {
+                if ($stmt->prefix === $name) {
+                    return $name->toString();
+                }
+
+                foreach ($stmt->uses as $use) {
+                    if ($use->name === $name) {
+                        return $stmt->prefix->toString().'\\'.$name->toString();
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 
     /**

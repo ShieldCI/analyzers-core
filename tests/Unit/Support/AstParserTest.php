@@ -2304,4 +2304,376 @@ PHP;
         $parser->parseCode(self::MISSING_SEMICOLON, '/app/Later.php');
         $this->assertNull($this->retainedFailure($parser));
     }
+
+    // --- resolveClassName ---
+
+    /**
+     * The class names written as `X::class`, `new X` and `X::call()`, in file order.
+     *
+     * @param  array<\PhpParser\Node>  $ast
+     * @return list<\PhpParser\Node\Name>
+     */
+    private function classReferences(array $ast): array
+    {
+        $names = (new \PhpParser\NodeFinder())->find($ast, static fn (\PhpParser\Node $node): bool => (
+            $node instanceof Expr\ClassConstFetch
+            || $node instanceof Expr\New_
+            || $node instanceof Expr\StaticCall
+        ) && $node->class instanceof \PhpParser\Node\Name);
+
+        return array_values(array_map(static function (\PhpParser\Node $node): \PhpParser\Node\Name {
+            \assert(($node instanceof Expr\ClassConstFetch || $node instanceof Expr\New_ || $node instanceof Expr\StaticCall)
+                && $node->class instanceof \PhpParser\Node\Name);
+
+            return $node->class;
+        }, $names));
+    }
+
+    /**
+     * @return list<string|null>
+     */
+    private function resolveEveryReference(string $code): array
+    {
+        $ast = $this->parser->parseCode($code);
+
+        return array_map(
+            fn (\PhpParser\Node\Name $name): ?string => $this->parser->resolveClassName($ast, $name),
+            $this->classReferences($ast),
+        );
+    }
+
+    public function testResolveClassNameAppliesOnlyImportsDeclaredBeforeTheTarget(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace A;
+
+class C { public $x = D::class; }
+
+use B\D;
+
+class E { public $y = D::class; }
+PHP;
+
+        $this->assertSame(['A\D', 'B\D'], $this->resolveEveryReference($code));
+    }
+
+    public function testResolveClassNameAtAnotherPositionUsesTheImportsInEffectThere(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace A;
+
+class C {}
+
+use B\D;
+
+class E {}
+PHP;
+        $ast = $this->parser->parseCode($code);
+        [$first, $second] = $this->parser->findClasses($ast);
+        $name = new \PhpParser\Node\Name('D');
+
+        $this->assertSame('A\D', $this->parser->resolveClassName($ast, $name, $first));
+        $this->assertSame('B\D', $this->parser->resolveClassName($ast, $name, $second));
+    }
+
+    public function testResolveClassNameAtAUseStatementDoesNotApplyThatStatementsOwnImport(): void
+    {
+        $ast = $this->parser->parseCode("<?php\nnamespace A;\nuse B\\D;\nclass E {}\n");
+        $namespace = $ast[0];
+        $this->assertInstanceOf(Stmt\Namespace_::class, $namespace);
+        $name = new \PhpParser\Node\Name('D');
+
+        $this->assertSame('A\D', $this->parser->resolveClassName($ast, $name, $namespace->stmts[0]));
+        $this->assertSame('B\D', $this->parser->resolveClassName($ast, $name, $namespace->stmts[1]));
+    }
+
+    public function testResolveClassNameComparesAliasesCaseInsensitively(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace App;
+
+use Foo\Bar;
+use Acme\Clock as Timer;
+
+new bar();
+BAR\Baz::class;
+TIMER::now();
+PHP;
+
+        $this->assertSame(['Foo\Bar', 'Foo\Bar\Baz', 'Acme\Clock'], $this->resolveEveryReference($code));
+    }
+
+    public function testResolveClassNameKeepsTheFirstOfTwoCollidingImports(): void
+    {
+        $this->assertSame(
+            ['Illuminate\Support\Facades\Route', 'App\Support\Clock'],
+            $this->resolveEveryReference(self::COLLIDING_IMPORTS),
+        );
+    }
+
+    public function testResolveClassNameFollowsGroupUse(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace App\Http;
+
+use App\Models\{User, Post as Article, Billing\Invoice};
+
+new User();
+Article::class;
+Invoice::find(1);
+PHP;
+
+        $this->assertSame(
+            ['App\Models\User', 'App\Models\Post', 'App\Models\Billing\Invoice'],
+            $this->resolveEveryReference($code),
+        );
+    }
+
+    public function testResolveClassNameIgnoresFunctionAndConstantImports(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace App;
+
+use function Foo\helper;
+use const Foo\LIMIT;
+use Foo\{function format, const WIDTH, Bar};
+
+new helper();
+LIMIT::class;
+format::make();
+WIDTH::class;
+Bar::class;
+PHP;
+
+        $this->assertSame(
+            ['App\helper', 'App\LIMIT', 'App\format', 'App\WIDTH', 'Foo\Bar'],
+            $this->resolveEveryReference($code),
+        );
+    }
+
+    public function testResolveClassNameStartsAFreshContextForEachUnbracketedNamespace(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace A;
+
+use X\Foo;
+
+Foo::class;
+
+namespace B;
+
+Foo::class;
+PHP;
+
+        $this->assertSame(['X\Foo', 'B\Foo'], $this->resolveEveryReference($code));
+    }
+
+    public function testResolveClassNameStartsAFreshContextForEachBracketedNamespace(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace A {
+    use X\Foo;
+
+    Foo::class;
+}
+
+namespace {
+    Foo::class;
+    \A\Foo::class;
+}
+PHP;
+
+        $this->assertSame(['X\Foo', 'Foo', 'A\Foo'], $this->resolveEveryReference($code));
+    }
+
+    public function testResolveClassNameInAFileWithNoNamespace(): void
+    {
+        $code = <<<'PHP'
+<?php
+use X\Foo;
+
+Foo::class;
+Bar::class;
+Foo\Baz::class;
+PHP;
+
+        $this->assertSame(['X\Foo', 'Bar', 'X\Foo\Baz'], $this->resolveEveryReference($code));
+    }
+
+    public function testResolveClassNameReturnsAFullyQualifiedNameAsWritten(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace A;
+
+use X\Foo;
+
+\Foo::class;
+\Foo\Bar::class;
+PHP;
+
+        $this->assertSame(['Foo', 'Foo\Bar'], $this->resolveEveryReference($code));
+    }
+
+    public function testResolveClassNameResolvesANamespaceRelativeName(): void
+    {
+        $this->assertSame(
+            ['A\Foo', 'A\Foo\Bar'],
+            $this->resolveEveryReference("<?php\nnamespace A;\nuse X\\Foo;\nnamespace\\Foo::class;\nnamespace\\Foo\\Bar::class;\n"),
+        );
+        $this->assertSame(['Foo'], $this->resolveEveryReference("<?php\nuse X\\Foo;\nnamespace\\Foo::class;\n"));
+    }
+
+    public function testResolveClassNameReturnsNullForSpecialClassNames(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace A;
+
+class C extends P
+{
+    public function f(): void
+    {
+        self::a();
+        Static::b();
+        PARENT::c();
+        new static();
+        Self\Thing::class;
+    }
+}
+PHP;
+
+        $this->assertSame([null, null, null, null, 'A\Self\Thing'], $this->resolveEveryReference($code));
+    }
+
+    public function testResolveClassNameReturnsNullWhenTheTargetIsNotInTheAst(): void
+    {
+        $code = "<?php\nnamespace A;\nuse X\\Foo;\nFoo::class;\n";
+        $ast = $this->parser->parseCode($code);
+        $elsewhere = $this->classReferences($this->parser->parseCode($code))[0];
+
+        $this->assertNull($this->parser->resolveClassName($ast, $elsewhere));
+        $this->assertNull($this->parser->resolveClassName($ast, new \PhpParser\Node\Name\FullyQualified('Foo')));
+        $this->assertNull($this->parser->resolveClassName(
+            $ast,
+            $this->classReferences($ast)[0],
+            new \PhpParser\Node\Name('Foo'),
+        ));
+        $this->assertNull($this->parser->resolveClassName([], new \PhpParser\Node\Name('Foo')));
+    }
+
+    public function testResolveClassNameFindsTargetsNestedInsideDeclarations(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace App;
+
+use Foo\Bar;
+
+function make() {
+    return fn () => Bar::class;
+}
+
+if (true) {
+    class Conditional { public function f() { return new Bar(); } }
+}
+
+$anonymous = new class {
+    public function f() { return Bar::make(); }
+};
+
+class Outer {
+    public function f() {
+        return function () { return new class { public $c = Bar::class; }; };
+    }
+}
+PHP;
+
+        $this->assertSame(
+            ['Foo\Bar', 'Foo\Bar', 'Foo\Bar', 'Foo\Bar'],
+            $this->resolveEveryReference($code),
+        );
+    }
+
+    public function testResolveClassNameResolvesNamesInDeclarationsAsWritten(): void
+    {
+        $code = <<<'PHP'
+<?php
+namespace App\Http;
+
+use Foo\Bar;
+use Bar\Baz;
+use App\{Support\Clock, Models\Post as P};
+use function Bar\helper;
+PHP;
+        $ast = $this->parser->parseCode($code);
+        $namespace = $ast[0];
+        $this->assertInstanceOf(Stmt\Namespace_::class, $namespace);
+        $this->assertNotNull($namespace->name);
+        [$bar, $baz, $group, $function] = $namespace->stmts;
+        $this->assertInstanceOf(Stmt\Use_::class, $bar);
+        $this->assertInstanceOf(Stmt\Use_::class, $baz);
+        $this->assertInstanceOf(Stmt\GroupUse::class, $group);
+        $this->assertInstanceOf(Stmt\Use_::class, $function);
+
+        $this->assertSame('App\Http', $this->parser->resolveClassName($ast, $namespace->name));
+        $this->assertSame('Foo\Bar', $this->parser->resolveClassName($ast, $bar->uses[0]->name));
+        // Not Foo\Bar\Baz, which resolving it against the import above would give.
+        $this->assertSame('Bar\Baz', $this->parser->resolveClassName($ast, $baz->uses[0]->name));
+        $this->assertSame('App', $this->parser->resolveClassName($ast, $group->prefix));
+        $this->assertSame('App\Support\Clock', $this->parser->resolveClassName($ast, $group->uses[0]->name));
+        $this->assertSame('App\Models\Post', $this->parser->resolveClassName($ast, $group->uses[1]->name));
+        $this->assertSame('Bar\helper', $this->parser->resolveClassName($ast, $function->uses[0]->name));
+    }
+
+    public function testResolveClassNameResolvesABracketedNamespaceNameAsWritten(): void
+    {
+        $ast = $this->parser->parseCode("<?php\nnamespace A\\B { use X\\Y; }\nnamespace C { }\n");
+        $second = $ast[1];
+        $this->assertInstanceOf(Stmt\Namespace_::class, $second);
+        $this->assertNotNull($second->name);
+
+        $this->assertSame('C', $this->parser->resolveClassName($ast, $second->name));
+        $this->assertSame('C\Y', $this->parser->resolveClassName($ast, new \PhpParser\Node\Name('Y'), $second));
+    }
+
+    public function testResolveClassNameWritesNothingIntoTheCachedAst(): void
+    {
+        $file = $this->testDir . '/Resolve.php';
+        file_put_contents($file, <<<'PHP'
+<?php
+namespace App;
+
+use Foo\Bar;
+use Foo\{Baz, Qux as Q};
+
+class C extends Bar implements Q
+{
+    public function f(): Baz
+    {
+        return new Baz(Bar::make(), namespace\Local::class, \Global\Thing::class, self::class);
+    }
+}
+PHP);
+
+        $ast = $this->parser->parseFile($file);
+        $before = serialize($ast);
+        $names = $this->parser->findNodes($ast, \PhpParser\Node\Name::class);
+        $this->assertNotEmpty($names);
+
+        foreach ($names as $name) {
+            $this->assertInstanceOf(\PhpParser\Node\Name::class, $name);
+            $this->parser->resolveClassName($ast, $name);
+        }
+
+        $this->assertSame($before, serialize($ast));
+        $this->assertSame($before, serialize($this->parser->parseFile($file)));
+    }
 }

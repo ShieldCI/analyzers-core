@@ -34,13 +34,16 @@ class PackageDetector
     private static array $lockContentCache = [];
 
     /**
-     * Cache for the package names composer.lock lists, per base path.
+     * Cache for the packages composer.lock lists, per base path.
      *
-     * Format: ['/path/to/project' => ['vendor/package' => true] or null if the lock is not valid JSON]
+     * Format: ['/path/to/project' => ['vendor/package' => '1.2.3' or null] or null if the lock is not valid JSON]
      *
-     * @var array<string, array<string, true>|null>
+     * A package's version is null when its entry has none, or one that is not a string; the
+     * package is still installed, so membership is array_key_exists(), not isset().
+     *
+     * @var array<string, array<string, string|null>|null>
      */
-    private static array $installedNamesCache = [];
+    private static array $installedPackagesCache = [];
 
     /**
      * Check if a specific package is installed.
@@ -69,10 +72,10 @@ class PackageDetector
             return false;
         }
 
-        $installed = self::getInstalledPackageNames($basePath, $lockContent);
+        $installed = self::getInstalledPackages($basePath, $lockContent);
 
         if ($installed !== null) {
-            $found = isset($installed[$packageName]);
+            $found = array_key_exists($packageName, $installed);
         } else {
             // Not valid JSON, e.g. a lock git left conflict markers in: search the text for
             // "name": "vendor/package", with any whitespace around the colon and the slash
@@ -84,6 +87,38 @@ class PackageDetector
         self::$packageCache[$cacheKey] = $found;
 
         return $found;
+    }
+
+    /**
+     * Get the version of an installed package, as composer.lock writes it.
+     *
+     * The string is not normalised: "v10.48.4", "1.2.3" and "dev-main" come back as written.
+     * It is the JSON-decoded value, so an invalid UTF-8 byte (which Composer never writes) comes
+     * back as U+FFFD, as it does for every other string hasPackage() reads from the lock.
+     * The name is matched as hasPackage() matches it, case-sensitively, under "packages" or
+     * "packages-dev"; if a name is listed twice, the first entry wins.
+     *
+     * Null when there is no readable lock, when the package is not listed, or when its entry
+     * has no string version. Also null when the lock is not valid JSON, even where hasPackage()
+     * still finds the name in the text: a lock left with conflict markers can hold two versions
+     * of one package, and the text cannot say which is installed.
+     *
+     * Shares hasPackage()'s caches, so the lock is read and decoded once per base path until
+     * clearCache().
+     *
+     * @param  string  $packageName  Full package name (e.g., "laravel/framework")
+     * @param  string  $basePath  Application base path
+     * @return string|null The version as written in composer.lock, or null
+     */
+    public static function installedVersion(string $packageName, string $basePath): ?string
+    {
+        $lockContent = self::getComposerLockContent($basePath);
+
+        if ($lockContent === null) {
+            return null;
+        }
+
+        return self::getInstalledPackages($basePath, $lockContent)[$packageName] ?? null;
     }
 
     /**
@@ -352,23 +387,25 @@ class PackageDetector
     {
         self::$packageCache = [];
         self::$lockContentCache = [];
-        self::$installedNamesCache = [];
+        self::$installedPackagesCache = [];
     }
 
     /**
-     * Get the names of the packages composer.lock lists under "packages" and "packages-dev".
+     * Get the packages composer.lock lists under "packages" and "packages-dev", with their versions.
      *
      * Reading the decoded lock rather than its text keeps a "name" key elsewhere in an entry
      * (an author's, say) from passing for a package, and accepts any escaping JSON allows.
      *
      * @param  string  $basePath  Application base path
      * @param  string  $lockContent  composer.lock content
-     * @return array<string, true>|null Package names as keys, or null if the lock is not valid JSON
+     * @return array<string, string|null>|null Package names as keys and their versions (null if
+     *                                         the entry has no string version) as values, or null
+     *                                         if the lock is not valid JSON
      */
-    private static function getInstalledPackageNames(string $basePath, string $lockContent): ?array
+    private static function getInstalledPackages(string $basePath, string $lockContent): ?array
     {
-        if (array_key_exists($basePath, self::$installedNamesCache)) {
-            return self::$installedNamesCache[$basePath];
+        if (array_key_exists($basePath, self::$installedPackagesCache)) {
+            return self::$installedPackagesCache[$basePath];
         }
 
         // A BOM or one stray byte in a description would otherwise send the whole lock to the
@@ -381,10 +418,10 @@ class PackageDetector
         );
 
         if (! is_array($lock)) {
-            return self::$installedNamesCache[$basePath] = null;
+            return self::$installedPackagesCache[$basePath] = null;
         }
 
-        $names = [];
+        $packages = [];
 
         foreach (['packages', 'packages-dev'] as $section) {
             if (! isset($lock[$section]) || ! is_array($lock[$section])) {
@@ -392,13 +429,19 @@ class PackageDetector
             }
 
             foreach ($lock[$section] as $package) {
-                if (is_array($package) && isset($package['name']) && is_string($package['name'])) {
-                    $names[$package['name']] = true;
+                if (! is_array($package) || ! isset($package['name']) || ! is_string($package['name'])) {
+                    continue;
+                }
+
+                // The first entry wins, so a name listed under both sections reports "packages"
+                if (! array_key_exists($package['name'], $packages)) {
+                    $version = $package['version'] ?? null;
+                    $packages[$package['name']] = is_string($version) ? $version : null;
                 }
             }
         }
 
-        return self::$installedNamesCache[$basePath] = $names;
+        return self::$installedPackagesCache[$basePath] = $packages;
     }
 
     /**
