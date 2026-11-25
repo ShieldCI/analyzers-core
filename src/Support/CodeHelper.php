@@ -86,15 +86,14 @@ class CodeHelper
     /**
      * Extract the namespace a file declares, or null when it declares none.
      *
-     * A regex over the code, unlike FileParser::extractNamespace(), which takes a path and reads
-     * the tokenized source. Requiring namespace-legal characters is what keeps this one correct
+     * A regex over the code, unlike FileParser::extractNamespaceFromSource(), which reads the
+     * tokenized source. Requiring namespace-legal characters is what keeps this one correct
      * on a line like `// change namespace to Foo;`: it skips the comment and finds the real
      * declaration further down, where a looser `[^;]+` pattern would yield "to Foo". Do not
      * loosen it. A comment shaped exactly like a declaration (`// namespace Foo;`) still
-     * matches here; FileParser::extractNamespace() ignores it.
-     *
-     * Takes code rather than a path, following the rest of this class, so a caller that already
-     * has the file contents in hand does not read it a second time.
+     * matches here, as does one inside a string, and the braced `namespace App { }` form is
+     * missed; FileParser::extractNamespaceFromSource() handles all three, and also takes code,
+     * so a caller that already has the file contents in hand can use it without a second read.
      */
     public static function extractNamespace(string $code): ?string
     {
