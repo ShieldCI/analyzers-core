@@ -8,6 +8,7 @@ use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Enums\ParseFailureCause;
 use ShieldCI\AnalyzersCore\Support\AstParser;
 use ShieldCI\AnalyzersCore\Support\FilamentPanelDetector;
+use ShieldCI\AnalyzersCore\Support\PackageDetector;
 use ShieldCI\AnalyzersCore\Tests\Support\CreatesTestApplication;
 use ShieldCI\AnalyzersCore\Tests\Support\FakeRecordingParser;
 
@@ -973,5 +974,569 @@ PHP);
 
         $this->assertTrue((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
         $this->assertSame([$providerFile], $parser->recoveries());
+    }
+
+    /**
+     * Filament's make:filament-panel writes to app/Providers/Filament, but nothing stops an
+     * application grouping its panels one directory further down. A provider there is every bit
+     * as registered, and answering false for it skips every check gated on this.
+     */
+    public function test_detects_a_panel_provider_one_directory_below_filament(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->writePanelProvider('Filament/Admin', 'AdminPanelProvider');
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\Admin\\AdminPanelProvider');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    public function test_detects_a_panel_provider_in_a_directory_other_than_filament(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->writePanelProvider('Panels', 'AdminPanelProvider');
+        $this->registerProviderInBootstrap('App\\Providers\\Panels\\AdminPanelProvider');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    public function test_detects_a_panel_provider_three_directories_down(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->writePanelProvider('Filament/Panels/Admin', 'AdminPanelProvider');
+        $this->registerProviderInConfigApp('App\\Providers\\Filament\\Panels\\Admin\\AdminPanelProvider');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    public function test_the_deprecated_package_detector_entry_point_finds_a_nested_provider(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->writePanelProvider('Filament/Admin', 'AdminPanelProvider');
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\Admin\\AdminPanelProvider');
+
+        $this->assertTrue(PackageDetector::isFilamentConfigured($this->testDir));
+    }
+
+    public function test_a_nested_file_that_is_not_a_panel_provider_does_not_count(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+
+        $dir = $this->testDir.'/app/Providers/Filament/Admin';
+        mkdir($dir, 0755, true);
+        file_put_contents($dir.'/AppServiceProvider.php', self::NOT_A_PANEL_PROVIDER);
+
+        $this->registerProviderInBootstrap('App\\Providers\\AppServiceProvider');
+
+        $this->assertFalse((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    public function test_a_nested_panel_provider_that_is_not_registered_does_not_count(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->writePanelProvider('Filament/Admin', 'AdminPanelProvider');
+        $this->registerProviderInBootstrap('App\\Providers\\AppServiceProvider');
+
+        $this->assertFalse((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    /**
+     * One walk replaced two directory listings, the first of which was inside the second's tree.
+     * Each file has to be handed to the parser once, in an order that does not depend on the
+     * filesystem's.
+     */
+    public function test_each_provider_file_is_parsed_once_in_sorted_order(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $nested = $this->writePanelProvider('Filament/Admin', 'AdminPanelProvider');
+        $flat = $this->writePanelProvider('Filament', 'AppPanelProvider');
+        $root = $this->writePanelProvider('', 'RootPanelProvider');
+
+        $parser = new FakeRecordingParser();
+
+        $this->assertFalse((new FilamentPanelDetector($parser))->isConfigured($this->testDir));
+
+        $expected = [$nested, $flat, $root];
+        sort($expected);
+
+        $this->assertSame($expected, $parser->parsedPaths);
+    }
+
+    /**
+     * A link back up the tree would make a walk that follows links run until the path is too
+     * long to open. Links are not followed, so the walk ends and the real provider is found once.
+     */
+    public function test_a_symlinked_directory_loop_neither_hangs_nor_hides_the_provider(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $provider = $this->writePanelProvider('Filament/Admin', 'AdminPanelProvider');
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\Admin\\AdminPanelProvider');
+
+        if (! @symlink($this->testDir.'/app/Providers', $this->testDir.'/app/Providers/Filament/Loop')) {
+            $this->markTestSkipped('symlink() is not available here');
+        }
+
+        $parser = new FakeRecordingParser();
+        (new FilamentPanelDetector($parser))->isConfigured($this->testDir);
+
+        $this->assertSame([$provider], $parser->parsedPaths);
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    public function test_an_unreadable_directory_does_not_lose_a_provider_elsewhere(): void
+    {
+        $this->skipWhenPermissionsAreNotEnforced();
+
+        $this->createComposerLock(['filament/filament']);
+        $this->writePanelProvider('Panels', 'AdminPanelProvider');
+        $this->registerProviderInBootstrap('App\\Providers\\Panels\\AdminPanelProvider');
+
+        $locked = $this->testDir.'/app/Providers/Filament';
+        mkdir($locked.'/Admin', 0755, true);
+        chmod($locked, 0000);
+
+        try {
+            $result = (new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir);
+        } finally {
+            chmod($locked, 0755);
+        }
+
+        $this->assertTrue($result);
+    }
+
+    public function test_an_unreadable_providers_directory_answers_false_rather_than_throwing(): void
+    {
+        $this->skipWhenPermissionsAreNotEnforced();
+
+        $this->createComposerLock(['filament/filament']);
+        $this->writePanelProvider('Filament', 'AdminPanelProvider');
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+        $providers = $this->testDir.'/app/Providers';
+        chmod($providers, 0000);
+
+        try {
+            $result = (new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir);
+        } finally {
+            chmod($providers, 0755);
+        }
+
+        $this->assertFalse($result);
+    }
+
+    /**
+     * A provider kept elsewhere and linked into app/Providers is as registered as one written
+     * there, and the flat globs this walk replaced always found it.
+     */
+    public function test_detects_a_panel_provider_reached_through_a_file_link(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+
+        $shared = $this->testDir.'/shared';
+        mkdir($shared, 0755, true);
+        mkdir($this->testDir.'/app/Providers/Filament', 0755, true);
+        file_put_contents($shared.'/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Filament', 'AdminPanelProvider'));
+
+        if (! @symlink($shared.'/AdminPanelProvider.php', $this->testDir.'/app/Providers/Filament/AdminPanelProvider.php')) {
+            $this->markTestSkipped('symlink() is not available here');
+        }
+
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    public function test_detects_a_panel_provider_reached_through_a_directory_link(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+
+        $panels = $this->testDir.'/packages/panels';
+        mkdir($panels, 0755, true);
+        mkdir($this->testDir.'/app/Providers', 0755, true);
+        file_put_contents($panels.'/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Filament', 'AdminPanelProvider'));
+
+        if (! @symlink($panels, $this->testDir.'/app/Providers/Filament')) {
+            $this->markTestSkipped('symlink() is not available here');
+        }
+
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    /**
+     * A host whose error handler throws on every warning must not lose the verdict to one file it
+     * cannot read, any more than an unreadable directory loses it.
+     */
+    public function test_an_unreadable_file_neither_warns_nor_loses_a_provider_elsewhere(): void
+    {
+        $this->skipWhenPermissionsAreNotEnforced();
+
+        $this->createComposerLock(['filament/filament']);
+        $this->writePanelProvider('Panels', 'AdminPanelProvider');
+        $locked = $this->writePanelProvider('Filament/Admin', 'LockedPanelProvider');
+        $this->registerProviderInBootstrap('App\\Providers\\Panels\\AdminPanelProvider');
+
+        chmod($locked, 0000);
+        set_error_handler(static function (int $errno, string $message): never {
+            throw new \ErrorException($message, 0, $errno);
+        });
+
+        try {
+            $result = (new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir);
+        } finally {
+            restore_error_handler();
+            chmod($locked, 0644);
+        }
+
+        $this->assertTrue($result);
+    }
+
+    /**
+     * Panels shared between applications live outside any one of them, linked in. The globs
+     * this walk replaced read straight through such a link, so the walk has to as well.
+     */
+    public function test_a_directory_link_out_of_the_project_is_walked(): void
+    {
+        $outside = sys_get_temp_dir().'/shield-ci-shared-panels-'.uniqid();
+
+        try {
+            $this->createComposerLock(['filament/filament']);
+            mkdir($outside, 0755, true);
+            mkdir($this->testDir.'/app/Providers', 0755, true);
+            file_put_contents($outside.'/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Filament', 'AdminPanelProvider'));
+            $this->symlinkOrSkip($outside, $this->testDir.'/app/Providers/Filament');
+            $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+            $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+        } finally {
+            $this->removeDirectory($outside);
+        }
+    }
+
+    public function test_a_monorepo_application_whose_providers_directory_is_a_link_out_is_walked(): void
+    {
+        $base = $this->testDir.'/apps/web';
+        $this->makeApplicationAt($base, 'App\\Providers\\Filament\\AdminPanelProvider');
+
+        $shared = $this->testDir.'/monorepo/shared/Providers';
+        mkdir($shared.'/Filament', 0755, true);
+        file_put_contents($shared.'/Filament/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Filament', 'AdminPanelProvider'));
+        mkdir($base.'/app', 0755, true);
+        $this->symlinkOrSkip($shared, $base.'/app/Providers');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($base));
+    }
+
+    public function test_a_monorepo_application_whose_app_directory_is_a_link_out_is_walked(): void
+    {
+        $base = $this->testDir.'/apps/web';
+        $this->makeApplicationAt($base, 'App\\Providers\\Filament\\AdminPanelProvider');
+
+        $app = $this->testDir.'/src/app';
+        mkdir($app.'/Providers/Filament', 0755, true);
+        file_put_contents($app.'/Providers/Filament/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Filament', 'AdminPanelProvider'));
+        $this->symlinkOrSkip($app, $base.'/app');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($base));
+    }
+
+    /**
+     * realpath() keeps the case it was given on a case-insensitive filesystem, so the base path
+     * and a link target can spell one directory two ways.
+     */
+    public function test_a_base_path_spelled_in_another_case_still_follows_a_link_inside_it(): void
+    {
+        $this->skipUnlessCaseInsensitive();
+
+        $real = $this->testDir.'/CaseApp';
+        $this->makeApplicationAt($real, 'App\\Providers\\Filament\\AdminPanelProvider');
+
+        mkdir($real.'/packages/panels', 0755, true);
+        mkdir($real.'/app/Providers', 0755, true);
+        file_put_contents($real.'/packages/panels/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Filament', 'AdminPanelProvider'));
+        $this->symlinkOrSkip($real.'/packages/panels', $real.'/app/Providers/Filament');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir.'/caseapp'));
+    }
+
+    /**
+     * Dependencies are someone else's panels and a great many files. Refused wherever the link
+     * points, including a provider directory linked straight into vendor/.
+     */
+    public function test_a_directory_link_into_vendor_is_not_walked(): void
+    {
+        $this->assertLinkedDirectoryIsNotWalked($this->testDir.'/vendor/acme/panels', 'Lib');
+    }
+
+    public function test_a_panel_directory_linked_into_vendor_is_not_walked(): void
+    {
+        $this->assertLinkedDirectoryIsNotWalked($this->testDir.'/vendor/acme/panels', 'Filament');
+    }
+
+    public function test_a_directory_link_into_node_modules_is_not_walked(): void
+    {
+        $this->assertLinkedDirectoryIsNotWalked($this->testDir.'/node_modules/acme', 'Lib');
+    }
+
+    public function test_vendor_is_refused_whatever_case_the_link_spells_it_in(): void
+    {
+        $this->skipUnlessCaseInsensitive();
+
+        mkdir($this->testDir.'/vendor/acme', 0755, true);
+
+        $this->assertLinkedDirectoryIsNotWalked($this->testDir.'/VENDOR/acme', 'Lib');
+    }
+
+    /**
+     * Only the segments below the project are dependency directories: one checked out inside
+     * someone's vendor/ is still an application.
+     */
+    public function test_a_project_that_itself_lives_under_vendor_is_still_walked(): void
+    {
+        $base = $this->testDir.'/vendor/acme/app';
+        $this->makeApplicationAt($base, 'App\\Providers\\Filament\\AdminPanelProvider');
+
+        mkdir($base.'/app/Providers/Filament', 0755, true);
+        file_put_contents($base.'/app/Providers/Filament/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Filament', 'AdminPanelProvider'));
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($base));
+    }
+
+    /**
+     * The project's own path is not a dependency directory, and neither is the part of it a link
+     * target shares: panels kept beside a project that lives under vendor/ are still panels.
+     */
+    public function test_an_outside_target_sharing_the_projects_vendor_prefix_is_walked(): void
+    {
+        $base = $this->testDir.'/vendor/proj';
+        $this->makeApplicationAt($base, 'App\\Providers\\Filament\\AdminPanelProvider');
+
+        $shared = $this->testDir.'/vendor/shared/Filament';
+        mkdir($shared, 0755, true);
+        file_put_contents($shared.'/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Filament', 'AdminPanelProvider'));
+        mkdir($base.'/app/Providers', 0755, true);
+        $this->symlinkOrSkip($shared, $base.'/app/Providers/Filament');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($base));
+    }
+
+    public function test_a_monorepo_under_vendor_whose_app_directory_is_a_link_is_walked(): void
+    {
+        $mono = $this->testDir.'/vendor/mono';
+        $base = $mono.'/apps/admin';
+        $this->makeApplicationAt($base, 'App\\Providers\\Filament\\AdminPanelProvider');
+
+        mkdir($mono.'/shared/app/Providers/Filament', 0755, true);
+        file_put_contents($mono.'/shared/app/Providers/Filament/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Filament', 'AdminPanelProvider'));
+        $this->symlinkOrSkip($mono.'/shared/app', $base.'/app');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($base));
+    }
+
+    public function test_an_outside_target_with_its_own_vendor_segment_is_still_refused(): void
+    {
+        $base = $this->testDir.'/vendor/proj';
+        $this->makeApplicationAt($base, 'App\\Providers\\Lib\\AdminPanelProvider');
+
+        $target = $this->testDir.'/vendor/shared/vendor/x';
+        mkdir($target, 0755, true);
+        file_put_contents($target.'/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Lib', 'AdminPanelProvider'));
+        mkdir($base.'/app/Providers', 0755, true);
+        $this->symlinkOrSkip($target, $base.'/app/Providers/Lib');
+
+        $parser = new FakeRecordingParser();
+        (new FilamentPanelDetector($parser))->isConfigured($base);
+
+        $this->assertSame([], $parser->parsedPaths);
+        $this->assertFalse((new FilamentPanelDetector(new AstParser()))->isConfigured($base));
+    }
+
+    /**
+     * Once app/Providers is a link out, app/ is no longer above the walk's start, and a link back
+     * to it would walk the rest of the application. It is refused all the same.
+     */
+    public function test_a_link_back_to_the_app_directory_from_outside_is_not_walked(): void
+    {
+        $this->makeApplicationAt($this->testDir, 'App\\Filament\\OtherPanelProvider');
+
+        $shared = $this->testDir.'/shared/Providers';
+        mkdir($shared, 0755, true);
+        mkdir($this->testDir.'/app/Filament', 0755, true);
+        file_put_contents($this->testDir.'/app/Filament/OtherPanelProvider.php', self::panelProviderSource('App\\Filament', 'OtherPanelProvider'));
+        $this->symlinkOrSkip($shared, $this->testDir.'/app/Providers');
+        $this->symlinkOrSkip($this->testDir.'/app', $shared.'/Back');
+
+        $parser = new FakeRecordingParser();
+        (new FilamentPanelDetector($parser))->isConfigured($this->testDir);
+
+        $this->assertSame([], $parser->parsedPaths);
+        $this->assertFalse((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    /**
+     * A link to the project root, to the directory above it, or to app/ brings the whole
+     * project -- or the whole machine -- into range. None of them is entered.
+     */
+    public function test_a_link_to_the_project_root_is_not_walked(): void
+    {
+        $this->assertWalkStopsAtLinkTo($this->testDir, 'packages/RootPanelProvider.php');
+    }
+
+    public function test_a_link_to_the_directory_above_the_project_is_not_walked(): void
+    {
+        $this->assertWalkStopsAtLinkTo(dirname($this->testDir), 'packages/RootPanelProvider.php');
+    }
+
+    public function test_a_link_to_the_app_directory_is_not_walked(): void
+    {
+        $this->assertWalkStopsAtLinkTo($this->testDir.'/app', 'app/Other/OtherPanelProvider.php');
+    }
+
+    public function test_a_providers_directory_that_is_a_link_to_the_project_root_walks_nothing(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        mkdir($this->testDir.'/app', 0755, true);
+        mkdir($this->testDir.'/Panels', 0755, true);
+        file_put_contents($this->testDir.'/Panels/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\Panels', 'AdminPanelProvider'));
+        $this->registerProviderInBootstrap('App\\Providers\\Panels\\AdminPanelProvider');
+        $this->symlinkOrSkip($this->testDir, $this->testDir.'/app/Providers');
+
+        $parser = new FakeRecordingParser();
+        (new FilamentPanelDetector($parser))->isConfigured($this->testDir);
+
+        $this->assertSame([], $parser->parsedPaths);
+        $this->assertFalse((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    /**
+     * Link app/Providers/Up to $target, put a panel-provider-like file at $decoy below the
+     * project, and assert the walk ends having parsed only the real provider.
+     */
+    private function assertWalkStopsAtLinkTo(string $target, string $decoy): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $provider = $this->writePanelProvider('Filament', 'AdminPanelProvider');
+        $this->registerProviderInBootstrap('App\\Providers\\Filament\\AdminPanelProvider');
+
+        foreach ([$decoy, 'vendor/acme/VendorPanelProvider.php', 'node_modules/acme/VendorPanelProvider.php'] as $file) {
+            $path = $this->testDir.'/'.$file;
+
+            if (! is_dir(dirname($path))) {
+                mkdir(dirname($path), 0755, true);
+            }
+
+            file_put_contents($path, self::panelProviderSource('Acme', basename($file, '.php')));
+        }
+
+        $this->symlinkOrSkip($target, $this->testDir.'/app/Providers/Up');
+
+        $parser = new FakeRecordingParser();
+        (new FilamentPanelDetector($parser))->isConfigured($this->testDir);
+
+        $this->assertSame([$provider], $parser->parsedPaths);
+    }
+
+    /**
+     * Link app/Providers/$linkName to $target, holding a registered panel provider, and assert
+     * the walk never parses it.
+     */
+    private function assertLinkedDirectoryIsNotWalked(string $target, string $linkName): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $real = $this->writePanelProvider('Real', 'RealPanelProvider');
+
+        if (! is_dir($target)) {
+            mkdir($target, 0755, true);
+        }
+
+        file_put_contents($target.'/AdminPanelProvider.php', self::panelProviderSource('App\\Providers\\'.$linkName, 'AdminPanelProvider'));
+        $this->registerProviderInBootstrap('App\\Providers\\'.$linkName.'\\AdminPanelProvider');
+        $this->symlinkOrSkip($target, $this->testDir.'/app/Providers/'.$linkName);
+
+        $parser = new FakeRecordingParser();
+        (new FilamentPanelDetector($parser))->isConfigured($this->testDir);
+
+        $this->assertSame([$real], $parser->parsedPaths);
+        $this->assertFalse((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    /**
+     * Give the application at $base a composer.lock with Filament and $providerClass registered.
+     */
+    private function makeApplicationAt(string $base, string $providerClass): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->registerProviderInBootstrap($providerClass);
+
+        if (! is_dir($base)) {
+            mkdir($base, 0755, true);
+        }
+
+        rename($this->testDir.'/composer.lock', $base.'/composer.lock');
+        rename($this->testDir.'/bootstrap', $base.'/bootstrap');
+    }
+
+    private function symlinkOrSkip(string $target, string $link): void
+    {
+        if (! @symlink($target, $link)) {
+            $this->markTestSkipped('symlink() is not available here');
+        }
+    }
+
+    private function skipUnlessCaseInsensitive(): void
+    {
+        mkdir($this->testDir.'/CaseProbe');
+        $insensitive = is_dir($this->testDir.'/caseprobe');
+        rmdir($this->testDir.'/CaseProbe');
+
+        if (! $insensitive) {
+            $this->markTestSkipped('the filesystem here is case-sensitive');
+        }
+    }
+
+    private function skipWhenPermissionsAreNotEnforced(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('chmod() does not lock a directory on Windows');
+        }
+
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $this->markTestSkipped('root reads a directory whatever its mode');
+        }
+    }
+
+    /**
+     * Write a panel provider under app/Providers/$subdirectory, namespaced to match, and return
+     * its path.
+     */
+    private function writePanelProvider(string $subdirectory, string $className): string
+    {
+        $dir = $this->testDir.'/app/Providers'.($subdirectory === '' ? '' : '/'.$subdirectory);
+
+        if (! is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
+        $namespace = 'App\\Providers'.($subdirectory === '' ? '' : '\\'.str_replace('/', '\\', $subdirectory));
+        $path = $dir.'/'.$className.'.php';
+
+        file_put_contents($path, self::panelProviderSource($namespace, $className));
+
+        return $path;
+    }
+
+    private static function panelProviderSource(string $namespace, string $className): string
+    {
+        return <<<PHP
+<?php
+
+namespace {$namespace};
+
+use Filament\\Panel\\PanelProvider;
+
+class {$className} extends PanelProvider
+{
+}
+PHP;
     }
 }

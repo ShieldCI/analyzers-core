@@ -41,7 +41,14 @@ trait CreatesTestApplication
         $items = array_diff(scandir($dir) ?: [], ['.', '..']);
         foreach ($items as $item) {
             $path = $dir.DIRECTORY_SEPARATOR.$item;
-            if (is_dir($path)) {
+            // A link is removed, never descended: a fixture may link back up its own tree.
+            // Windows removes a link to a directory with rmdir(), and a dangling one need not
+            // say it is a directory, so whichever call fails there falls back to the other.
+            if (is_link($path)) {
+                if (! @unlink($path) && PHP_OS_FAMILY === 'Windows') {
+                    rmdir($path);
+                }
+            } elseif (is_dir($path)) {
                 $this->removeDirectory($path);
             } else {
                 unlink($path);
