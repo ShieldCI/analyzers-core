@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Tests\Unit\Support;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Support\AstParser;
 use ShieldCI\AnalyzersCore\Support\FilamentPanelDetector;
@@ -396,7 +397,7 @@ PHP;
         $this->assertTrue($result);
     }
 
-    public function test_is_horizon_configured_falls_back_to_app_namespace_when_extraction_fails(): void
+    public function test_is_horizon_configured_does_not_put_a_provider_without_a_namespace_in_app_providers(): void
     {
         $this->createComposerLock(['laravel/horizon']);
 
@@ -412,7 +413,7 @@ PHP;
         $providerCode = <<<'PHP'
 <?php
 
-// No namespace declaration - should fallback to App\Providers\HorizonServiceProvider
+// No namespace declaration: this is the global HorizonServiceProvider
 
 class HorizonServiceProvider
 {
@@ -421,12 +422,612 @@ class HorizonServiceProvider
 PHP;
         file_put_contents($providersDir.'/HorizonServiceProvider.php', $providerCode);
 
-        // Register provider using default App namespace (what the fallback expects)
+        // App\Providers\HorizonServiceProvider is a different class from the global one
         $this->registerProviderInBootstrap('App\\Providers\\HorizonServiceProvider');
 
         $result = PackageDetector::isHorizonConfigured($this->testDir);
 
+        $this->assertFalse($result);
+    }
+
+    public function test_is_horizon_configured_accepts_a_string_registration_in_bootstrap(): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+        $this->writeAppFile('bootstrap/providers.php', <<<'PHP'
+<?php
+
+return [
+    'App\Providers\HorizonServiceProvider',
+];
+PHP);
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    public function test_is_horizon_configured_accepts_a_string_registration_in_config_app(): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+        $this->writeAppFile('config/app.php', <<<'PHP'
+<?php
+
+return [
+    'providers' => [
+        'App\Providers\HorizonServiceProvider',
+    ],
+];
+PHP);
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    public function test_is_horizon_configured_accepts_a_string_registration_with_a_custom_namespace(): void
+    {
+        $this->createInstalledHorizon('Acme\Providers');
+        $this->writeAppFile('bootstrap/providers.php', <<<'PHP'
+<?php
+
+return [
+    'Acme\Providers\HorizonServiceProvider',
+];
+PHP);
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    public function test_is_horizon_configured_accepts_a_stock_install_with_a_full_provider_file(): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+        $this->registerProviderInBootstrap('App\\Providers\\HorizonServiceProvider');
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    public function test_is_horizon_configured_rejects_another_class_with_the_same_short_name(): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+        $this->registerProviderInBootstrap('App\\Support\\HorizonServiceProvider');
+
+        $this->assertFalse(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    #[DataProvider('horizonRegistrationsResolvedLikePhp')]
+    public function test_is_horizon_configured_resolves_the_registered_name_like_php(string $providersFile): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+        $this->writeAppFile('bootstrap/providers.php', $providersFile);
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function horizonRegistrationsResolvedLikePhp(): array
+    {
+        return [
+            'qualified through an imported namespace' => [<<<'PHP'
+<?php use App\Providers; return [Providers\HorizonServiceProvider::class];
+PHP],
+            'qualified relative to the file namespace' => [<<<'PHP'
+<?php namespace App; return [Providers\HorizonServiceProvider::class];
+PHP],
+            'the second of two namespaces' => [<<<'PHP'
+<?php namespace Foo; namespace App\Providers; return [HorizonServiceProvider::class];
+PHP],
+            'lower-case fully qualified name' => [<<<'PHP'
+<?php return [app\providers\horizonserviceprovider::class];
+PHP],
+            'comments holding ; and , inside a group import' => [<<<'PHP'
+<?php
+
+use App\Providers\{
+    // queues; workers, and the dashboard
+    HorizonServiceProvider,
+    /* more; later, maybe */
+};
+
+return [HorizonServiceProvider::class];
+PHP],
+        ];
+    }
+
+    public function test_is_horizon_configured_unescapes_a_double_quoted_registration(): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+        $b = chr(92);
+        $this->writeAppFile(
+            'config/app.php',
+            "<?php return ['providers' => [\"App{$b}{$b}Providers{$b}{$b}HorizonServiceProvider\"]];"
+        );
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    public function test_is_horizon_configured_reads_a_provider_in_a_braced_namespace(): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+        $this->writeAppFile(
+            'app/Providers/HorizonServiceProvider.php',
+            '<?php namespace Acme\Providers { class HorizonServiceProvider {} }'
+        );
+        $this->writeAppFile('bootstrap/providers.php', '<?php return [Acme\Providers\HorizonServiceProvider::class];');
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    public function test_is_horizon_configured_treats_a_provider_without_a_namespace_as_global(): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+        $this->writeAppFile('app/Providers/HorizonServiceProvider.php', '<?php class HorizonServiceProvider {}');
+        $this->writeAppFile('bootstrap/providers.php', '<?php return [HorizonServiceProvider::class];');
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    public function test_is_horizon_configured_falls_back_to_app_providers_when_the_provider_cannot_be_read(): void
+    {
+        $this->createInstalledHorizon('Acme\Providers');
+        $this->registerProviderInBootstrap('App\\Providers\\HorizonServiceProvider');
+
+        $providerPath = $this->testDir.'/app/Providers/HorizonServiceProvider.php';
+        chmod($providerPath, 0000);
+        $previousHandler = set_error_handler(fn () => true);
+
+        try {
+            $result = PackageDetector::isHorizonConfigured($this->testDir);
+        } finally {
+            restore_error_handler();
+            chmod($providerPath, 0644);
+        }
+
         $this->assertTrue($result);
+    }
+
+    public function test_is_horizon_configured_still_counts_a_commented_out_registration(): void
+    {
+        // Unchanged behaviour, tracked separately in #135: comments are not told apart from code
+        $this->createInstalledHorizon('App\Providers');
+        $this->writeAppFile('bootstrap/providers.php', <<<'PHP'
+<?php
+
+use App\Providers\HorizonServiceProvider;
+
+return [
+    App\Providers\AppServiceProvider::class,
+    // HorizonServiceProvider::class,
+];
+PHP);
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+
+        $this->writeAppFile('bootstrap/providers.php', <<<'PHP'
+<?php
+
+return [
+    App\Providers\AppServiceProvider::class,
+    // App\Providers\HorizonServiceProvider::class,
+];
+PHP);
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    public function test_is_horizon_configured_reads_a_quoted_registration_after_an_apostrophe_in_a_comment(): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+
+        $b = chr(92).chr(92);
+        $this->writeAppFile('config/app.php', <<<PHP
+<?php
+
+use Illuminate\Support\Facades\Facade;
+use Illuminate\Support\ServiceProvider;
+
+return [
+
+    /*
+    | This value is the name of your application. This value is used when the
+    | framework needs to place the application's name in a notification or
+    | any other location as required by the application or its packages.
+    */
+
+    'name' => env('APP_NAME', 'Laravel'),
+
+    'providers' => ServiceProvider::defaultProviders()->merge([
+        'App{$b}Providers{$b}HorizonServiceProvider',
+    ])->toArray(),
+
+];
+PHP);
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    public function test_is_service_provider_registered_reads_a_string_after_an_apostrophe_in_a_nowdoc(): void
+    {
+        $this->writeAppFile('bootstrap/providers.php', <<<'PHP'
+<?php
+
+$note = <<<'TXT'
+it's here
+TXT;
+
+return [
+    'HorizonServiceProvider',
+];
+PHP);
+
+        $this->assertTrue(PackageDetector::isServiceProviderRegistered('HorizonServiceProvider', $this->testDir));
+    }
+
+    public function test_is_service_provider_registered_resolves_a_namespace_relative_name_in_the_global_namespace(): void
+    {
+        $this->writeAppFile('bootstrap/providers.php', '<?php return [ namespace\HorizonServiceProvider::class, ];');
+
+        $this->assertTrue(PackageDetector::isServiceProviderRegistered('HorizonServiceProvider', $this->testDir));
+    }
+
+    public function test_is_horizon_configured_resolves_a_namespace_relative_name(): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+        $this->writeAppFile('bootstrap/providers.php', '<?php namespace App; return [ namespace\Providers\HorizonServiceProvider::class, ];');
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    public function test_is_service_provider_registered_still_reads_strings_when_the_class_constant_scan_fails(): void
+    {
+        $b = chr(92).chr(92);
+        $this->writeAppFile(
+            'bootstrap/providers.php',
+            "<?php return [ 'App{$b}Providers{$b}HorizonServiceProvider', Other::class ];"
+        );
+
+        $limit = ini_get('pcre.backtrack_limit');
+        $jit = ini_get('pcre.jit');
+        ini_set('pcre.jit', '0');
+        ini_set('pcre.backtrack_limit', '1');
+
+        try {
+            $result = PackageDetector::isServiceProviderRegistered('App\Providers\HorizonServiceProvider', $this->testDir);
+            $scanFailed = preg_match('/(?<![\w])(\w+)\s*::\s*class\b/i', 'x Other::class') === false;
+        } finally {
+            ini_set('pcre.backtrack_limit', (string) $limit);
+            ini_set('pcre.jit', (string) $jit);
+        }
+
+        $this->assertTrue($scanFailed, 'The lowered backtrack limit should make the scan fail');
+        $this->assertTrue($result);
+    }
+
+    #[DataProvider('horizonProviderFilesForAppProviders')]
+    public function test_is_horizon_configured_qualifies_the_provider_with_the_namespace_around_its_class(string $providerFile): void
+    {
+        $this->createInstalledHorizon('App\Providers');
+        $this->writeAppFile('app/Providers/HorizonServiceProvider.php', $providerFile);
+        $this->writeAppFile('bootstrap/providers.php', '<?php return [ App\Providers\HorizonServiceProvider::class ];');
+
+        $this->assertTrue(PackageDetector::isHorizonConfigured($this->testDir));
+    }
+
+    /**
+     * Each file either names App\Providers as its class's namespace or hides the class well
+     * enough that the default App\Providers is the best reading.
+     *
+     * @return array<string, array{string}>
+     */
+    public static function horizonProviderFilesForAppProviders(): array
+    {
+        return [
+            'empty file' => [''],
+            'namespace statement missing its semicolon' => [<<<'PHP'
+<?php
+namespace App\Providers
+
+use Laravel\Horizon\HorizonApplicationServiceProvider;
+class HorizonServiceProvider {}
+
+PHP],
+            'unterminated docblock' => [<<<'PHP'
+<?php
+/**
+ * oops
+namespace App\Providers;
+class HorizonServiceProvider {}
+
+PHP],
+            'short open tag' => [<<<'PHP'
+<?
+namespace App\Providers;
+class HorizonServiceProvider {}
+
+PHP],
+            'another class declared before it' => [<<<'PHP'
+<?php
+namespace App\Support;
+class Helper {}
+namespace App\Providers;
+class HorizonServiceProvider {}
+
+PHP],
+            'class in the second of two namespaces' => [<<<'PHP'
+<?php
+namespace App\Support;
+function f() {}
+namespace App\Providers;
+class HorizonServiceProvider {}
+
+PHP],
+        ];
+    }
+
+    // =================================================================
+    // Tests for isServiceProviderRegistered() - which class a name refers to
+    // =================================================================
+
+    #[DataProvider('registrationsOfTheProvider')]
+    public function test_is_service_provider_registered_accepts_a_reference_to_the_provider(string $providersFile): void
+    {
+        $this->writeAppFile('bootstrap/providers.php', $providersFile);
+
+        $this->assertTrue(
+            PackageDetector::isServiceProviderRegistered('Acme\Billing\InvoiceServiceProvider', $this->testDir)
+        );
+    }
+
+    #[DataProvider('registrationsOfAnotherClass')]
+    public function test_is_service_provider_registered_rejects_a_reference_to_another_class(string $providersFile): void
+    {
+        $this->writeAppFile('bootstrap/providers.php', $providersFile);
+
+        $this->assertFalse(
+            PackageDetector::isServiceProviderRegistered('Acme\Billing\InvoiceServiceProvider', $this->testDir)
+        );
+    }
+
+    public function test_is_service_provider_registered_reads_imports_in_config_app(): void
+    {
+        $this->writeAppFile('config/app.php', <<<'PHP'
+<?php
+
+use Acme\Billing\InvoiceServiceProvider;
+
+return [
+    'providers' => [
+        InvoiceServiceProvider::class,
+    ],
+];
+PHP);
+
+        $this->assertTrue(
+            PackageDetector::isServiceProviderRegistered('Acme\Billing\InvoiceServiceProvider', $this->testDir)
+        );
+    }
+
+    public function test_is_service_provider_registered_accepts_a_leading_backslash_on_the_class_it_is_given(): void
+    {
+        $this->writeAppFile('bootstrap/providers.php', <<<'PHP'
+<?php
+
+use Acme\Billing\InvoiceServiceProvider;
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP);
+
+        $this->assertTrue(
+            PackageDetector::isServiceProviderRegistered('\Acme\Billing\InvoiceServiceProvider', $this->testDir)
+        );
+    }
+
+    public function test_is_service_provider_registered_matches_a_class_in_the_global_namespace_by_name(): void
+    {
+        $this->registerProviderInBootstrap('App\\Providers\\AppServiceProvider');
+
+        $this->assertFalse(PackageDetector::isServiceProviderRegistered('InvoiceServiceProvider', $this->testDir));
+
+        $this->registerProviderInBootstrap('InvoiceServiceProvider');
+
+        $this->assertTrue(PackageDetector::isServiceProviderRegistered('InvoiceServiceProvider', $this->testDir));
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function registrationsOfTheProvider(): array
+    {
+        return [
+            'fully qualified ::class' => [<<<'PHP'
+<?php
+
+return [
+    Acme\Billing\InvoiceServiceProvider::class,
+];
+PHP],
+            'fully qualified string' => [<<<'PHP'
+<?php
+
+return [
+    'Acme\Billing\InvoiceServiceProvider',
+];
+PHP],
+            'leading backslash' => [<<<'PHP'
+<?php
+
+return [
+    \Acme\Billing\InvoiceServiceProvider::class,
+];
+PHP],
+            'imported' => [<<<'PHP'
+<?php
+
+use Acme\Billing\InvoiceServiceProvider;
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+            'imported with a leading backslash' => [<<<'PHP'
+<?php
+
+use \Acme\Billing\InvoiceServiceProvider;
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+            'imported under an alias' => [<<<'PHP'
+<?php
+
+use Acme\Billing\InvoiceServiceProvider as Invoices;
+
+return [
+    Invoices::class,
+];
+PHP],
+            'imported in a comma-separated use' => [<<<'PHP'
+<?php
+
+use Acme\Other\Thing, Acme\Billing\InvoiceServiceProvider;
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+            'imported in a group use' => [<<<'PHP'
+<?php
+
+use Acme\Billing\{InvoiceServiceProvider, PaymentServiceProvider as Payments};
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+            'imported under an alias in a group use' => [<<<'PHP'
+<?php
+
+use Acme\{Other\Thing, Billing\InvoiceServiceProvider as Invoices};
+
+return [
+    Invoices::class,
+];
+PHP],
+            'imported with different letter case' => [<<<'PHP'
+<?php
+
+use acme\billing\invoiceserviceprovider;
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+            'declared in the same namespace' => [<<<'PHP'
+<?php
+
+namespace Acme\Billing;
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+        ];
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function registrationsOfAnotherClass(): array
+    {
+        return [
+            'same short name, other namespace' => [<<<'PHP'
+<?php
+
+return [
+    Acme\Support\InvoiceServiceProvider::class,
+];
+PHP],
+            'same short name, other namespace, leading backslash' => [<<<'PHP'
+<?php
+
+return [
+    \Acme\Support\InvoiceServiceProvider::class,
+];
+PHP],
+            'unqualified without an import' => [<<<'PHP'
+<?php
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+            'import of another class with the same short name' => [<<<'PHP'
+<?php
+
+use Acme\Support\InvoiceServiceProvider;
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+            'group import of another class with the same short name' => [<<<'PHP'
+<?php
+
+use Acme\Support\{InvoiceServiceProvider};
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+            'function import of the short name' => [<<<'PHP'
+<?php
+
+use function Acme\Support\InvoiceServiceProvider;
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+            'declared in another namespace' => [<<<'PHP'
+<?php
+
+namespace Acme\Support;
+
+return [
+    InvoiceServiceProvider::class,
+];
+PHP],
+        ];
+    }
+
+    /**
+     * Lay down an installed, published Horizon whose provider declares the given namespace.
+     */
+    private function createInstalledHorizon(string $namespace): void
+    {
+        $this->createComposerLock(['laravel/horizon']);
+        $this->writeAppFile('config/horizon.php', '<?php return [];');
+        $this->writeAppFile('app/Providers/HorizonServiceProvider.php', <<<PHP
+<?php
+
+namespace {$namespace};
+
+use Laravel\\Horizon\\HorizonApplicationServiceProvider;
+
+class HorizonServiceProvider extends HorizonApplicationServiceProvider
+{
+}
+PHP);
+    }
+
+    private function writeAppFile(string $relativePath, string $content): void
+    {
+        $path = $this->testDir.'/'.$relativePath;
+        if (! is_dir(dirname($path))) {
+            mkdir(dirname($path), 0755, true);
+        }
+
+        file_put_contents($path, $content);
     }
 
     // =================================================================

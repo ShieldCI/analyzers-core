@@ -285,7 +285,7 @@ final class FilamentPanelDetector
             // parse. That is a recovery too, and a no-op when it is not.
             $this->recordRecovery($filePath);
 
-            return self::qualify(CodeHelper::extractNamespace($content), $className);
+            return self::qualify($content, $className);
         }
 
         return $this->recoverPanelProviderFromSource($filePath, $content);
@@ -343,7 +343,8 @@ final class FilamentPanelDetector
         // class name came from a regex rather than an AST.
         $this->recordRecovery($filePath);
 
-        return self::qualify(CodeHelper::extractNamespace($source), $matches[1]);
+        // The lexer reads the declaration from the original source, which need not parse
+        return self::qualify($content, $matches[1]);
     }
 
     /**
@@ -364,12 +365,21 @@ final class FilamentPanelDetector
     }
 
     /**
-     * Join a namespace and a class name, tolerating a file that declares no namespace.
+     * Qualify $className with the namespace that encloses its declaration in $content.
+     *
+     * Read by the lexer, so it works on a file that does not parse, takes the braced form and
+     * the namespace around this class rather than the file's first one, and ignores a
+     * declaration-shaped comment. Falls back to the file's first namespace when the lexer finds
+     * no such class, and to the bare name when there is no namespace either.
      */
-    private static function qualify(?string $namespace, string $className): string
+    private static function qualify(string $content, string $className): string
     {
-        return ($namespace === null || $namespace === '')
-            ? $className
-            : $namespace.'\\'.$className;
+        $declared = array_values(array_filter(
+            FileParser::extractClassLikesFromSource($content),
+            fn (array $classLike): bool => $classLike['kind'] === 'class'
+                && str_ends_with(strtolower('\\'.$classLike['name']), strtolower('\\'.$className))
+        ));
+
+        return $declared[0]['name'] ?? ltrim(FileParser::extractNamespaceFromSource($content).'\\'.$className, '\\');
     }
 }
