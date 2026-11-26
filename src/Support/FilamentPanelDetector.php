@@ -8,7 +8,8 @@ use PhpParser\Node\Stmt\Class_;
 use ShieldCI\AnalyzersCore\Contracts\RecordingParserInterface;
 
 /**
- * Whether an application has Filament installed, a panel provider written, and it registered.
+ * Whether an application has Filament installed, a panel provider written anywhere under
+ * app/Providers, and it registered.
  *
  * All three have to hold, and false says only "not all three". A provider that does not parse is
  * not one of the three: its class name is read straight out of the source instead, because
@@ -64,32 +65,13 @@ final class FilamentPanelDetector
             return false;
         }
 
-        // Laravel 11+ scaffolds panels into app/Providers/Filament; earlier layouts and hand
-        // written providers sit directly in app/Providers.
-        $searchPaths = [
-            $providersBaseDir.DIRECTORY_SEPARATOR.'Filament',
-            $providersBaseDir,
-        ];
-
         $foundPanelProviders = [];
 
-        foreach ($searchPaths as $searchPath) {
-            if (! is_dir($searchPath)) {
-                continue;
-            }
+        foreach (self::phpFilesUnder($providersBaseDir, $basePath) as $file) {
+            $panelProviderClass = $this->panelProviderClassName($file);
 
-            $files = glob($searchPath.DIRECTORY_SEPARATOR.'*.php');
-
-            if ($files === false || $files === []) {
-                continue;
-            }
-
-            foreach ($files as $file) {
-                $panelProviderClass = $this->panelProviderClassName($file);
-
-                if ($panelProviderClass !== null) {
-                    $foundPanelProviders[] = $panelProviderClass;
-                }
+            if ($panelProviderClass !== null) {
+                $foundPanelProviders[] = $panelProviderClass;
             }
         }
 
@@ -101,14 +83,166 @@ final class FilamentPanelDetector
     }
 
     /**
+     * Every .php file anywhere under $directory, sorted, for the project at $basePath.
+     *
+     * make:filament-panel writes to app/Providers/Filament, and older or hand-written providers
+     * sit in app/Providers itself, but nothing keeps an application from grouping its panels
+     * deeper -- and a registered provider missed there reads as "Filament not configured". Depth
+     * is cheap: panelProviderClassName() rejects most files on a string check before parsing.
+     *
+     * Links are followed, file and directory alike: a provider kept elsewhere and linked in is
+     * still registered. Each directory is entered once by its real path, so a link back up the
+     * tree ends the walk instead of extending it, and each file is kept once by its real path,
+     * under the first spelling a sorted walk reaches.
+     *
+     * Directory links are followed wherever they point -- a monorepo links shared panels in from
+     * outside the application -- with two exceptions, which mayEnter() states. A linked file is
+     * read wherever it points, since one file costs one read. A directory that cannot be listed
+     * is skipped, under a handler that swallows the warning so a host handler that throws on every
+     * warning cannot turn one locked directory into no verdict at all.
+     *
+     * @return list<string>
+     */
+    private static function phpFilesUnder(string $directory, string $basePath): array
+    {
+        $project = self::comparable(realpath($basePath) ?: $basePath);
+        $app = self::comparable(realpath($basePath.DIRECTORY_SEPARATOR.'app') ?: $basePath.DIRECTORY_SEPARATOR.'app');
+        $start = self::comparable(realpath($directory) ?: $directory);
+        /** @var array<string, string> $files */
+        $files = [];
+        $visited = [];
+
+        set_error_handler(static fn (): bool => true);
+
+        try {
+            self::collectPhpFiles($directory, $project, $app, $start, $visited, $files);
+        } finally {
+            restore_error_handler();
+        }
+
+        $paths = array_values($files);
+        sort($paths);
+
+        return $paths;
+    }
+
+    /**
+     * @param  string  $project  The project's real path, as comparable() spells it.
+     * @param  string  $app  The real path of the project's app/, as comparable() spells it.
+     * @param  string  $start  The real path the walk started from, as comparable() spells it.
+     * @param  array<string, true>  $visited  Real paths of the directories already entered.
+     * @param  array<string, string>  $files  Real path => the spelling it was first reached by.
+     */
+    private static function collectPhpFiles(string $directory, string $project, string $app, string $start, array &$visited, array &$files): void
+    {
+        $realDirectory = realpath($directory);
+
+        if ($realDirectory === false || isset($visited[$realDirectory]) || ! self::mayEnter($directory, $realDirectory, $project, $app, $start)) {
+            return;
+        }
+
+        $visited[$realDirectory] = true;
+
+        $entries = scandir($directory);
+
+        if ($entries === false) {
+            return;
+        }
+
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+
+            $path = $directory.DIRECTORY_SEPARATOR.$entry;
+
+            if (is_dir($path)) {
+                self::collectPhpFiles($path, $project, $app, $start, $visited, $files);
+
+                continue;
+            }
+
+            $realFile = realpath($path);
+
+            if (str_ends_with($entry, '.php') && is_file($path) && $realFile !== false && ! isset($files[$realFile])) {
+                $files[$realFile] = $path;
+            }
+        }
+    }
+
+    /**
+     * Whether the walk may enter $directory, really at $realDirectory.
+     *
+     * Not if it is the project, its app/, app/Providers' parent chain or anything above them: a
+     * link to the project root, to app/ or to / brings the whole project or the whole machine
+     * into range. app/ is named on its own because once app/Providers is a link out, app/ is no
+     * longer above the start.
+     * The directory the walk started from is the one exception, unless it is itself the project
+     * or above it, in which case there is nothing to walk.
+     *
+     * Not if it sits in vendor/ or node_modules/ either: dependencies are someone else's panels
+     * and a great many files. The leading segments a directory shares with the project's own
+     * path do not count, so a project checked out inside someone's vendor/ is still walked, and
+     * so are panels kept beside it there; whatever the directory adds below that shared prefix
+     * does count. The name the directory was reached by counts too, so a link called vendor is
+     * refused wherever it points.
+     *
+     * Both comparisons ignore case, since realpath() keeps whatever case it was given on a
+     * case-insensitive filesystem. On a case-sensitive one that refuses a directory differing
+     * from the project only in case, which is a cost worth paying.
+     */
+    private static function mayEnter(string $directory, string $realDirectory, string $project, string $app, string $start): bool
+    {
+        $real = self::comparable($realDirectory);
+
+        if (self::isSelfOrAncestor($real, $project) || self::isSelfOrAncestor($real, $app)
+            || ($real !== $start && self::isSelfOrAncestor($real, $start))) {
+            return false;
+        }
+
+        $segments = explode(DIRECTORY_SEPARATOR, $real);
+        $projectSegments = explode(DIRECTORY_SEPARATOR, $project);
+        $shared = 0;
+
+        while (isset($segments[$shared], $projectSegments[$shared]) && $segments[$shared] === $projectSegments[$shared]) {
+            $shared++;
+        }
+
+        $segments = array_slice($segments, $shared);
+        $segments[] = strtolower(basename($directory));
+
+        return array_intersect($segments, ['vendor', 'node_modules']) === [];
+    }
+
+    /**
+     * Whether $candidate is $path or a directory above it. Compared by whole segments, so
+     * '/app' is not above '/app-other' merely because it is a prefix of it.
+     */
+    private static function isSelfOrAncestor(string $candidate, string $path): bool
+    {
+        return $candidate === $path || str_starts_with($path, $candidate.DIRECTORY_SEPARATOR);
+    }
+
+    /**
+     * $path lower-cased and without a trailing separator, so '/' becomes '' and still prefixes
+     * every absolute path once a separator is appended.
+     */
+    private static function comparable(string $path): string
+    {
+        return strtolower(rtrim($path, DIRECTORY_SEPARATOR));
+    }
+
+    /**
      * Fully qualified class name of the panel provider in $filePath, or null if it is not one.
      */
     private function panelProviderClassName(string $filePath): ?string
     {
-        $content = file_get_contents($filePath);
+        // A file the walk can list but not read is no panel provider anyone can show, and
+        // reading it must not warn: a host handler that throws would cost the whole verdict.
+        $content = FileParser::readFile($filePath);
 
-        if ($content === false) {
-            return null; // @codeCoverageIgnore
+        if ($content === null) {
+            return null;
         }
 
         // Cheap gate before paying for a parse. Also the reason failure reporting here is
