@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ShieldCI\AnalyzersCore\Tests\Unit\Support;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use ShieldCI\AnalyzersCore\Enums\ParseFailureCause;
 use ShieldCI\AnalyzersCore\Support\AstParser;
@@ -423,6 +424,193 @@ PHP;
         $result = (new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir);
 
         $this->assertFalse($result);
+    }
+
+    public function test_is_filament_configured_rejects_another_class_with_the_panel_providers_short_name(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->writeUnregisteredAdminPanelProvider();
+
+        $this->writeBootstrapProviders(<<<'PHP'
+<?php
+
+return [
+    App\Support\AdminPanelProvider::class,
+];
+PHP);
+
+        $result = (new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir);
+
+        $this->assertFalse($result);
+    }
+
+    public function test_is_filament_configured_accepts_a_panel_provider_registered_through_an_import(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->writeUnregisteredAdminPanelProvider();
+
+        $this->writeBootstrapProviders(<<<'PHP'
+<?php
+
+use App\Providers\Filament\AdminPanelProvider;
+
+return [
+    AdminPanelProvider::class,
+];
+PHP);
+
+        $result = (new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir);
+
+        $this->assertTrue($result);
+    }
+
+    public function test_is_filament_configured_resolves_a_name_qualified_through_an_imported_namespace(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->writeUnregisteredAdminPanelProvider();
+
+        $this->writeBootstrapProviders(<<<'PHP'
+<?php use App\Providers\Filament; return [Filament\AdminPanelProvider::class];
+PHP);
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    public function test_is_filament_configured_reads_a_group_import_with_a_comment_inside(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->writeUnregisteredAdminPanelProvider();
+
+        $this->writeBootstrapProviders(<<<'PHP'
+<?php use App\Providers\{
+    // panels
+    Filament\AdminPanelProvider,
+}; return [AdminPanelProvider::class];
+PHP);
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    public function test_is_filament_configured_rejects_another_class_with_a_global_panel_providers_name(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+        file_put_contents(
+            $filamentDir.'/AdminPanelProvider.php',
+            '<?php class AdminPanelProvider extends \Filament\Panel\PanelProvider {}'
+        );
+
+        $this->writeBootstrapProviders('<?php return [App\Support\AdminPanelProvider::class];');
+
+        $this->assertFalse((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    #[DataProvider('panelProvidersWithAnAwkwardNamespace')]
+    public function test_is_filament_configured_qualifies_the_panel_provider_with_its_real_namespace(string $providerSource): void
+    {
+        $this->createComposerLock(['filament/filament']);
+
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+        file_put_contents($filamentDir.'/AdminPanelProvider.php', $providerSource);
+
+        $this->writeBootstrapProviders('<?php return [ App\Providers\Filament\AdminPanelProvider::class, ];');
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function panelProvidersWithAnAwkwardNamespace(): array
+    {
+        return [
+            'braced namespace' => [<<<'PHP'
+<?php namespace App\Providers\Filament { use Filament\PanelProvider; class AdminPanelProvider extends PanelProvider {} }
+PHP],
+            'declaration-shaped comment first' => [<<<'PHP'
+<?php // Generated: namespace Legacy;
+namespace App\Providers\Filament; use Filament\PanelProvider; class AdminPanelProvider extends PanelProvider {}
+PHP],
+            'braced namespace that does not parse' => [<<<'PHP'
+<?php namespace App\Providers\Filament { use Filament\PanelProvider; class AdminPanelProvider extends PanelProvider { public function panel( } }
+PHP],
+            'declaration-shaped comment first, does not parse' => [<<<'PHP'
+<?php // Generated: namespace Legacy;
+namespace App\Providers\Filament; use Filament\PanelProvider; class AdminPanelProvider extends PanelProvider { public function panel( }
+PHP],
+            'second of two namespaces' => [<<<'PHP'
+<?php
+namespace App\Support;
+class Helper {}
+namespace App\Providers\Filament;
+use Filament\PanelProvider;
+class AdminPanelProvider extends PanelProvider {}
+
+PHP],
+            'second of two braced namespaces' => [<<<'PHP'
+<?php namespace App\Support { class Helper {} } namespace App\Providers\Filament { use Filament\PanelProvider; class AdminPanelProvider extends PanelProvider {} }
+PHP],
+            'second of two braced namespaces, does not parse' => [<<<'PHP'
+<?php namespace App\Support { class Helper {} } namespace App\Providers\Filament { use Filament\PanelProvider; class AdminPanelProvider extends PanelProvider { public function panel( } }
+PHP],
+        ];
+    }
+
+    public function test_is_filament_configured_reads_a_quoted_registration_after_an_apostrophe_in_a_comment(): void
+    {
+        $this->createComposerLock(['filament/filament']);
+        $this->writeUnregisteredAdminPanelProvider();
+
+        $b = chr(92).chr(92);
+        mkdir($this->testDir.'/config', 0755, true);
+        file_put_contents($this->testDir.'/config/app.php', <<<PHP
+<?php
+
+use Illuminate\Support\Facades\Facade;
+use Illuminate\Support\ServiceProvider;
+
+return [
+
+    /*
+    | This value is the name of your application. This value is used when the
+    | framework needs to place the application's name in a notification or
+    | any other location as required by the application or its packages.
+    */
+
+    'name' => env('APP_NAME', 'Laravel'),
+
+    'providers' => ServiceProvider::defaultProviders()->merge([
+        'App{$b}Providers{$b}Filament{$b}AdminPanelProvider',
+    ])->toArray(),
+
+];
+PHP);
+
+        $this->assertTrue((new FilamentPanelDetector(new AstParser()))->isConfigured($this->testDir));
+    }
+
+    private function writeUnregisteredAdminPanelProvider(): void
+    {
+        $filamentDir = $this->testDir.'/app/Providers/Filament';
+        mkdir($filamentDir, 0755, true);
+        file_put_contents($filamentDir.'/AdminPanelProvider.php', <<<'PHP'
+<?php
+
+namespace App\Providers\Filament;
+
+class AdminPanelProvider extends \Filament\Panel\PanelProvider
+{
+}
+PHP);
+    }
+
+    private function writeBootstrapProviders(string $content): void
+    {
+        mkdir($this->testDir.'/bootstrap', 0755, true);
+        file_put_contents($this->testDir.'/bootstrap/providers.php', $content);
     }
 
     public function test_get_panel_provider_handles_unreadable_file(): void

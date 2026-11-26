@@ -181,23 +181,6 @@ class PackageDetector
     }
 
     /**
-     * Extract namespace from a PHP file.
-     *
-     * @param  string  $filePath  Path to PHP file
-     * @return string|null Namespace or null if not found
-     */
-    private static function extractNamespaceFromFile(string $filePath): ?string
-    {
-        $content = file_get_contents($filePath);
-
-        if ($content === false) {
-            return null; // @codeCoverageIgnore
-        }
-
-        return CodeHelper::extractNamespace($content);
-    }
-
-    /**
      * Check if a service provider is registered.
      *
      * Checks both Laravel 11+ (bootstrap/providers.php) and Laravel 10- (config/app.php).
@@ -238,26 +221,112 @@ class PackageDetector
     /**
      * Check if any provider class appears in the file content.
      *
+     * A namespaced provider counts when its fully qualified name appears anywhere in the file,
+     * in any letter case. Otherwise each `Name::class` and each quoted string in the file is
+     * resolved the way PHP resolves it, and the provider counts when one of them names it. A
+     * provider in the global namespace counts only through that resolution, so a longer name
+     * that merely ends in its short name does not.
+     *
      * @param  array<string>  $providerClasses  Fully qualified class names
      * @param  string  $content  File content
      * @return bool True if any provider class is found
      */
     private static function isAnyProviderInContent(array $providerClasses, string $content): bool
     {
+        $referenced = null;
+
         foreach ($providerClasses as $provider) {
-            // Check for fully qualified class name
-            if (str_contains($content, $provider)) {
+            $provider = ltrim($provider, '\\');
+
+            if (str_contains($provider, '\\') && stripos($content, $provider) !== false) {
                 return true;
             }
 
-            // Check for class name with ::class
-            $className = substr($provider, strrpos($provider, '\\') + 1);
-            if (str_contains($content, $className.'::class')) {
-                return true;
+            $referenced ??= self::referencedClasses($content);
+
+            foreach ($referenced as $class) {
+                if (strcasecmp($class, $provider) === 0) {
+                    return true;
+                }
             }
         }
 
         return false;
+    }
+
+    /**
+     * The fully qualified classes a file names through `Name::class` constants and quoted strings.
+     *
+     * Quoted strings are read from the lexer's tokens and are already fully qualified once
+     * their doubled backslashes are unescaped. `Name::class` references are read from the raw
+     * text, comments included. One with a leading backslash is fully qualified, and a
+     * `namespace\` prefix is relative to the file's namespace. Otherwise its first segment is
+     * replaced by the class or namespace a namespace-level `use` imports under that alias, or
+     * failing that the name is prefixed with the file's namespace. A file declaring several
+     * namespaces resolves the name against each of them, since the text does not say which
+     * one encloses it.
+     *
+     * @param  string  $content  File content
+     * @return array<string> Class names without a leading backslash
+     */
+    private static function referencedClasses(string $content): array
+    {
+        $classes = [];
+
+        // Quoted strings come from the lexer, so an apostrophe in a comment, heredoc or
+        // nowdoc cannot throw the quote pairing off.
+        foreach (@\PhpToken::tokenize($content) as $token) {
+            if ($token->id === T_CONSTANT_ENCAPSED_STRING) {
+                $classes[] = ltrim(str_replace('\\\\', '\\', substr($token->text, 1, -1)), '\\');
+            }
+        }
+
+        $segment = '[A-Za-z_\x80-\xff][\w\x80-\xff]*';
+
+        // A failed scan (a PCRE limit, say) finds no references here, but the strings above and
+        // the full-name match still answer
+        $names = preg_match_all(
+            '/(?<![\w\x80-\xff\\\\$])(\\\\?'.$segment.'(?:\\\\'.$segment.')*)\s*::\s*class\b/i',
+            $content,
+            $references
+        ) > 0 ? $references[1] : [];
+
+        if ($names === []) {
+            return $classes;
+        }
+
+        $imports = array_change_key_case(FileParser::extractImportsFromSource($content));
+
+        $namespaces = preg_match_all(
+            '/\bnamespace\s+('.$segment.'(?:\\\\'.$segment.')*)\s*[;{]/i',
+            FileParser::stripCommentsAndStrings($content),
+            $declared
+        ) > 0 ? $declared[1] : [''];
+
+        foreach ($names as $name) {
+            if (str_starts_with($name, '\\')) {
+                $classes[] = substr($name, 1);
+
+                continue;
+            }
+
+            $alias = explode('\\', $name, 2)[0];
+
+            if (strcasecmp($alias, 'namespace') === 0 && $alias !== $name) {
+                // `namespace\Foo` is relative to the current namespace, never to an import
+                $name = substr($name, strlen($alias) + 1);
+            } elseif (($import = $imports[strtolower($alias)] ?? null) !== null) {
+                $classes[] = $import.substr($name, strlen($alias));
+
+                continue;
+            }
+
+            foreach ($namespaces as $namespace) {
+                $classes[] = ltrim($namespace.'\\'.$name, '\\');
+            }
+        }
+
+        return $classes;
     }
 
     /**
@@ -364,16 +433,42 @@ class PackageDetector
             return false;
         }
 
-        // 4. Extract namespace from provider file to support custom application namespaces
-        $namespace = self::extractNamespaceFromFile($providerPath);
-
-        // Build fully qualified class name (fallback to App if namespace extraction fails)
-        $providerClass = $namespace
-            ? $namespace.'\\Providers\\HorizonServiceProvider'
-            : 'App\\Providers\\HorizonServiceProvider';
+        // 4. Qualify the class with the namespace around its declaration, so a custom
+        //    application namespace works
+        $providerClass = self::horizonProviderClass((string) @file_get_contents($providerPath));
 
         // 5. Provider must be registered
         return self::isServiceProviderRegistered($providerClass, $basePath);
+    }
+
+    /**
+     * The fully qualified name of the HorizonServiceProvider class declared in $source.
+     *
+     * The class is qualified with the namespace that encloses it. It is global only when PHP
+     * would see it so: the source opens with a real PHP tag and has no namespace statement at
+     * all. Anything less clear (an empty or unreadable file, a namespace statement the lexer
+     * cannot read, a class hidden in an unterminated comment, a short open tag PHP does not
+     * honour) falls back to the default App\Providers\HorizonServiceProvider.
+     */
+    private static function horizonProviderClass(string $source): string
+    {
+        foreach (FileParser::extractClassLikesFromSource($source) as $classLike) {
+            $name = $classLike['name'];
+
+            if ($classLike['kind'] !== 'class' || ! str_ends_with(strtolower('\\'.$name), '\\horizonserviceprovider')) {
+                continue;
+            }
+
+            $tokens = @\PhpToken::tokenize($source);
+            $global = array_filter($tokens, fn (\PhpToken $token): bool => $token->is(T_OPEN_TAG)) !== []
+                && array_filter($tokens, fn (\PhpToken $token): bool => $token->is(T_NAMESPACE)) === [];
+
+            if (str_contains($name, '\\') || $global) {
+                return $name;
+            }
+        }
+
+        return 'App\\Providers\\HorizonServiceProvider';
     }
 
     /**
